@@ -416,7 +416,12 @@ def get_stats_summary(start: datetime, end: datetime) -> dict:
     }
 
 
-def claim_ai_batch(object_types: list[str], parallel_limit: int, stale_minutes: int) -> list:
+def claim_ai_batch(
+    object_types: list[str],
+    parallel_limit: int,
+    stale_minutes: int,
+    max_age_hours: float | None = None,
+) -> list:
     # Replaces what used to be four separate n8n nodes (Reap Stale Processing Items, Count
     # In-Progress Items, Check Capacity, Claim Next Batch) with one call. Same FOR UPDATE SKIP
     # LOCKED race-safety as every other claim in this project.
@@ -436,20 +441,35 @@ def claim_ai_batch(object_types: list[str], parallel_limit: int, stale_minutes: 
     available_capacity = max(0, parallel_limit - in_progress)
     if available_capacity == 0:
         return []
+
+    # ORDER BY created_at DESC (not ASC) -- newest-eligible-first, one shared queue across every
+    # requested object_type (no separate car/person ordering). This is a deliberate priority
+    # inversion from a plain FIFO queue: when there are more eligible rows than capacity, the
+    # most recent ones win and older rows keep waiting; only once the backlog drops below
+    # available_capacity do older rows get swept up too (the LIMIT stops cutting them off). Bursty
+    # incoming traffic (e.g. a bunch of car events) then naturally deprioritizes stale backlog
+    # instead of processing strictly in arrival order.
+    age_clause = ""
+    params: list = [object_types]
+    if max_age_hours is not None:
+        age_clause = "AND created_at >= now() - (%s * interval '1 hour')"
+        params.append(max_age_hours)
+    params.append(available_capacity)
     return _execute(
-        """
+        f"""
         UPDATE yard_stats.raw_events
         SET ai_status = 'processing', ai_status_changed_at = now()
         WHERE id IN (
             SELECT id FROM yard_stats.raw_events
             WHERE objects = ANY(%s) AND crop_status = 'done' AND ai_status IN ('new', 'retry')
-            ORDER BY created_at ASC
+            {age_clause}
+            ORDER BY created_at DESC
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         )
         RETURNING *
         """,
-        (object_types, available_capacity),
+        params,
         fetch=True,
     )
 

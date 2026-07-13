@@ -159,14 +159,17 @@ def claim_ai_batch(
     object_types: str = Query("car,truck,person", description="Comma-separated Frigate object labels to claim"),
     parallel_limit: int = Query(3, ge=1, description="Max rows allowed ai_status='processing' at once"),
     stale_minutes: int = Query(5, ge=1, description="Reap rows stuck 'processing' longer than this"),
+    max_age_hours: float | None = Query(None, gt=0, description="If set, never claim rows older than this many hours -- lets a backlog age out instead of being processed once it's stale. Omit for no age limit (default)."),
 ):
     """Replaces n8n's old Reap Stale Processing Items / Count In-Progress Items / Check Capacity /
     Claim Next Batch nodes with one call: reaps stale rows, computes available capacity, and
-    atomically claims up to that many crop_status='done' rows of the given object types. `events`
-    is an empty list if there's no capacity or no work -- n8n Split Out's the array then loops
-    over whatever comes back."""
+    atomically claims up to that many crop_status='done' rows of the given object types, newest
+    first (one shared queue across all requested types, not claimed separately per type) --
+    older rows only get swept up once the backlog of newer ones drops below available capacity.
+    `events` is an empty list if there's no capacity or no work -- n8n Split Out's the array then
+    loops over whatever comes back."""
     types = [t.strip() for t in object_types.split(",") if t.strip()]
-    return {"events": db.claim_ai_batch(types, parallel_limit, stale_minutes)}
+    return {"events": db.claim_ai_batch(types, parallel_limit, stale_minutes, max_age_hours)}
 
 
 @app.post("/sightings/vehicles", response_model=schemas.SightingCreated, tags=["sightings"], dependencies=[Depends(require_api_key)])

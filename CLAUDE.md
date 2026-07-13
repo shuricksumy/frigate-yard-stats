@@ -74,11 +74,11 @@ Two independent queue state machines live on `raw_events` -- `crop_status`/`crop
 `crop_attempt_count` and `ai_status`/`ai_status_changed_at`/`ai_attempt_count` -- and
 `ingest-worker` now *mechanically executes both* (the crop-stage poll loop owns the first
 directly; the `/ai-queue/*` endpoints own the second on n8n's behalf). n8n still *decides policy*
-for the AI stage -- `parallel_limit`/`stale_minutes` are query params on `/ai-queue/claim` and
-`max_attempts` is a query param on `/ai-queue/{id}/fail`, all editable directly in those n8n HTTP
-Request nodes without touching `ingest-worker` code, the same "tune it here" spirit the old
-`Queue Config` node had. `ingest-worker` still never calls an LLM -- n8n still owns the actual VLM
-call and prompt; it just no longer runs raw SQL to do so.
+for the AI stage -- `parallel_limit`/`stale_minutes`/`max_age_hours` are query params on
+`/ai-queue/claim` and `max_attempts` is a query param on `/ai-queue/{id}/fail`, all editable
+directly in those n8n HTTP Request nodes without touching `ingest-worker` code, the same "tune it
+here" spirit the old `Queue Config` node had. `ingest-worker` still never calls an LLM -- n8n
+still owns the actual VLM call and prompt; it just no longer runs raw SQL to do so.
 
 Both stages use the same shape: `new` (not picked up) → `processing` (claimed, work in flight) →
 `retry` (crashed/reaped, or errored below that stage's attempt cap) → `failed` (errored at/above
@@ -128,7 +128,14 @@ per table, and only actually deletes when `confirm=true` is passed explicitly.
 `POST /ai-queue/claim` folds reap-stale + count-in-progress + claim-next-batch into one call
 (`db.claim_ai_batch`), returning `{events: [...]}` -- n8n Split Out's that array into items before
 looping (an HTTP node's raw JSON-array response doesn't reliably auto-split into n8n items across
-versions, so this is explicit rather than relied-upon). `POST /sightings/vehicles` and
+versions, so this is explicit rather than relied-upon). It's one shared queue across every
+requested `object_types` (never claimed separately per type) ordered newest-`created_at`-first --
+when eligible rows outnumber available capacity, older ones simply keep waiting rather than
+being processed strictly in arrival order, and only get swept up once the backlog of newer rows
+drops below capacity. The optional `max_age_hours` param goes further: rows older than that cutoff
+are never claimed at all (they stay `ai_status='new'` indefinitely), a throughput safety valve for
+when incoming events outpace analysis capacity and stale backlog isn't worth spending capacity on.
+`POST /sightings/vehicles` and
 `POST /sightings/persons` insert the sighting and mark `ai_status='done'` in one DB transaction
 (`db.complete_vehicle_sighting`/`complete_person_sighting`, temporarily flipping the module
 connection to `autocommit=False`) -- this closes a small gap the old two-Postgres-node version had,
