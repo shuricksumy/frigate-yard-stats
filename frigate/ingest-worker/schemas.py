@@ -32,6 +32,9 @@ class VehicleSighting(BaseModel):
     body_type: str | None
     make_guess: str | None
     make_confidence: str | None
+    model_guess: str | None
+    model_confidence: str | None
+    notable_features: str | None
     plate_text_llm: str | None
     plate_text_frigate: str | None
     plate_confidence: str | None
@@ -89,6 +92,9 @@ class VehicleSightingCreate(BaseModel):
     body_type: str | None = None
     make_guess: str | None = None
     make_confidence: str | None = None
+    model_guess: str | None = None
+    model_confidence: str | None = None
+    notable_features: str | None = None
     plate_text_llm: str | None = None
     plate_text_frigate: str | None = None
     plate_confidence: str | None = None

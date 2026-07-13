@@ -70,6 +70,9 @@ CREATE TABLE IF NOT EXISTS yard_stats.vehicle_sightings (
   body_type TEXT,
   make_guess TEXT,
   make_confidence TEXT,
+  model_guess TEXT,
+  model_confidence TEXT,
+  notable_features TEXT,
   plate_text_llm TEXT,
   plate_text_frigate TEXT,
   plate_confidence TEXT,
@@ -77,6 +80,11 @@ CREATE TABLE IF NOT EXISTS yard_stats.vehicle_sightings (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_vehicle_sightings_raw_event ON yard_stats.vehicle_sightings (raw_event_id);
+-- ADD COLUMN IF NOT EXISTS instead of relying on CREATE TABLE IF NOT EXISTS above, since this
+-- schema.sql reapplies on every ingest-worker startup against already-existing tables.
+ALTER TABLE yard_stats.vehicle_sightings ADD COLUMN IF NOT EXISTS model_guess TEXT;
+ALTER TABLE yard_stats.vehicle_sightings ADD COLUMN IF NOT EXISTS model_confidence TEXT;
+ALTER TABLE yard_stats.vehicle_sightings ADD COLUMN IF NOT EXISTS notable_features TEXT;
 
 CREATE TABLE IF NOT EXISTS yard_stats.person_sightings (
   id SERIAL PRIMARY KEY,

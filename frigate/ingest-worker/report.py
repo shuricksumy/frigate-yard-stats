@@ -47,7 +47,8 @@ def generate_report(start: datetime, end: datetime) -> dict:
         f"<tr><td>{_img_cell(c['crop_image_base64'], lightboxes, counter)}</td>"
         f"<td>{_fmt_time(c['start_ts'])}</td><td>{_esc(c['camera'])}</td>"
         f"<td>{_esc(c['color'])}</td><td>{_esc(c['body_type'])}</td>"
-        f"<td>{_esc(c['make_guess'])}</td><td>{_esc(c['plate_text_llm'])}</td>"
+        f"<td>{_esc(c['make_guess'])}</td><td>{_esc(c['model_guess'])}</td>"
+        f"<td>{_esc(c['notable_features'])}</td><td>{_esc(c['plate_text_llm'])}</td>"
         f"<td>{_esc(c['plate_text_frigate'])}</td></tr>"
         for c in cars
     )
@@ -74,8 +75,8 @@ tr:nth-child(even){{background:#f7f7f7;}}
 <h1>Yard Stats Report</h1>
 <div class="summary"><b>{len(cars)}</b> vehicle sighting(s), <b>{len(persons)}</b> person sighting(s) from {_fmt_time(start)} to {_fmt_time(end)}.</div>
 <h2>Vehicles ({len(cars)})</h2>
-<table><tr><th>Image</th><th>Time</th><th>Camera</th><th>Color</th><th>Body Type</th><th>Make</th><th>Plate (VLM)</th><th>Plate (Frigate)</th></tr>
-{car_rows or '<tr><td colspan="8">No vehicle sightings.</td></tr>'}
+<table><tr><th>Image</th><th>Time</th><th>Camera</th><th>Color</th><th>Body Type</th><th>Make</th><th>Model</th><th>Notable Features</th><th>Plate (VLM)</th><th>Plate (Frigate)</th></tr>
+{car_rows or '<tr><td colspan="10">No vehicle sightings.</td></tr>'}
 </table>
 <h2>Persons ({len(persons)})</h2>
 <table><tr><th>Image</th><th>Time</th><th>Camera</th><th>Description</th></tr>

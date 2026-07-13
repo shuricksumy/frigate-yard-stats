@@ -179,6 +179,62 @@ def run_retention_cleanup(retention_months: int) -> None:
     logger.info("Retention cleanup applied (retention_months=%s)", retention_months)
 
 
+def purge_older_than(cutoff: datetime, execute: bool) -> dict:
+    # Ad-hoc counterpart to run_retention_cleanup above -- same FK-safe child-before-parent
+    # delete order, but keyed on a caller-supplied cutoff timestamp instead of the fixed
+    # config.RETENTION_MONTHS, and always counts first so a dry run (execute=False) and a real
+    # run report the identical shape of result.
+    counts = {
+        "vehicle_sightings": _execute(
+            """
+            SELECT count(*)::int AS c FROM yard_stats.vehicle_sightings vs
+            JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
+            WHERE re.start_ts < %s
+            """,
+            (cutoff,), fetch=True,
+        )[0]["c"],
+        "person_sightings": _execute(
+            """
+            SELECT count(*)::int AS c FROM yard_stats.person_sightings ps
+            JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
+            WHERE re.start_ts < %s
+            """,
+            (cutoff,), fetch=True,
+        )[0]["c"],
+        "visits": _execute(
+            "SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s",
+            (cutoff,), fetch=True,
+        )[0]["c"],
+        "raw_events": _execute(
+            "SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE start_ts < %s",
+            (cutoff,), fetch=True,
+        )[0]["c"],
+    }
+
+    if execute:
+        _execute(
+            """
+            DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id IN (
+                SELECT id FROM yard_stats.raw_events WHERE start_ts < %s
+            )
+            """,
+            (cutoff,),
+        )
+        _execute(
+            """
+            DELETE FROM yard_stats.person_sightings WHERE raw_event_id IN (
+                SELECT id FROM yard_stats.raw_events WHERE start_ts < %s
+            )
+            """,
+            (cutoff,),
+        )
+        _execute("DELETE FROM yard_stats.visits WHERE start_ts < %s", (cutoff,))
+        _execute("DELETE FROM yard_stats.raw_events WHERE start_ts < %s", (cutoff,))
+        logger.info("Ad-hoc purge executed (cutoff=%s, counts=%s)", cutoff, counts)
+
+    return counts
+
+
 def list_events(
     object_type: str | None = None,
     camera: str | None = None,
@@ -254,6 +310,7 @@ def get_vehicle_sightings(
         f"""
         SELECT vs.id, vs.raw_event_id, re.camera, re.zone, re.start_ts,
                vs.color, vs.body_type, vs.make_guess, vs.make_confidence,
+               vs.model_guess, vs.model_confidence, vs.notable_features,
                vs.plate_text_llm, vs.plate_text_frigate, vs.plate_confidence, vs.notes
         FROM yard_stats.vehicle_sightings vs
         JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
@@ -403,6 +460,9 @@ def complete_vehicle_sighting(
     body_type: str | None,
     make_guess: str | None,
     make_confidence: str | None,
+    model_guess: str | None,
+    model_confidence: str | None,
+    notable_features: str | None,
     plate_text_llm: str | None,
     plate_text_frigate: str | None,
     plate_confidence: str | None,
@@ -419,11 +479,13 @@ def complete_vehicle_sighting(
                 """
                 INSERT INTO yard_stats.vehicle_sightings
                     (raw_event_id, color, body_type, make_guess, make_confidence,
+                     model_guess, model_confidence, notable_features,
                      plate_text_llm, plate_text_frigate, plate_confidence, notes)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 RETURNING id
                 """,
                 (raw_event_id, color, body_type, make_guess, make_confidence,
+                 model_guess, model_confidence, notable_features,
                  plate_text_llm, plate_text_frigate, plate_confidence, notes),
             )
             sighting_id = cur.fetchone()["id"]
@@ -491,6 +553,7 @@ def get_report_data(start: datetime, end: datetime) -> dict:
         """
         SELECT re.camera, re.zone, re.start_ts, re.crop_image_base64,
                vs.color, vs.body_type, vs.make_guess, vs.make_confidence,
+               vs.model_guess, vs.model_confidence, vs.notable_features,
                vs.plate_text_llm, vs.plate_text_frigate, vs.notes
         FROM yard_stats.vehicle_sightings vs
         JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id

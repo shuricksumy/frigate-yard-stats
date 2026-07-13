@@ -16,7 +16,8 @@ app = FastAPI(
         "mechanics (claim/complete/fail) n8n's Metadata Processor calls. /health, /status, "
         "/crop/{id}, /retention/run are unauthenticated admin/debug endpoints for manual testing "
         "-- not part of the normal pipeline. Everything under /events, /sightings, /stats, "
-        "/reports, /ai-queue requires an X-API-Key header (use the Authorize button below). "
+        "/reports, /ai-queue, /retention/purge requires an X-API-Key header (use the Authorize "
+        "button below). "
         "ingest-worker never calls an LLM itself -- the actual VLM call and prompt still live in "
         "n8n; this only executes the claim/retry-with-cap mechanics and stores whatever result "
         "n8n posts back. Swagger UI at /docs, ReDoc at /redoc."
@@ -59,6 +60,22 @@ def run_retention_now():
     """Manually trigger the same retention sweep the poll loop runs on its own schedule."""
     db.run_retention_cleanup(config.RETENTION_MONTHS)
     return {"retention_months": config.RETENTION_MONTHS, "ran": True}
+
+
+@app.post("/retention/purge", tags=["retention"], dependencies=[Depends(require_api_key)])
+def purge_old_records(
+    older_than_days: int = Query(..., ge=1, description="Delete raw_events (and their dependent sightings/visits) with start_ts older than this many days"),
+    confirm: bool = Query(False, description="Must be true to actually delete. Omitted/false previews counts only -- no rows are removed"),
+):
+    """Ad-hoc bulk purge with a caller-chosen cutoff, independent of the scheduled
+    RETENTION_MONTHS sweep -- e.g. to clear out a backlog of old test data or reclaim space sooner
+    than the configured retention window. Unlike /retention/run, the cutoff here is
+    caller-controlled and the delete has no undo, so this requires X-API-Key and defaults to a
+    dry run: call once without confirm=true to see how many rows of each type would be deleted,
+    then again with confirm=true to actually delete them."""
+    cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+    counts = db.purge_older_than(cutoff, execute=confirm)
+    return {"cutoff": cutoff, "dry_run": not confirm, "counts": counts}
 
 
 @app.get("/events", response_model=list[schemas.EventSummary], tags=["events"], dependencies=[Depends(require_api_key)])
@@ -158,7 +175,8 @@ def create_vehicle_sighting(sighting: schemas.VehicleSightingCreate):
     -- replaces the old Insert Vehicle Sighting + Mark Done pair of n8n Postgres nodes."""
     sighting_id = db.complete_vehicle_sighting(
         sighting.raw_event_id, sighting.color, sighting.body_type, sighting.make_guess,
-        sighting.make_confidence, sighting.plate_text_llm, sighting.plate_text_frigate,
+        sighting.make_confidence, sighting.model_guess, sighting.model_confidence,
+        sighting.notable_features, sighting.plate_text_llm, sighting.plate_text_frigate,
         sighting.plate_confidence, sighting.notes,
     )
     return {"id": sighting_id, "ai_status": "done"}

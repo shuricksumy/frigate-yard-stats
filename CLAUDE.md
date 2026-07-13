@@ -111,12 +111,19 @@ overlapping runs (multiple n8n executions, or this service's own poll loop).
 
 `ingest-worker`'s FastAPI app has two tiers: `/health`, `/status`, `/crop/{id}`, `/retention/run`
 are unauthenticated admin/debug endpoints (unchanged since the original split). Everything else --
-`/events`, `/sightings/vehicles`, `/sightings/persons`, `/stats/summary`, `/reports/generate`, and
-`/ai-queue/claim` / `/ai-queue/{id}/fail` -- requires an `X-API-Key` header (`config.API_KEY`)
-since they expose queryable sighting data (including plate text) and mutate the AI-stage queue
-over the network. `ingest-worker` never calls an LLM to serve any of these — the write endpoints
-just execute the claim/insert/retry mechanics; the VLM call and prompt still live entirely in
-n8n, which posts the result back.
+`/events`, `/sightings/vehicles`, `/sightings/persons`, `/stats/summary`, `/reports/generate`,
+`/ai-queue/claim` / `/ai-queue/{id}/fail`, and `/retention/purge` -- requires an `X-API-Key` header
+(`config.API_KEY`) since they expose queryable sighting data (including plate text), mutate the
+AI-stage queue, or bulk-delete rows over the network. `ingest-worker` never calls an LLM to serve
+any of these — the write endpoints just execute the claim/insert/retry/delete mechanics; the VLM
+call and prompt still live entirely in n8n, which posts the result back.
+
+`POST /retention/purge` is an ad-hoc counterpart to the scheduled `RETENTION_MONTHS` sweep
+(`db.purge_older_than`, same FK-safe child-before-parent delete order as
+`db.run_retention_cleanup`) for when you want to purge on a caller-chosen cutoff rather than
+waiting on or reconfiguring the scheduled one -- e.g. clearing out old test data. Defaults to a
+dry run (`confirm` query param defaults to `false`): it always returns counts of matching rows
+per table, and only actually deletes when `confirm=true` is passed explicitly.
 
 `POST /ai-queue/claim` folds reap-stale + count-in-progress + claim-next-batch into one call
 (`db.claim_ai_batch`), returning `{events: [...]}` -- n8n Split Out's that array into items before
