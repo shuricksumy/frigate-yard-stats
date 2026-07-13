@@ -1,0 +1,146 @@
+{
+  "name": "Yard Stats: Q&A",
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Ask Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [250, 300],
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "yard-stats-ask",
+        "responseMode": "responseNode",
+        "options": {}
+      }
+    },
+    {
+      "id": "2",
+      "name": "Query Recent Car Sightings (API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [450, 300],
+      "alwaysOutputData": true,
+      "notes": "Replaces a direct Postgres query -- ingest-worker's GET /sightings/vehicles already returns exactly this shape (most-recent-first, same fields), no SQL needed here anymore. alwaysOutputData keeps the workflow going even on a zero-row response.",
+      "notesInFlow": true,
+      "parameters": {
+        "method": "GET",
+        "url": "http://REPLACE_WITH_INGEST_WORKER_HOST:REPLACE_WITH_INGEST_WORKER_PORT/sightings/vehicles",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [{ "name": "limit", "value": "200" }]
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "ingest-worker API Key"
+        }
+      }
+    },
+    {
+      "id": "3",
+      "name": "Query Recent Person Sightings (API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [650, 300],
+      "alwaysOutputData": true,
+      "notes": "Replaces a direct Postgres query -- ingest-worker's GET /sightings/persons already returns exactly this shape. alwaysOutputData keeps the workflow going even on a zero-row response.",
+      "notesInFlow": true,
+      "parameters": {
+        "method": "GET",
+        "url": "http://REPLACE_WITH_INGEST_WORKER_HOST:REPLACE_WITH_INGEST_WORKER_PORT/sightings/persons",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [{ "name": "limit", "value": "200" }]
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "ingest-worker API Key"
+        }
+      }
+    },
+    {
+      "id": "4",
+      "name": "Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [850, 300],
+      "parameters": {
+        "jsCode": "// Only ever pulls from vehicle_sightings/person_sightings (via ingest-worker's\n// /sightings/* API) -- rows only exist there once a raw event was cropped and analyzed\n// by the VLM, so the agent can only ever answer from genuinely analyzed events.\nconst isReal = (o) => o && Object.keys(o).length > 0;\n\n// Defensive against either shape an HTTP node can produce for a JSON-array response: one item\n// per array element (most n8n versions auto-split this), or one item whose json IS the array.\nfunction collectRows(nodeName) {\n  const items = $(nodeName).all();\n  if (items.length === 1 && Array.isArray(items[0].json)) {\n    return items[0].json.filter(isReal);\n  }\n  return items.map((i) => i.json).filter(isReal);\n}\n\nconst cars = collectRows('Query Recent Car Sightings (API)');\nconst persons = collectRows('Query Recent Person Sightings (API)');\n\nconst webhookJson = $('Ask Webhook').first().json;\nconst body = webhookJson.body ?? webhookJson;\nconst question = (body.question ?? '').toString().trim();\n\nfunction fmtTime(ts) {\n  return new Date(ts).toLocaleString('en-GB', { timeZone: 'UTC' }) + ' UTC';\n}\n\nconst carLines = cars.map((c) => `- ${fmtTime(c.start_ts)} camera=${c.camera} color=${c.color ?? '?'} body=${c.body_type ?? '?'} make=${c.make_guess ?? '?'} plate=${c.plate_text_llm || c.plate_text_frigate || '?'}`);\nconst personLines = persons.map((p) => `- ${fmtTime(p.start_ts)} camera=${p.camera} description=\"${p.description}\"`);\n\nconst context = [\n  `Vehicle sightings (${cars.length}, most recent first):`,\n  ...(carLines.length ? carLines : ['(none)']),\n  '',\n  `Person sightings (${persons.length}, most recent first):`,\n  ...(personLines.length ? personLines : ['(none)']),\n].join('\\n');\n\nreturn [{ json: { question, context } }];"
+      }
+    },
+    {
+      "id": "5",
+      "name": "Ask Qwen",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [850, 300],
+      "onError": "continueErrorOutput",
+      "parameters": {
+        "method": "POST",
+        "url": "http://REPLACE_WITH_VLM_HOST:REPLACE_WITH_VLM_PORT/spare/v1/chat/completions",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"messages\": [ { \"role\": \"system\", \"content\": \"You are a helpful assistant answering questions about home security camera activity for a monitored yard/driveway (Frigate NVR). You can ONLY answer using the event data given in the user's message -- these are events that had a persisted clip in Frigate, were cropped, and analyzed by an AI vision model. Do not speculate beyond this data. If the answer isn't in the provided data, say so clearly rather than guessing.\" }, { \"role\": \"user\", \"content\": \"Recent analyzed events:\\n\\n\" + $json.context + \"\\n\\nQuestion: \" + $json.question } ], \"temperature\": 0.2 } }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "6",
+      "name": "Parse Answer",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1050, 300],
+      "parameters": {
+        "jsCode": "let answer;\ntry {\n  answer = $input.first().json.choices?.[0]?.message?.content?.trim();\n} catch (err) {\n  answer = null;\n}\nif (!answer) {\n  answer = 'Sorry, I could not get an answer right now (the LLM call failed or returned no content).';\n}\n\nreturn [{ json: { answer } }];"
+      }
+    },
+    {
+      "id": "7",
+      "name": "Respond",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [1250, 300],
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ { \"answer\": $json.answer } }}"
+      }
+    }
+  ],
+  "connections": {
+    "Ask Webhook": {
+      "main": [[{ "node": "Query Recent Car Sightings (API)", "type": "main", "index": 0 }]]
+    },
+    "Query Recent Car Sightings (API)": {
+      "main": [[{ "node": "Query Recent Person Sightings (API)", "type": "main", "index": 0 }]]
+    },
+    "Query Recent Person Sightings (API)": {
+      "main": [[{ "node": "Build Prompt", "type": "main", "index": 0 }]]
+    },
+    "Build Prompt": {
+      "main": [[{ "node": "Ask Qwen", "type": "main", "index": 0 }]]
+    },
+    "Ask Qwen": {
+      "main": [
+        [{ "node": "Parse Answer", "type": "main", "index": 0 }],
+        [{ "node": "Parse Answer", "type": "main", "index": 0 }]
+      ]
+    },
+    "Parse Answer": {
+      "main": [[{ "node": "Respond", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

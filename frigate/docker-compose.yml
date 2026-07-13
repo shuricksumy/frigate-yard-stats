@@ -1,0 +1,151 @@
+# One file, two independent stacks that still deploy to two different hosts -- Compose profiles
+# keep them from starting on the wrong host by accident (a bare `docker compose up -d` with no
+# profile starts nothing). On the n8n/Flowise host: `docker compose --profile pipeline up -d`.
+# On the Frigate/camera host: `docker compose --profile nvr up -d`. Same shared `.env` on both
+# (see .env.example) -- each service only reads the environment variables it references.
+networks:
+  # Shared network name/convention used on both hosts (each host creates its own local instance
+  # of "npm_proxy" -- these are two separate networks that happen to share a name, not one
+  # network spanning hosts). Pipeline services join it too so they're reachable the same way
+  # n8n/other containers on that host already are.
+  npm_proxy:
+    name: npm_proxy
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.111.0.0/24
+  # Frigate NVR host network.
+  hassio:
+    external: true
+
+services:
+  # -------------------------------------------------
+  # Pipeline (n8n/Flowise host): postgres-projects + ingest-worker
+  # -------------------------------------------------
+  postgres-projects:
+    profiles: ["pipeline"]
+    image: postgres:16
+    container_name: postgres-projects
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: n8n_projects
+      POSTGRES_PASSWORD: ${POSTGRES_PROJECTS_PASSWORD}
+      POSTGRES_DB: home_automation
+    volumes:
+      - ./postgres-projects/data:/var/lib/postgresql/data
+      # No init-script mount -- ingest-worker applies schema.sql itself on every startup
+      # (idempotent CREATE ... IF NOT EXISTS), which is more reliable than initdb's
+      # "only runs on a brand new empty volume" behavior.
+    networks:
+      - npm_proxy
+    # no ports: exposed externally — n8n reaches it over the internal docker network only
+
+  ingest-worker:
+    profiles: ["pipeline"]
+    # Pulled from GHCR (built by .github/workflows/ingest-worker-image.yml on every push to
+    # frigate/ingest-worker/**). Override with `build: ./ingest-worker` instead for local dev.
+    image: ghcr.io/shuricksumy/frigate-yard-stats/ingest-worker:${INGEST_WORKER_IMAGE_TAG:-latest}
+    container_name: ingest-worker
+    restart: unless-stopped
+    environment:
+      MQTT_HOST: ${MQTT_HOST}
+      MQTT_PORT: ${MQTT_PORT:-1883}
+      MQTT_USERNAME: ${MQTT_USERNAME}
+      MQTT_PASSWORD: ${MQTT_PASSWORD}
+      POSTGRES_HOST: postgres-projects
+      POSTGRES_DB: home_automation
+      POSTGRES_USER: n8n_projects
+      POSTGRES_PASSWORD: ${POSTGRES_PROJECTS_PASSWORD}
+      FRIGATE_API_BASE: ${FRIGATE_API_BASE}
+      # Full-res record-stream resolution -- confirmed via `ffmpeg -i rtsp://127.0.0.1:8554/out`
+      # on the Frigate host (both outside/outside2 record streams are 3840x2160).
+      RECORD_WIDTH: ${RECORD_WIDTH:-3840}
+      RECORD_HEIGHT: ${RECORD_HEIGHT:-2160}
+      # Crop tuning -- MAX_CROP_DIMENSION caps the cropped JPEG's long side (VLMs downsample
+      # beyond this anyway); CROP_PADDING_PCT is extra margin around Frigate's `region` box.
+      MAX_CROP_DIMENSION: ${MAX_CROP_DIMENSION:-1280}
+      CROP_PADDING_PCT: ${CROP_PADDING_PCT:-0.2}
+      # Queue tuning -- how many events may be crop_status='processing' at once, how long
+      # before a stuck one is reclaimed, how many crop failures before giving up on an event,
+      # and how often the poll loop checks for new work.
+      PARALLEL_LIMIT: ${PARALLEL_LIMIT:-2}
+      STALE_MINUTES: ${STALE_MINUTES:-5}
+      MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-5}
+      # How long to keep data before it's deleted, and how often to check.
+      RETENTION_MONTHS: ${RETENTION_MONTHS:-12}
+      RETENTION_CHECK_INTERVAL_SECONDS: ${RETENTION_CHECK_INTERVAL_SECONDS:-86400}
+      API_PORT: ${INGEST_WORKER_API_PORT:-8080}
+      # Required on /events, /sightings, /stats, /reports (X-API-Key header) -- NOT on
+      # /health, /status, /crop/{id}, /retention/run, which stay unauthenticated.
+      API_KEY: ${API_KEY}
+    ports:
+      # Admin/debug endpoints (unauthenticated) plus the read/query/report API (X-API-Key
+      # required) -- Swagger UI at /docs, ReDoc at /redoc. Not used by the normal pipeline
+      # (MQTT in, Postgres out, poll loop) -- purely for manual testing and for n8n to call.
+      - "${INGEST_WORKER_API_PORT:-8080}:${INGEST_WORKER_API_PORT:-8080}"
+    depends_on:
+      - postgres-projects
+    networks:
+      - npm_proxy
+
+  # -------------------------------------------------
+  # Frigate NVR stack (the Frigate/camera host)
+  # -------------------------------------------------
+  frigate:
+    profiles: ["nvr"]
+    container_name: frigate
+    restart: unless-stopped
+    image: ghcr.io/blakeblackshear/frigate:0.17.2
+    #pull_policy: always
+    shm_size: "600mb" # update for your cameras based on calculation above
+    devices:
+      - /dev/dri
+      #- /dev/dri:/dev/dri
+      - /dev/bus/usb:/dev/bus/usb  # Passes the USB Coral, needs to be modified for other versions
+     # - /dev/apex_0:/dev/apex_0    # Passes a PCIe Coral, follow driver instructions here https://coral.ai/docs/m2/get-started/#2a-on-linux
+     # - /dev/video11:/dev/video11  # For Raspberry Pi 4B
+      - /dev/dri/renderD128 # For intel hwaccel, needs to be updated for your hardware
+      - /dev/dri/card0 # for intel hwaccel, needs to be updated for your hardware
+    volumes:
+      - /etc/localtime:/etc/localtime:ro
+      - /home/hassio/homeassistant/frigate/config:/config
+      - /video/frigate:/media/frigate
+      - type: tmpfs # Optional: 1GB of memory, reduces SSD/SD Card wear
+        target: /tmp/cache
+        tmpfs:
+          size: 1000000000
+    # MODELS
+      - /home/hassio/homeassistant/frigate/frigate-plugins/edgetpu_tfl.py:/opt/frigate/frigate/detectors/plugins/edgetpu_tfl.py:ro
+      - /home/hassio/homeassistant/frigate/frigate-plugins/labels-coco17.txt:/opt/frigate/models/labels-coco17.txt:ro
+      - /home/hassio/homeassistant/frigate/frigate-plugins/yolov9-s-relu6-best_320_int8_edgetpu.tflite:/opt/frigate/models/yolov9-s-relu6-best_320_int8_edgetpu.tflite:ro
+      - /home/hassio/homeassistant/frigate/frigate-plugins/yolov9-s-relu6-tpumax_320_int8_edgetpu.tflite:/opt/frigate/models/yolov9-s-relu6-tpumax_320_int8_edgetpu.tflite:ro
+      - /home/hassio/homeassistant/frigate/frigate-plugins/yolov9-s-relu6-tpumax_512_int8_edgetpu.tflite:/opt/frigate/models/yolov9-s-relu6-tpumax_512_int8_edgetpu.tflite:ro
+      - /home/hassio/homeassistant/frigate/frigate-plugins/yolov9-s-hardswish-tpumax_320_int8_edgetpu.tflite:/opt/frigate/models/yolov9-s-hardswish-tpumax_320_int8_edgetpu.tflite:ro
+    cap_add:
+      - CAP_PERFMON
+    networks:
+      - npm_proxy
+      - hassio
+    ports:
+      - 1984:1984
+      - 5000:5000
+#      - 8554:8554/tcp
+#      - 8554:8554/udp
+#      - 8555:8555/tcp
+#      - 8555:8555/udp
+#      - "${FRIGATE_HOST_IP}:5000:5000"
+      - "${FRIGATE_HOST_IP}:8554:8554/tcp" # RTSP feeds
+      - "${FRIGATE_HOST_IP}:8554:8554/udp" # RTSP feeds
+      - "${FRIGATE_HOST_IP}:8555:8555/tcp" # WebRTC over tcp
+      - "${FRIGATE_HOST_IP}:8555:8555/udp" # WebRTC over udp
+
+    environment:
+      FRIGATE_MQTT_PASSWORD: ${FRIGATE_MQTT_PASSWORD}
+      FRIGATE_RTSP_PASSWORD: ${FRIGATE_RTSP_PASSWORD}
+      # Referenced by frigate.conf's {FRIGATE_MQTT_HOST}/{FRIGATE_CAM1_IP}/{FRIGATE_CAM2_IP}
+      # template vars -- Frigate substitutes these from its own container environment.
+      FRIGATE_MQTT_HOST: ${FRIGATE_MQTT_HOST}
+      FRIGATE_CAM1_IP: ${FRIGATE_CAM1_IP}
+      FRIGATE_CAM2_IP: ${FRIGATE_CAM2_IP}
+      # LIBVA_DRIVER_NAME: i965

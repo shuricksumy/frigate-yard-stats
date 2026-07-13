@@ -1,0 +1,122 @@
+{
+  "name": "Yard Stats: Daily Report",
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Daily at 7am",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [250, 300],
+      "parameters": {
+        "rule": {
+          "interval": [{ "field": "days", "triggerAtHour": 7 }]
+        }
+      }
+    },
+    {
+      "id": "2",
+      "name": "Call Report API",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [450, 300],
+      "notes": "ingest-worker now owns the query + HTML-building logic (report.py) -- this replaces what used to be two Postgres query nodes plus a Build Report Code node here. Also fixes the report-size problem: report.py generates a small on-the-fly thumbnail per row instead of embedding the full-quality crop_image_base64 twice (once for the visible thumbnail, once again in the lightbox), which is what blew a 2-hour window up to 42MB.",
+      "notesInFlow": true,
+      "parameters": {
+        "method": "GET",
+        "url": "http://REPLACE_WITH_INGEST_WORKER_HOST:REPLACE_WITH_INGEST_WORKER_PORT/reports/generate",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [{ "name": "hours", "value": "24" }]
+        },
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "ingest-worker API Key"
+        }
+      }
+    },
+    {
+      "id": "7",
+      "name": "Convert Report to File",
+      "type": "n8n-nodes-base.convertToFile",
+      "typeVersion": 1.1,
+      "position": [1050, 300],
+      "parameters": {
+        "operation": "toText",
+        "sourceProperty": "html",
+        "options": {
+          "fileName": "yard-stats-daily-report.html",
+          "mimeType": "text/html"
+        }
+      }
+    },
+    {
+      "id": "5",
+      "name": "Send Email",
+      "type": "n8n-nodes-base.emailSend",
+      "typeVersion": 2.1,
+      "position": [1250, 200],
+      "parameters": {
+        "fromEmail": "REPLACE_WITH_FROM_ADDRESS",
+        "toEmail": "REPLACE_WITH_TO_ADDRESS",
+        "subject": "=Yard Stats Daily Report -- {{ $now.format('yyyy-MM-dd') }}",
+        "emailType": "html",
+        "html": "={{ $json.html }}",
+        "options": {
+          "attachments": "data"
+        }
+      },
+      "credentials": {
+        "smtp": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "REPLACE_WITH_SMTP_CREDENTIAL"
+        }
+      }
+    },
+    {
+      "id": "6",
+      "name": "Send Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [1250, 400],
+      "parameters": {
+        "resource": "file",
+        "operation": "sendDocument",
+        "chatId": "REPLACE_WITH_CHAT_ID",
+        "binaryData": true,
+        "binaryPropertyName": "data",
+        "caption": "={{ $json.caption }}"
+      },
+      "credentials": {
+        "telegramApi": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "REPLACE_WITH_TELEGRAM_CREDENTIAL"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Daily at 7am": {
+      "main": [[{ "node": "Call Report API", "type": "main", "index": 0 }]]
+    },
+    "Call Report API": {
+      "main": [[{ "node": "Convert Report to File", "type": "main", "index": 0 }]]
+    },
+    "Convert Report to File": {
+      "main": [
+        [
+          { "node": "Send Email", "type": "main", "index": 0 },
+          { "node": "Send Telegram", "type": "main", "index": 0 }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
