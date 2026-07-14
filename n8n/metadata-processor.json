@@ -19,7 +19,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [400, 300],
-      "notes": "Replaces the old Reap Stale Processing Items / Count In-Progress Items / Check Capacity / Claim Next Batch Postgres+Code+If nodes -- ingest-worker's /ai-queue/claim now does all four steps in one call (reap stale, count in-progress, compute capacity, atomically claim up to parallel_limit crop_status='done' rows FOR UPDATE SKIP LOCKED). Tune throughput by editing the query params below. One shared queue across all object_types (not claimed separately per type), newest event first -- older backlog only gets swept up once capacity isn't all consumed by newer rows. Returns {events: [...]} -- empty if no capacity or no work. Optional: add a max_age_hours param (e.g. {\"name\": \"max_age_hours\", \"value\": \"6\"}) to never claim rows older than that many hours -- useful if incoming events ever outpace analysis and you'd rather let stale backlog age out than eat into capacity that could go to fresher events. Omitted by default (no age limit).",
+      "notes": "Replaces the old Reap Stale Processing Items / Count In-Progress Items / Check Capacity / Claim Next Batch Postgres+Code+If nodes -- ingest-worker's /ai-queue/claim now does all four steps in one call (reap stale, count in-progress, compute capacity, atomically claim up to parallel_limit crop_status='done' rows FOR UPDATE SKIP LOCKED). Tune throughput by editing the query params below. One shared queue across all object_types (not claimed separately per type), newest event first -- older backlog only gets swept up once capacity isn't all consumed by newer rows. Returns {events: [...]} -- empty if no capacity or no work. max_age_hours (set to 6 below) means rows older than 6h are never claimed at all -- a safety valve so a stale backlog can't eat capacity that could go to fresher events. Delete the param (or raise the value) if you'd rather eventually process everything regardless of age.",
       "notesInFlow": true,
       "parameters": {
         "method": "POST",
@@ -29,7 +29,8 @@
           "parameters": [
             { "name": "object_types", "value": "car,truck,person" },
             { "name": "parallel_limit", "value": "3" },
-            { "name": "stale_minutes", "value": "5" }
+            { "name": "stale_minutes", "value": "5" },
+            { "name": "max_age_hours", "value": "6" }
           ]
         },
         "authentication": "genericCredentialType",
