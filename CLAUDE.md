@@ -648,6 +648,42 @@ margin above, this directly addresses a real, observed symptom (a camera's crops
 looking ~1s off from the expected moment, most likely keyframe spacing during the seek) --
 tune it by comparing a handful of real crops against what `thumb_time` should show.
 
+#### Bug: the opposite case -- a clip with extra, unrequested lead-in also produced a wrong-moment crop
+
+The bug above was Frigate's clip coming back *shorter* than requested. Confirmed separately in
+production that the same endpoint can also come back *longer* than requested, with the extra
+footage prepended *before* the requested start rather than appended after it -- silently breaking
+the (until then reasonable-looking) assumption that byte offset 0 of the returned clip lines up
+with `start_ts - 5s`. A real visit asked for the usual `start_ts-5s`/`end_ts+5s` window (~15.2s)
+and Frigate returned a 21.3s clip, ~6.1s longer. The old start-anchored offset
+(`thumb_time - (start_ts - 5s)`, ~5.2s into the file) landed on an empty stretch of parking lot;
+cross-referencing Frigate's own `thumb-*.webp` review thumbnail (which *does* show the moment --
+a person standing near a van) against a sweep of frames from the actual downloaded clip found that
+person ~11-13s in, not ~5s. The old duration-safety check never caught this because it only guards
+against the offset landing too *close to* or *past* the duration -- an offset of ~5.2s in a 21.3s
+clip looks completely unremarkable to that check; the crop still completed, `thumb_crop_status`
+still went `done`, and nothing signaled the frame was wrong.
+
+Likely explanation: Frigate stores continuous recording in fixed-length segments and builds an
+arbitrary clip by concatenating whichever whole segments cover the requested range -- rounding the
+*start* backward to the nearest segment boundary (adding a variable amount of lead-in, bounded by
+one segment length) while the *end* lines up with what was actually asked for (confirmed: the
+measured duration in that case was within ~0.1s of the requested `end_ts+5`).
+
+Fixed by anchoring the offset from the clip's measured *end* instead of its assumed start --
+`crop_visit_thumbnail` now computes `duration - ((end_ts+5) - thumb_time)` (`duration` from the
+same `_probe_duration_seconds` call the safety-margin check already needed), so a variable amount
+of extra lead-in at the front no longer shifts the target frame at all. The safety-margin check
+now also rejects a negative offset (thumb_time computed as landing *before* the clip's actual
+start), not just one too close to its end, so a genuine recording gap -- which can still push the
+computed offset outside the clip's real bounds in either direction -- still fails cleanly into the
+same retry-then-fallback path rather than silently returning a wrong-moment crop either way.
+
+Practical implication: since the previous drift this setup was compensating for is now handled by
+the anchor change itself, an existing `VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS` override tuned
+against the old (start-anchored) behavior should be reset to `0` and re-tuned from scratch against
+real crops if still needed -- it no longer means the same thing as before.
+
 ### Camera allow-list
 
 `CAMERAS` (optional, comma-separated Frigate camera names, e.g. `outside,outside2`) gates both

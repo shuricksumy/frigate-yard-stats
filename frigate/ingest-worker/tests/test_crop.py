@@ -114,9 +114,12 @@ def test_crop_visit_thumbnail_uses_visit_scoped_clip_and_thumb_time_offset(monke
     assert result == "base64result"
     # clip fetched for the visit's own start/end window (-5s/+5s), not the event's own clip.mp4.
     assert captured["clip_url"] == "http://frigate.test:5000/api/outside2/start/1784219186/end/1784219206/clip.mp4"
-    # offset relative to that clip's start (start_ts - 5), matching thumb_time in Frigate's own
-    # absolute timeline exactly.
-    assert captured["offset"] == 1784219196.5 - 1784219186
+    # offset is anchored from the clip's END (end_ts+5 minus thumb_time, subtracted from the
+    # measured duration) -- here the mocked duration (20.0) exactly matches the nominal padded
+    # window length (end_ts+5 - (start_ts-5) == 20.0), so this lands on the same instant
+    # thumb_time refers to in Frigate's own absolute timeline, same as a naive start-anchored
+    # calculation would give when there's no drift.
+    assert captured["offset"] == 20.0 - (1784219206.0 - 1784219196.5)
 
 
 def test_crop_visit_thumbnail_raises_when_offset_exceeds_actual_clip_duration(monkeypatch):
@@ -142,7 +145,7 @@ def test_crop_visit_thumbnail_raises_when_offset_exceeds_actual_clip_duration(mo
         crop.crop_visit_thumbnail(visit, representative_event)
         assert False, "expected ValueError"
     except ValueError as exc:
-        assert "actual clip duration" in str(exc)
+        assert "clip's bounds" in str(exc)
 
 
 def test_crop_visit_thumbnail_succeeds_when_offset_is_within_actual_duration(monkeypatch):
@@ -174,7 +177,10 @@ def test_crop_visit_thumbnail_duration_safety_margin_is_a_fixed_internal_constan
         "start_ts": 1784219191.0,
         "end_ts": 1784219201.0,
         "cameras": "outside2",
-        "thumb_time": 1784219196.5,  # offset = 10.5s; duration = 11.0s -> 0.5s of headroom
+        # end_padding_epoch (end_ts+5) = 1784219206.0; thumb_time 0.5s before that puts
+        # offset_from_end at 0.5s -> offset = duration(11.0) - 0.5 = 10.5s; duration = 11.0s ->
+        # 0.5s of headroom.
+        "thumb_time": 1784219205.5,
     }
     representative_event = {"det_id": "1784219191.5-abc123"}
 
@@ -189,6 +195,42 @@ def test_crop_visit_thumbnail_duration_safety_margin_is_a_fixed_internal_constan
     # A smaller margin (0.1s) leaves enough headroom -- must succeed.
     monkeypatch.setattr(crop, "_DURATION_SAFETY_MARGIN_SECONDS", 0.1)
     assert crop.crop_visit_thumbnail(visit, representative_event) == "base64result"
+
+
+def test_crop_visit_thumbnail_end_anchored_offset_survives_extra_lead_in(monkeypatch):
+    # Regression test for a real production visit: requested window was start_ts-5 to end_ts+5
+    # (~15.2s), but Frigate's continuous-recording endpoint returned a 21.3s clip -- ~6.1s of
+    # extra footage prepended before the requested start (confirmed live: Frigate's own review
+    # thumbnail showed a person near a van; a start-anchored offset (thumb_time - (start_ts-5),
+    # ~5.2s into the file) landed on an empty frame, while the person was actually visible
+    # ~11-13s in -- matching this end-anchored formula almost exactly). Likely Frigate snapping
+    # the clip start backward to a fixed-length recording-segment boundary while the end lines up
+    # with what was actually requested.
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
+    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 21.335022)
+    monkeypatch.setattr(config, "VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS", 0.0)
+
+    captured = {}
+
+    def fake_crop_and_scale(clip_url, offset, box):
+        captured["offset"] = offset
+        return "base64result"
+
+    monkeypatch.setattr(crop, "crop_and_scale", fake_crop_and_scale)
+
+    visit = {
+        "start_ts": 1784240053.11415,
+        "end_ts": 1784240058.310633,
+        "cameras": "outside2",
+        "thumb_time": 1784240053.286873,
+    }
+    representative_event = {"det_id": "1784240051.947106-1ou5oc"}
+
+    assert crop.crop_visit_thumbnail(visit, representative_event) == "base64result"
+    # end_padding_epoch = int(1784240058.310633) + 5 = 1784240063
+    expected_offset = 21.335022 - (1784240063 - 1784240053.286873)
+    assert captured["offset"] == expected_offset
+    assert 11 < captured["offset"] < 13  # matches the person's confirmed on-screen position
 
 
 def test_crop_visit_thumbnail_offset_adjust_shifts_the_seek_target(monkeypatch):
