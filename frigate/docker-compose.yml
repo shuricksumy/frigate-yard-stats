@@ -52,6 +52,9 @@ services:
       MQTT_PORT: ${MQTT_PORT:-1883}
       MQTT_USERNAME: ${MQTT_USERNAME}
       MQTT_PASSWORD: ${MQTT_PASSWORD}
+      # Optional camera allow-list, comma-separated -- applies to both the events and alerts
+      # flows at ingest time. Blank/unset (default) means no filter, every camera is processed.
+      CAMERAS: ${CAMERAS:-}
       POSTGRES_HOST: postgres-projects
       POSTGRES_DB: home_automation
       POSTGRES_USER: n8n_projects
@@ -99,8 +102,11 @@ services:
       VIDEO_MAX_AGE_HOURS: ${VIDEO_MAX_AGE_HOURS:-}
       VIDEO_RETRY_WAIT_SECONDS: ${VIDEO_RETRY_WAIT_SECONDS:-5}
       # Independent video-storage switch for the alerts/visits flow (frigate/reviews) -- one clip
-      # per visit's whole span, separate from STORE_VIDEO above. Shares the VIDEO_* tuning above.
+      # per visit's whole span, separate from STORE_VIDEO above. Shares the VIDEO_* tuning above,
+      # but stored under its own mount point (/data/video-alerts, bind-mounted below) so the two
+      # flows' disk usage can be measured/managed independently.
       STORE_VIDEO_ALERTS: ${STORE_VIDEO_ALERTS:-false}
+      VIDEO_STORAGE_PATH_ALERTS: /data/video-alerts
       # Telegram notifications (photo on crop, video reply once stored) -- see telegram.py.
       # Disabled by default; TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID only need to be set when on.
       TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}
@@ -122,6 +128,9 @@ services:
       # Bind mount for stored clips -- only used when STORE_VIDEO=true, but always mounted so
       # toggling the flag doesn't require a compose file change, just a restart.
       - ${VIDEO_STORAGE_HOST_PATH:-./video-storage}:/data/video
+      # Separate bind mount for the alerts/visits flow (STORE_VIDEO_ALERTS) -- its own directory,
+      # not a subfolder of the one above, so the two flows' storage is genuinely independent.
+      - ${VIDEO_STORAGE_ALERTS_HOST_PATH:-./video-storage-alerts}:/data/video-alerts
     depends_on:
       - postgres-projects
     networks:

@@ -75,13 +75,15 @@ def store_clip(row: dict, content: bytes) -> str:
 
 
 def store_visit_clip(visit: dict, content: bytes) -> str:
-    # Mirrors store_clip, but under a "visits" subdirectory and a "visit-" filename prefix so a
-    # visit's whole-span clip is never confused with a per-event clip that happens to share the
-    # same numeric id (visit ids and raw_event ids are independent sequences) -- see
+    # Mirrors store_clip, but under VIDEO_STORAGE_PATH_ALERTS -- a genuinely separate storage
+    # location (own bind mount), not a subfolder of VIDEO_STORAGE_PATH, so the two flows' disk
+    # usage can be measured/managed independently. "visit-" filename prefix so a visit's
+    # whole-span clip is never confused with a per-event clip that happens to share the same
+    # numeric id (visit ids and raw_event ids are independent sequences) -- see
     # alert_video_worker.py.
     start = _as_datetime(visit["start_ts"])
     day_dir = os.path.join(
-        config.VIDEO_STORAGE_PATH, "visits",
+        config.VIDEO_STORAGE_PATH_ALERTS,
         f"{start:%Y}", f"{start:%m}", f"{start:%d}",
     )
     os.makedirs(day_dir, exist_ok=True)

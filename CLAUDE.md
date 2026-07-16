@@ -266,13 +266,16 @@ reply-threading survives a service restart). Both directions are wrapped so a Te
 visit's whole `start_ts`->`end_ts` span (not per det_id) is fetched from the same Frigate
 continuous-recording endpoint `video.py` already uses for the events flow, via a small adapter
 dict (`{start_ts, end_ts, camera: visit["cameras"], det_id: "visit-{id}"}`) so `download_clip`/
-`build_clip_url` need no changes -- and stored under `VIDEO_STORAGE_PATH/visits/...` with a
-`visit-` filename prefix (`video.store_visit_clip`) so it's never confused with a per-event clip
-that happens to share the same numeric id (visit ids and raw_event ids are independent sequences).
-Shares `VIDEO_PARALLEL_LIMIT`/`VIDEO_INITIAL_WAIT_SECONDS`/`VIDEO_MIN_VALID_BYTES`/
-`VIDEO_MAX_ATTEMPTS`/`VIDEO_RETRY_WAIT_SECONDS`/`VIDEO_MAX_AGE_HOURS` with the events flow
-(mechanically identical download/validation logic) -- only the on/off switch and the poll thread
-are separate, so the two flows can be A/B'd without doubling every tuning knob. Retention cleanup
+`build_clip_url` need no changes -- and stored under `VIDEO_STORAGE_PATH_ALERTS` (its own mount
+point/bind mount, `VIDEO_STORAGE_ALERTS_HOST_PATH` on the host side -- a genuinely separate
+storage location from `VIDEO_STORAGE_PATH`/`VIDEO_STORAGE_HOST_PATH`, not a subfolder of it, so
+the two flows' disk usage can be measured/managed independently) with a `visit-` filename prefix
+(`video.store_visit_clip`) so it's never confused with a per-event clip that happens to share the
+same numeric id (visit ids and raw_event ids are independent sequences). Shares
+`VIDEO_PARALLEL_LIMIT`/`VIDEO_INITIAL_WAIT_SECONDS`/`VIDEO_MIN_VALID_BYTES`/`VIDEO_MAX_ATTEMPTS`/
+`VIDEO_RETRY_WAIT_SECONDS`/`VIDEO_MAX_AGE_HOURS` with the events flow (mechanically identical
+download/validation logic) -- only the on/off switch, storage location, and poll thread are
+separate, so the two flows can be A/B'd without doubling every tuning knob. Retention cleanup
 (`run_retention_cleanup`/`purge_older_than`) collects and deletes `visits.video_path` files the
 same way it already did for `raw_events.video_path`, so a visit-level clip doesn't outlive its
 retention window as an orphaned file once its DB row is swept.
@@ -286,6 +289,14 @@ otherwise, since crop timing isn't guaranteed to have caught up yet. Independent
 `TELEGRAM_ENABLED` above (the existing per-raw_event photo/video messages) -- both, either, or
 neither can be on at once, specifically so you can compare which notification granularity is more
 useful for your traffic rather than committing to one upfront.
+
+If `STORE_VIDEO_ALERTS` is also on, the visit's video is sent as a reply to that same summary
+message once `alert_video_worker` finishes downloading it (`telegram.send_visit_video`, reply-
+threaded via `visits.telegram_photo_message_id` -- durable across a restart, same idea as
+`raw_events.telegram_photo_message_id`) -- mirroring how the events flow's video reply threads
+onto its earlier photo. The two alerts-flow switches are otherwise fully independent (one can be on
+without the other; a visit clip download failure/retry never blocks or delays the summary
+message, and vice versa) -- this reply-threading is the one place they connect.
 
 `GET /events` also defaults `has_media=true` -- rows with neither `crop_image_base64` nor
 `video_path` (not yet `crop_status='done'`, including `'skipped'` rows) are hidden by default
@@ -348,11 +359,16 @@ card's click handler (`openVisitLightbox`) builds a minimal event-shaped object 
 `openLightbox` the Events view uses, rather than a separate lightbox implementation. Filters that
 don't apply to the Visits view (Event ID, AI status, Only with media, Search AI analysis) disable
 themselves when `viewMode === 'visits'`, same pattern as their existing `filters.eventId`-driven
-disabling. The filter bar itself defaults to a simplified view (Search AI analysis, From, To) with
-an "Advanced filters" toggle (`advancedSearch`) that reveals Event ID/Type/AI status/Only-with-
-media on demand -- those fields' wrapping `<div class="advanced-filters">` is `display: contents`
-in CSS so they flow as direct flex items of `.filters` when shown, rather than nesting a visible
-sub-box. `GET /events` itself is filterable by
+disabling. The filter bar itself defaults to a simplified view -- Search AI analysis plus a "Time range"
+preset dropdown (`filters.hours`, options `[1, 3, 6, 12, 24]` hours, sent as `GET /events`'/
+`GET /visits`'s own `hours` param) -- with an "Advanced filters" toggle (`advancedSearch`) that
+reveals Event ID/From/To/Type/AI status/Only-with-media on demand; those fields' wrapping
+`<div class="advanced-filters">` is `display: contents` in CSS so they flow as direct flex items
+of `.filters` when shown, rather than nesting a visible sub-box. The advanced panel's From/To
+date pickers override the Time range preset when either is set (`fetchEvents`/`fetchVisits` check
+`filters.start || filters.end` first, falling back to `hours` only when both are empty) -- same
+precedence `q`/`event_id` already had over the time window, just extended to cover the preset too.
+`GET /events` itself is filterable by
 `object_type`/`crop_status`/`ai_status`/`video_status`/`has_media`/`event_id`/`q`, defaults to the
 last 1 hour, media-only. `GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same
 `crop.scale_image_base64` helper `report.py` uses) feeds the grid in both views, and
@@ -408,6 +424,17 @@ a head start to finalize the event/clip before the *first* crop attempt on a fre
 -- confirmed in production that even an ordinary short event's crop can fail this way if attempted
 immediately after the "end" MQTT message, not just long events tripping the clip-duration fallback
 above. Only applies once per row (`crop_attempt_count == 0`), not on every retry pass.
+
+### Camera allow-list
+
+`CAMERAS` (optional, comma-separated Frigate camera names, e.g. `outside,outside2`) gates both
+`mqtt_ingest.py` handlers at ingest time -- `_handle_event_message` and `_handle_review_message`
+each check `event["camera"]`/`review["camera"]` against the list right after confirming
+`type == "end"`, before calling `db.insert_raw_event`/`db.record_visit` at all. A camera not on
+the list never gets a `raw_events` or `visits` row -- not filtered out later, not hidden from some
+view, simply never ingested. One shared list across both flows (not separate events/alerts
+filters) -- unset/blank (the default) means no filter, every camera Frigate reports is processed,
+today's behavior unchanged.
 
 ### Visit grouping via Frigate's review/alert stream
 

@@ -38,12 +38,12 @@
         <input type="text" x-model="filters.q" placeholder="e.g. red toyota, plate ABC123" :disabled="!!filters.eventId || viewMode === 'visits'">
       </label>
       <label>
-        From
-        <input type="datetime-local" x-model="filters.start" :disabled="!!(filters.eventId || filters.q)">
-      </label>
-      <label>
-        To
-        <input type="datetime-local" x-model="filters.end" :disabled="!!(filters.eventId || filters.q)">
+        Time range
+        <select x-model.number="filters.hours" :disabled="!!(filters.eventId || filters.q)">
+          <template x-for="h in hoursOptions" :key="h">
+            <option :value="h" x-text="'Last ' + h + (h === 1 ? ' hour' : ' hours')"></option>
+          </template>
+        </select>
       </label>
 
       <button type="button" class="link-button" @click="advancedSearch = !advancedSearch" x-text="advancedSearch ? 'Hide advanced filters' : 'Advanced filters'"></button>
@@ -52,6 +52,14 @@
         <label>
           Event ID
           <input type="number" x-model="filters.eventId" placeholder="e.g. 1234" :disabled="viewMode === 'visits'">
+        </label>
+        <label>
+          From
+          <input type="datetime-local" x-model="filters.start" :disabled="!!(filters.eventId || filters.q)">
+        </label>
+        <label>
+          To
+          <input type="datetime-local" x-model="filters.end" :disabled="!!(filters.eventId || filters.q)">
         </label>
         <label>
           Type

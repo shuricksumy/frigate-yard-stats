@@ -74,12 +74,7 @@ def send_visit_summary(camera: str, objects: str | None, event_count: int, image
         return None
 
 
-def send_video(video_path: str, caption: str, reply_to_message_id: int | None) -> bool:
-    """POSTs the stored clip as a video, replying to reply_to_message_id if given (mirrors the
-    n8n workflow's 'Has Reply Target?' branch -- 'Send Video (Reply)' vs 'Send Video (No Reply)').
-    Never raises; logs a warning and returns False on failure so the caller can carry on."""
-    if not config.TELEGRAM_ENABLED:
-        return False
+def _post_video(video_path: str, caption: str, reply_to_message_id: int | None) -> bool:
     try:
         data = {"chat_id": config.TELEGRAM_CHAT_ID, "parse_mode": "HTML", "caption": caption}
         if reply_to_message_id is not None:
@@ -96,3 +91,22 @@ def send_video(video_path: str, caption: str, reply_to_message_id: int | None) -
     except Exception:
         logger.warning("Telegram sendVideo failed for %s", video_path, exc_info=True)
         return False
+
+
+def send_video(video_path: str, caption: str, reply_to_message_id: int | None) -> bool:
+    """POSTs the stored clip as a video, replying to reply_to_message_id if given (mirrors the
+    n8n workflow's 'Has Reply Target?' branch -- 'Send Video (Reply)' vs 'Send Video (No Reply)').
+    Never raises; logs a warning and returns False on failure so the caller can carry on."""
+    if not config.TELEGRAM_ENABLED:
+        return False
+    return _post_video(video_path, caption, reply_to_message_id)
+
+
+def send_visit_video(video_path: str, caption: str, reply_to_message_id: int | None) -> bool:
+    """Alerts-flow counterpart to send_video -- gated by TELEGRAM_ALERTS_ENABLED instead of
+    TELEGRAM_ENABLED, otherwise identical (same reply-threading onto the earlier visit-summary
+    message, same never-raises failure handling). Called by alert_video_worker once a visit's
+    clip finishes downloading (STORE_VIDEO_ALERTS)."""
+    if not config.TELEGRAM_ALERTS_ENABLED:
+        return False
+    return _post_video(video_path, caption, reply_to_message_id)

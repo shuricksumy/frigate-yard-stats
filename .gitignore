@@ -9,6 +9,8 @@ postgres-projects/
 # just local broker state.
 frigate/video-storage/*
 !frigate/video-storage/.gitkeep
+frigate/video-storage-alerts/*
+!frigate/video-storage-alerts/.gitkeep
 frigate/mosquitto/data/*
 !frigate/mosquitto/data/.gitkeep
 frigate/mosquitto/log/*

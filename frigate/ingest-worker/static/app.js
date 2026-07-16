@@ -18,18 +18,6 @@ function clearCookie(name) {
   document.cookie = `${name}=; max-age=0; path=/`;
 }
 
-function defaultWindow() {
-  // Matches the API's own default (last 1 hour) so the UI's initial fetch and its displayed
-  // filter values agree with each other.
-  const end = new Date();
-  const start = new Date(end.getTime() - 60 * 60 * 1000);
-  const toLocalInput = (d) => {
-    const pad = (n) => String(n).padStart(2, "0");
-    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
-  };
-  return { start: toLocalInput(start), end: toLocalInput(end) };
-}
-
 function eventsApp() {
   return {
     apiKey: null,
@@ -45,8 +33,14 @@ function eventsApp() {
     offset: 0,
     objectTypes: [],
     advancedSearch: false,
+    // Quick time-range presets for the default view's "Time range" selector -- the advanced
+    // panel's From/To date pickers override this when set (see fetchEvents/fetchVisits).
+    hoursOptions: [1, 3, 6, 12, 24],
 
-    filters: { objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "", ...defaultWindow() },
+    filters: {
+      objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
+      hours: 1, start: "", end: "",
+    },
 
     lightboxEvent: null,
     lightboxMode: "video",
@@ -172,9 +166,12 @@ function eventsApp() {
             // A text search spans your whole history, not just the visible date window --
             // matches the API's own event_id/q window-bypass behavior.
             params.set("q", q);
-          } else {
+          } else if (this.filters.start || this.filters.end) {
+            // Advanced panel's custom From/To overrides the quick "Time range" preset when set.
             if (this.filters.start) params.set("start", new Date(this.filters.start).toISOString());
             if (this.filters.end) params.set("end", new Date(this.filters.end).toISOString());
+          } else {
+            params.set("hours", String(this.filters.hours));
           }
         }
 
@@ -211,8 +208,12 @@ function eventsApp() {
         if (this.filters.objectType && this.filters.objectType !== "all") {
           params.set("object_type", this.filters.objectType);
         }
-        if (this.filters.start) params.set("start", new Date(this.filters.start).toISOString());
-        if (this.filters.end) params.set("end", new Date(this.filters.end).toISOString());
+        if (this.filters.start || this.filters.end) {
+          if (this.filters.start) params.set("start", new Date(this.filters.start).toISOString());
+          if (this.filters.end) params.set("end", new Date(this.filters.end).toISOString());
+        } else {
+          params.set("hours", String(this.filters.hours));
+        }
 
         const resp = await fetch(`/visits?${params.toString()}`, {
           headers: { "X-API-Key": this.apiKey },

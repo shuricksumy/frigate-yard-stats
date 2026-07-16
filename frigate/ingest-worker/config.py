@@ -20,6 +20,13 @@ MQTT_TOPIC = _env("MQTT_TOPIC", "frigate/events")
 # crop/video/ai queue pipeline -- see mqtt_ingest.py's review handler / db.record_visit.
 MQTT_REVIEWS_TOPIC = _env("MQTT_REVIEWS_TOPIC", "frigate/reviews")
 
+# Optional camera allow-list, comma-separated Frigate camera names (e.g. "outside,outside2") --
+# applies to both the events flow (frigate/events) and the alerts flow (frigate/reviews), gating
+# at ingest time in mqtt_ingest.py so a camera not on the list never gets a raw_events/visits row
+# at all, not just hidden from some later view. Empty/unset (the default) means no filter -- every
+# camera Frigate reports is processed, today's exact behavior.
+CAMERAS = [c.strip() for c in _env("CAMERAS", "").split(",") if c.strip()]
+
 POSTGRES_HOST = _env("POSTGRES_HOST", "postgres-projects")
 POSTGRES_PORT = int(_env("POSTGRES_PORT", "5432"))
 POSTGRES_DB = _env("POSTGRES_DB", "home_automation")
@@ -107,6 +114,13 @@ VIDEO_MAX_AGE_HOURS = float(_video_max_age_hours_env) if _video_max_age_hours_en
 # on/off switch is separate, so you can toggle each flow independently without doubling every
 # tuning knob. See alert_video_worker.py.
 STORE_VIDEO_ALERTS = _env("STORE_VIDEO_ALERTS", "false").lower() == "true"
+# A genuinely separate storage location from VIDEO_STORAGE_PATH (own mount point, own bind mount
+# in docker-compose.yml via VIDEO_STORAGE_ALERTS_HOST_PATH) rather than a subfolder of it -- lets
+# the two flows' disk usage/retention be measured and managed independently, e.g. pointing alerts
+# clips at different storage entirely. Files are laid out as
+# {VIDEO_STORAGE_PATH_ALERTS}/{YYYY}/{MM}/{DD}/visit-{object_type}-{visit_id}-{start_ts_epoch}-
+# {start_ts_iso}.mp4 (see video.store_visit_clip).
+VIDEO_STORAGE_PATH_ALERTS = _env("VIDEO_STORAGE_PATH_ALERTS", "/data/video-alerts")
 
 # -------------------------------------------------
 # Telegram notifications -- see telegram.py. Disabled (no-op) unless explicitly turned on.

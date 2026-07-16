@@ -112,6 +112,10 @@ ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS video_status_changed_at T
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS video_attempt_count INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS video_path TEXT;
 CREATE INDEX IF NOT EXISTS idx_visits_video_status ON yard_stats.visits (video_status);
+-- Durable reply-threading target for the visit's video, same idea as
+-- raw_events.telegram_photo_message_id -- lets alert_video_worker's video send reply onto the
+-- earlier visit-summary photo/text message once the visit's clip is stored.
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS telegram_photo_message_id BIGINT;
 
 CREATE TABLE IF NOT EXISTS yard_stats.vehicle_sightings (
   id SERIAL PRIMARY KEY,

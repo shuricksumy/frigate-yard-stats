@@ -193,6 +193,21 @@ def get_representative_event_for_visit(visit_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
+def set_visit_telegram_photo_message_id(visit_id: int, message_id: int) -> None:
+    _execute(
+        "UPDATE yard_stats.visits SET telegram_photo_message_id = %s WHERE id = %s",
+        (message_id, visit_id),
+    )
+
+
+def count_events_for_visit(visit_id: int) -> int:
+    rows = _execute(
+        "SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE visit_id = %s",
+        (visit_id,), fetch=True,
+    )
+    return rows[0]["c"] if rows else 0
+
+
 def reap_stale_visit_video_processing() -> None:
     _execute(
         """

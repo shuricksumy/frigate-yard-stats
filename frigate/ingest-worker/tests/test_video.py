@@ -71,6 +71,29 @@ def test_store_clip_falls_back_to_event_for_empty_objects(tmp_path, monkeypatch)
     assert os.path.basename(path).startswith("event-7-")
 
 
+def test_store_visit_clip_writes_to_separate_alerts_path(tmp_path, monkeypatch):
+    # Uses VIDEO_STORAGE_PATH_ALERTS, not VIDEO_STORAGE_PATH -- a genuinely separate storage
+    # location for the alerts/visits flow, not a subfolder of the events flow's path.
+    monkeypatch.setattr(video.config, "VIDEO_STORAGE_PATH_ALERTS", str(tmp_path))
+    visit = {"id": 6, "objects": "car,truck", "start_ts": datetime(2026, 7, 16, 11, 40, 51, tzinfo=timezone.utc)}
+    content = b"fake-mp4-bytes"
+
+    path = video.store_visit_clip(visit, content)
+
+    expected_path = tmp_path / "2026" / "07" / "16" / "visit-car-6-1784202051-20260716T114051Z.mp4"
+    assert path == str(expected_path)
+    assert expected_path.read_bytes() == content
+
+
+def test_store_visit_clip_filename_distinguishes_from_per_event_clip(tmp_path, monkeypatch):
+    monkeypatch.setattr(video.config, "VIDEO_STORAGE_PATH_ALERTS", str(tmp_path))
+    visit = {"id": 42, "objects": "person", "start_ts": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+
+    path = video.store_visit_clip(visit, b"x")
+
+    assert os.path.basename(path).startswith("visit-person-42-")
+
+
 def test_download_clip_raises_clip_not_ready_below_min_bytes(monkeypatch):
     class FakeResponse:
         content = b"x" * 10  # below default VIDEO_MIN_VALID_BYTES (1000)

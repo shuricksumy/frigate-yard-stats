@@ -70,6 +70,9 @@ def _handle_event_message(msg):
     if event["type"] != "end":
         return
 
+    if config.CAMERAS and event["camera"] not in config.CAMERAS:
+        return
+
     try:
         db.insert_raw_event(event)
         logger.info(
@@ -90,6 +93,9 @@ def _handle_review_message(msg):
     if review["type"] != "end":
         return
 
+    if config.CAMERAS and review["camera"] not in config.CAMERAS:
+        return
+
     try:
         visit_id = db.record_visit(review)
         logger.info(
@@ -104,9 +110,14 @@ def _handle_review_message(msg):
         try:
             representative = db.get_representative_event_for_visit(visit_id)
             image_base64 = representative.get("crop_image_base64") if representative else None
-            telegram.send_visit_summary(
+            message_id = telegram.send_visit_summary(
                 review["camera"], review["objects"], len(review["det_ids"]) or 1, image_base64,
             )
+            if message_id is not None:
+                # Durable reply-threading target, same idea as raw_events.telegram_photo_message_id
+                # -- lets alert_video_worker's later video send reply onto this message once the
+                # visit's clip (STORE_VIDEO_ALERTS) finishes downloading.
+                db.set_visit_telegram_photo_message_id(visit_id, message_id)
         except Exception:
             # Never let a Telegram hiccup take down the MQTT message handler -- same belt-and-
             # suspenders wrapping as video_worker's send_video call.
