@@ -34,6 +34,22 @@ h1 { font-size: 1.3rem; margin: 0; }
   font-size: 0.9rem;
 }
 
+.view-toggle {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.view-toggle button {
+  background: #22262c;
+  color: var(--muted);
+}
+
+.view-toggle button.active {
+  background: var(--accent);
+  color: white;
+}
+
 .filters {
   display: flex;
   flex-wrap: wrap;

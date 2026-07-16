@@ -274,18 +274,52 @@ each, tried unconditionally rather than branching on `objects` since at most one
 reasoning as `crop_image_base64` already being list-response-only) -- the web UI's lightbox fetches
 full detail only when actually opened, not for every row in a page.
 
+`GET /visits` is a read-only comparison view alongside `GET /events` -- one row per Frigate
+review/alert segment (`visits`, see above) instead of one per raw_event, so duplicate det_ids from
+tracker re-ID/label flicker collapse into a single row. `representative_event_id` is the visit's
+earliest-linked raw_event (`row_number()` over each visit's linked `raw_events`, ordered by
+`start_ts` then `id` -- the simplest deterministic pick for a first comparison pass, not a
+"best crop" heuristic); `event_count` is how many det_ids were grouped into it, both computed in
+one pass via window functions over a `visit_id`-linked join, not two separate queries. Filterable
+by `object_type`/`camera`/`start`/`end`/`hours` only -- `event_id`/`q`/`ai_status`/`has_media` are
+per-raw_event concepts that don't compose cleanly with a grouped view, so this endpoint doesn't
+accept them at all rather than half-supporting them. Purely additive and read-only -- doesn't
+affect `GET /events`, the AI queue, or Telegram notifications; exists so `visits` data can be
+judged visually against real traffic before deciding whether to build the actual dedup behavior
+described above.
+
 The web report UI (`/ui`, static files baked into the image, Alpine.js vendored locally -- no CDN
-requests) reads the same API everything else does: `GET /events` (filterable by
+requests) reads the same API everything else does. An Events/Visits toggle switches the whole page
+between `GET /events` and `GET /visits` (`viewMode`, drives `fetchEvents`/`fetchVisits` via a
+shared `refresh()` dispatcher so `applyFilters`/`prevPage`/`nextPage` stay view-agnostic); a visit
+card's click handler (`openVisitLightbox`) builds a minimal event-shaped object from the visit's
+`representative_event_id`/`has_image`/`has_video`/`ai_status` and hands it to the same
+`openLightbox` the Events view uses, rather than a separate lightbox implementation. Filters that
+don't apply to the Visits view (Event ID, AI status, Only with media, Search AI analysis) disable
+themselves when `viewMode === 'visits'`, same pattern as their existing `filters.eventId`-driven
+disabling. The filter bar itself defaults to a simplified view (Search AI analysis, From, To) with
+an "Advanced filters" toggle (`advancedSearch`) that reveals Event ID/Type/AI status/Only-with-
+media on demand -- those fields' wrapping `<div class="advanced-filters">` is `display: contents`
+in CSS so they flow as direct flex items of `.filters` when shown, rather than nesting a visible
+sub-box. `GET /events` itself is filterable by
 `object_type`/`crop_status`/`ai_status`/`video_status`/`has_media`/`event_id`/`q`, defaults to the
-last 1 hour, media-only), `GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same
-`crop.scale_image_base64` helper `report.py` uses) for the grid, and `GET /media/video/{id}`
-(range-request `FileResponse`, so the browser's scrubber works) or `GET /events/{id}/image` for
-the lightbox depending on `has_video`/`has_image` -- when an event has both, toggle buttons switch
-between them (video shown by default) instead of only ever picking one; the lightbox also shows
-the AI analysis result (via `GET /events/{id}`) once `ai_status='done'`. Those three endpoints
-alone also accept the API key as an `?api_key=` query param (in addition to the usual `X-API-Key`
-header) since `<img>`/`<video>` tags can't attach custom headers -- the UI itself just stores the
-key in a long-lived cookie after validating it against the API once.
+last 1 hour, media-only. `GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same
+`crop.scale_image_base64` helper `report.py` uses) feeds the grid in both views, and
+`GET /media/video/{id}` (range-request `FileResponse`, so the browser's scrubber works) or
+`GET /events/{id}/image` feed the lightbox depending on `has_video`/`has_image` -- when an event
+has both, toggle buttons switch between them (video shown by default) instead of only ever picking
+one; the lightbox also shows the AI analysis result (via `GET /events/{id}`) once
+`ai_status='done'`. Those three endpoints alone also accept the API key as an `?api_key=` query
+param (in addition to the usual `X-API-Key` header) since `<img>`/`<video>` tags can't attach
+custom headers -- the UI itself just stores the key in a long-lived cookie after validating it
+against the API once.
+
+Note on the disabled-filter fix: Alpine's `x-bind:disabled` only removes a boolean HTML attribute
+when the bound expression is exactly `false`/`null`/`undefined` -- any other falsy value (an empty
+string, `0`) still counts as "set the attribute." Every `:disabled="filters.eventId"`-style binding
+in this UI is wrapped in `!!(...)` for that reason (`filters.eventId` starts as `""`, a string, not
+a boolean) -- confirmed live in a headless browser that omitting the `!!` left every gated filter
+permanently disabled regardless of `filters.eventId`'s actual value.
 
 An optional `mosquitto` Compose profile (`--profile mqtt`) provides a local/dev MQTT broker for
 bringing up the whole pipeline from scratch without an existing broker -- fully opt-in, never
@@ -344,12 +378,15 @@ Grouping is per-camera only -- confirmed live that a review's `camera` field is 
 never a list, so `visits.cameras`/`camera_count` are currently always one camera / `1`. Frigate
 does *not* merge the same real-world vehicle seen by both `outside` and `outside2` into one
 review, even though both cameras share zone names specifically so a cross-camera merge could work
-(see Prerequisites below) -- that merge (same zone, overlapping time window, different camera) is
-a separate, not-yet-built layer on top of this, not something `frigate/reviews` gives you for
-free. Also not yet built: using `visit_id` to actually reduce work (e.g. skipping AI-queue/
-Telegram-notification duplication for other rows in an already-processed visit) -- this first pass
-only populates the grouping data so it can be observed against real traffic before any pipeline
-behavior is changed based on it.
+(see Prerequisites below) -- this is deliberate, not a gap to fill: two overlapping cameras can be
+framing genuinely different angles/areas of the same yard, so a raw_event appearing once per
+camera is correct, wanted behavior, not duplication to collapse.
+
+Not yet built: using `visit_id` to actually reduce work (e.g. skipping AI-queue/Telegram-
+notification duplication for other rows in an already-processed visit) -- that's a real behavior
+change (which of a visit's raw_events "wins" for analysis) best decided from real `visits` volume/
+patterns, not guessed at up front. `GET /visits` (below) exists to let that data accumulate and be
+compared visually before any such change is made.
 
 `review.alerts`/`review.detections` in `frigate.conf` currently share identical `required_zones`
 per camera, so `severity` (`alert` vs `detection`) isn't a useful noise filter today -- nearly

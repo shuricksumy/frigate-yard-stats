@@ -122,6 +122,26 @@ def get_events(
     )
 
 
+@app.get("/visits", response_model=list[schemas.VisitSummary], tags=["events"], dependencies=[Depends(require_api_key)])
+def get_visits(
+    object_type: str | None = Query(None, description="Comma-separated Frigate object labels, e.g. 'car,truck'. Matches if the visit contains any of the given types. Omit or pass 'all' for no filter"),
+    camera: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    hours: float = Query(1, gt=0, description="Used when start/end aren't both given -- window is the last N hours (default: last 1 hour)."),
+    limit: int = Query(20, ge=1, le=200),
+    offset: int = Query(0, ge=0),
+):
+    """List visits (Frigate review/alert-grouped raw_events), most recent first -- a comparison
+    view alongside GET /events: one row per real-world activity segment instead of one per
+    tracked-object det_id, so duplicate det_ids from tracker re-ID/label flicker collapse into a
+    single row. representative_event_id is the visit's earliest-linked raw_event (used for the
+    thumbnail/lightbox); event_count is how many det_ids were grouped into it. Read-only and
+    purely additive -- doesn't affect GET /events, the AI queue, or Telegram notifications."""
+    resolved_start, resolved_end = _resolve_window(start, end, hours)
+    return db.list_visits(object_type, camera, resolved_start, resolved_end, limit, offset)
+
+
 @app.get("/events/{event_id}", response_model=schemas.EventDetail, tags=["events"], dependencies=[Depends(require_api_key)])
 def get_event(event_id: int):
     """Single event's full detail, including its stored crop_image_base64 and, once

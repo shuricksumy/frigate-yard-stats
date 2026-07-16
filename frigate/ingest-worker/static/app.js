@@ -38,6 +38,8 @@ function eventsApp() {
     loginError: "",
 
     events: [],
+    visits: [],
+    viewMode: "events",
     loading: false,
     limit: 24,
     offset: 0,
@@ -57,8 +59,29 @@ function eventsApp() {
         this.apiKey = stored;
         this.hasApiKey = true;
         this.fetchObjectTypes();
-        this.fetchEvents();
+        this.refresh();
       }
+    },
+
+    // Dispatches to whichever list is active -- lets applyFilters/prevPage/nextPage stay
+    // view-agnostic instead of each needing an if/else on viewMode.
+    async refresh() {
+      if (this.viewMode === "visits") {
+        await this.fetchVisits();
+      } else {
+        await this.fetchEvents();
+      }
+    },
+
+    switchView(mode) {
+      if (this.viewMode === mode) return;
+      this.viewMode = mode;
+      this.offset = 0;
+      this.refresh();
+    },
+
+    currentList() {
+      return this.viewMode === "visits" ? this.visits : this.events;
     },
 
     async fetchObjectTypes() {
@@ -90,7 +113,7 @@ function eventsApp() {
       this.hasApiKey = true;
       this.apiKeyInput = "";
       this.fetchObjectTypes();
-      this.fetchEvents();
+      this.refresh();
     },
 
     logout() {
@@ -111,17 +134,17 @@ function eventsApp() {
 
     applyFilters() {
       this.offset = 0;
-      this.fetchEvents();
+      this.refresh();
     },
 
     prevPage() {
       this.offset = Math.max(0, this.offset - this.limit);
-      this.fetchEvents();
+      this.refresh();
     },
 
     nextPage() {
       this.offset += this.limit;
-      this.fetchEvents();
+      this.refresh();
     },
 
     async fetchEvents() {
@@ -170,6 +193,53 @@ function eventsApp() {
       } finally {
         this.loading = false;
       }
+    },
+
+    async fetchVisits() {
+      // Comparison view alongside fetchEvents -- one card per Frigate review/alert segment
+      // (visit) instead of one per raw_event, so duplicate det_ids from tracker re-ID/label
+      // flicker collapse into a single card. Only start/end/objectType carry over from the
+      // filter bar -- eventId/q/aiStatus/onlyWithMedia are per-raw_event concepts that don't
+      // compose cleanly with a grouped view, so this view intentionally ignores them rather than
+      // half-applying them.
+      this.loading = true;
+      try {
+        const params = new URLSearchParams({
+          limit: String(this.limit),
+          offset: String(this.offset),
+        });
+        if (this.filters.objectType && this.filters.objectType !== "all") {
+          params.set("object_type", this.filters.objectType);
+        }
+        if (this.filters.start) params.set("start", new Date(this.filters.start).toISOString());
+        if (this.filters.end) params.set("end", new Date(this.filters.end).toISOString());
+
+        const resp = await fetch(`/visits?${params.toString()}`, {
+          headers: { "X-API-Key": this.apiKey },
+        });
+        if (resp.status === 401) {
+          this.logout();
+          return;
+        }
+        if (!resp.ok) throw new Error(`GET /visits failed: ${resp.status}`);
+        this.visits = await resp.json();
+      } catch (err) {
+        console.error(err);
+        this.visits = [];
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    openVisitLightbox(visit) {
+      // Reuses the existing per-event lightbox on the visit's representative (earliest-linked)
+      // raw_event -- no separate visit-detail view needed for this first comparison pass.
+      this.openLightbox({
+        id: visit.representative_event_id,
+        has_video: visit.has_video,
+        has_image: visit.has_image,
+        ai_status: visit.ai_status,
+      });
     },
 
     thumbnailUrl(eventId, full = false) {

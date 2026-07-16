@@ -580,6 +580,73 @@ def list_events(
     )
 
 
+def list_visits(
+    object_type: str | None = None,
+    camera: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> list:
+    # Comparison view alongside list_events -- one row per Frigate review/alert segment instead
+    # of one per raw_event, so duplicate det_ids from tracker re-ID/label flicker collapse into a
+    # single row. representative_event_id is the earliest-linked raw_event (row_number() = 1,
+    # ordered by start_ts then id) -- the simplest deterministic choice for a first comparison
+    # pass, not a "best crop" heuristic (that's a separate, later decision if this view leads to
+    # actually deduping AI-queue/Telegram work). event_count via a window COUNT(*) OVER (PARTITION
+    # BY v.id), same partition as the row_number, so both come from a single pass over `linked`.
+    clauses = []
+    params: list = []
+    if object_type:
+        # && (array overlap) -- true if the visit's objects (a comma-joined list, since a review
+        # segment can span more than one label, e.g. "car,truck" from a re-ID label flip) share
+        # any element with the requested types, same "match any of the requested types" semantics
+        # as list_events' object_type filter.
+        types = [t.strip() for t in object_type.split(",") if t.strip() and t.strip().lower() != "all"]
+        if types:
+            clauses.append("string_to_array(v.objects, ',') && %s")
+            params.append(types)
+    if camera:
+        clauses.append("v.cameras = %s")
+        params.append(camera)
+    if start:
+        clauses.append("v.start_ts >= %s")
+        params.append(start)
+    if end:
+        clauses.append("v.start_ts <= %s")
+        params.append(end)
+
+    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    params.extend([limit, offset])
+    return _execute(
+        f"""
+        WITH linked AS (
+            SELECT
+                v.id AS visit_id, v.zone, v.objects, v.cameras, v.camera_count,
+                v.start_ts AS visit_start_ts, v.end_ts AS visit_end_ts,
+                re.id AS event_id, re.ai_status, re.crop_status, re.video_status,
+                (re.crop_image_base64 IS NOT NULL) AS has_image,
+                (re.video_path IS NOT NULL) AS has_video,
+                row_number() OVER (PARTITION BY v.id ORDER BY re.start_ts ASC, re.id ASC) AS rn,
+                count(*) OVER (PARTITION BY v.id) AS event_count
+            FROM yard_stats.visits v
+            JOIN yard_stats.raw_events re ON re.visit_id = v.id
+            {where}
+        )
+        SELECT visit_id AS id, zone, objects, cameras, camera_count,
+               visit_start_ts AS start_ts, visit_end_ts AS end_ts, event_count,
+               event_id AS representative_event_id, ai_status, crop_status, video_status,
+               has_image, has_video
+        FROM linked
+        WHERE rn = 1
+        ORDER BY visit_start_ts DESC
+        LIMIT %s OFFSET %s
+        """,
+        params,
+        fetch=True,
+    )
+
+
 def get_vehicle_sightings(
     camera: str | None = None,
     start: datetime | None = None,

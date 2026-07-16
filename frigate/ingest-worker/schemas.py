@@ -58,6 +58,23 @@ class EventDetail(EventSummary):
     person_sighting: PersonSighting | None = None
 
 
+class VisitSummary(BaseModel):
+    id: int
+    zone: str | None
+    objects: str | None
+    cameras: str | None
+    camera_count: int | None
+    start_ts: datetime
+    end_ts: datetime
+    event_count: int
+    representative_event_id: int
+    ai_status: str
+    crop_status: str
+    video_status: str
+    has_image: bool
+    has_video: bool
+
+
 class CameraCount(BaseModel):
     camera: str
     count: int
