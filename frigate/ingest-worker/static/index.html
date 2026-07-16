@@ -1,0 +1,103 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Yard Stats — Events</title>
+<link rel="stylesheet" href="style.css">
+<!-- Vendored locally -- no CDN/outside requests. -->
+<script defer src="vendor/alpine.min.js"></script>
+</head>
+<body x-data="eventsApp()" x-init="init()">
+
+  <!-- Login modal: shown until an api_key cookie is present. -->
+  <div class="modal-backdrop" x-show="!hasApiKey" style="display:none">
+    <div class="modal">
+      <h2>Yard Stats</h2>
+      <p>Enter your API key to view events.</p>
+      <input type="password" x-model="apiKeyInput" placeholder="API key" @keydown.enter="saveApiKey()">
+      <button @click="saveApiKey()">Continue</button>
+      <p class="error" x-show="loginError" x-text="loginError"></p>
+    </div>
+  </div>
+
+  <div x-show="hasApiKey" style="display:none">
+    <header>
+      <h1>Yard Stats — Events</h1>
+      <button class="link-button" @click="logout()">Change API key</button>
+    </header>
+
+    <form class="filters" @submit.prevent="applyFilters()">
+      <label>
+        From
+        <input type="datetime-local" x-model="filters.start">
+      </label>
+      <label>
+        To
+        <input type="datetime-local" x-model="filters.end">
+      </label>
+      <label>
+        Type
+        <select x-model="filters.objectType">
+          <option value="all">All</option>
+          <option value="car">Car</option>
+          <option value="person">Person</option>
+          <option value="truck">Truck</option>
+        </select>
+      </label>
+      <label>
+        AI status
+        <select x-model="filters.aiStatus">
+          <option value="all">All</option>
+          <option value="new">New</option>
+          <option value="processing">Processing</option>
+          <option value="retry">Retry</option>
+          <option value="failed">Failed</option>
+          <option value="done">Done</option>
+        </select>
+      </label>
+      <button type="submit">Apply</button>
+    </form>
+
+    <div class="spinner" x-show="loading" style="display:none">Loading…</div>
+    <p class="empty" x-show="!loading && events.length === 0" style="display:none">No events in this window.</p>
+
+    <div class="grid" x-show="!loading">
+      <template x-for="event in events" :key="event.id">
+        <div class="card">
+          <img :src="thumbnailUrl(event.id)" loading="lazy" @click="openLightbox(event)" alt="event thumbnail">
+          <div class="meta">
+            <div><strong x-text="event.objects || 'event'"></strong> — <span x-text="event.camera"></span></div>
+            <div class="ts" x-text="formatTs(event.start_ts)"></div>
+            <div class="badges">
+              <span class="badge" :class="'ai-' + event.ai_status" x-text="'ai: ' + event.ai_status"></span>
+              <span class="badge" x-show="event.has_video">video</span>
+            </div>
+          </div>
+        </div>
+      </template>
+    </div>
+
+    <div class="pager" x-show="!loading && events.length > 0" style="display:none">
+      <button @click="prevPage()" :disabled="offset === 0">Prev</button>
+      <span x-text="'Page ' + (Math.floor(offset / limit) + 1)"></span>
+      <button @click="nextPage()" :disabled="events.length < limit">Next</button>
+    </div>
+  </div>
+
+  <!-- Lightbox: video if available, otherwise the full-size crop image. -->
+  <div class="modal-backdrop" x-show="lightboxEvent" @click.self="closeLightbox()" style="display:none">
+    <div class="modal lightbox">
+      <button class="close" @click="closeLightbox()">&times;</button>
+      <template x-if="lightboxEvent && lightboxEvent.has_video">
+        <video controls autoplay :src="videoUrl(lightboxEvent.id)"></video>
+      </template>
+      <template x-if="lightboxEvent && !lightboxEvent.has_video">
+        <img :src="thumbnailUrl(lightboxEvent.id, true)" alt="event full image">
+      </template>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

@@ -3,3 +3,13 @@ __pycache__/
 postgres-projects/
 *.har
 .claude/
+
+# Runtime data written by bind-mounted volumes -- keep the directories (via .gitkeep) but never
+# their contents: stored clips are semi-sensitive (see CLAUDE.md), and the mosquitto dirs are
+# just local broker state.
+frigate/video-storage/*
+!frigate/video-storage/.gitkeep
+frigate/mosquitto/data/*
+!frigate/mosquitto/data/.gitkeep
+frigate/mosquitto/log/*
+!frigate/mosquitto/log/.gitkeep

@@ -79,13 +79,52 @@ services:
       # Required on /events, /sightings, /stats, /reports (X-API-Key header) -- NOT on
       # /health, /status, /crop/{id}, /retention/run, which stay unauthenticated.
       API_KEY: ${API_KEY}
+      # Video storage (third queue stage, video_status) -- see video.py/video_worker.py.
+      # Disabled by default; when on, clips are downloaded from Frigate's own clip.mp4 endpoint,
+      # stored under /data/video (bind-mounted below), and only the filesystem path lives in
+      # Postgres (video_path).
+      STORE_VIDEO: ${STORE_VIDEO:-false}
+      VIDEO_STORAGE_PATH: /data/video
+      VIDEO_PARALLEL_LIMIT: ${VIDEO_PARALLEL_LIMIT:-1}
+      VIDEO_INITIAL_WAIT_SECONDS: ${VIDEO_INITIAL_WAIT_SECONDS:-10}
+      VIDEO_MIN_VALID_BYTES: ${VIDEO_MIN_VALID_BYTES:-1000}
+      VIDEO_MAX_ATTEMPTS: ${VIDEO_MAX_ATTEMPTS:-5}
+      VIDEO_RETRY_WAIT_SECONDS: ${VIDEO_RETRY_WAIT_SECONDS:-5}
+      # Telegram notifications (photo on crop, video reply once stored) -- see telegram.py.
+      # Disabled by default; TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID only need to be set when on.
+      TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
     ports:
       # Admin/debug endpoints (unauthenticated) plus the read/query/report API (X-API-Key
-      # required) -- Swagger UI at /docs, ReDoc at /redoc. Not used by the normal pipeline
-      # (MQTT in, Postgres out, poll loop) -- purely for manual testing and for n8n to call.
+      # required) plus the static web report UI at /ui -- Swagger UI at /docs, ReDoc at /redoc.
+      # Not used by the normal pipeline (MQTT in, Postgres out, poll loop) -- purely for manual
+      # testing, for n8n to call, and for the browser-based report.
       - "${INGEST_WORKER_API_PORT:-8080}:${INGEST_WORKER_API_PORT:-8080}"
+    volumes:
+      # Bind mount for stored clips -- only used when STORE_VIDEO=true, but always mounted so
+      # toggling the flag doesn't require a compose file change, just a restart.
+      - ${VIDEO_STORAGE_HOST_PATH:-./video-storage}:/data/video
     depends_on:
       - postgres-projects
+    networks:
+      - npm_proxy
+
+  # Optional local MQTT broker -- its own profile so it's fully opt-in and never collides with
+  # whatever broker is already running in production. Bring up a clean local/dev stack with
+  # `docker compose --profile pipeline --profile mqtt up -d`, then point MQTT_HOST=mosquitto
+  # (Compose service-name DNS) / MQTT_PORT=1883 at it instead of an external broker's IP.
+  mosquitto:
+    profiles: ["mqtt"]
+    image: eclipse-mosquitto:2
+    container_name: mosquitto
+    restart: unless-stopped
+    ports:
+      - "1883:1883"
+    volumes:
+      - ./mosquitto/config:/mosquitto/config
+      - ./mosquitto/data:/mosquitto/data
+      - ./mosquitto/log:/mosquitto/log
     networks:
       - npm_proxy
 

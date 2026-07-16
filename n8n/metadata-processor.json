@@ -299,6 +299,9 @@
     "Insert Vehicle Sighting (API)": {
       "main": [[{ "node": "Loop Over Claimed Events", "type": "main", "index": 0 }]]
     },
+    "Send Vehicle Photo (Telegram)": {
+      "main": [[{ "node": "Loop Over Claimed Events", "type": "main", "index": 0 }]]
+    },
     "Handle Failure (API)": {
       "main": [[{ "node": "Log Failure", "type": "main", "index": 0 }]]
     },

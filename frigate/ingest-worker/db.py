@@ -1,4 +1,5 @@
 import logging
+import os
 from datetime import datetime
 
 import psycopg2
@@ -60,21 +61,28 @@ def get_status_breakdown() -> list:
 
 
 def get_raw_event(event_id: int) -> dict | None:
-    rows = _execute("SELECT * FROM yard_stats.raw_events WHERE id = %s", (event_id,), fetch=True)
+    rows = _execute(
+        "SELECT *, (video_path IS NOT NULL) AS has_video FROM yard_stats.raw_events WHERE id = %s",
+        (event_id,), fetch=True,
+    )
     return rows[0] if rows else None
 
 
 def insert_raw_event(event: dict) -> None:
+    # video_status starts 'skipped' (not 'new') when STORE_VIDEO is off -- a cheap flag set once
+    # at ingest, so the video queue's WHERE video_status IN ('new','retry') never even considers
+    # these rows, rather than special-casing a disabled feature inside the poll loop.
+    initial_video_status = "new" if config.STORE_VIDEO else "skipped"
     _execute(
         """
         INSERT INTO yard_stats.raw_events
-            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot)
-        VALUES (%s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s, %s, %s)
+            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot, video_status)
+        VALUES (%s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s, %s, %s, %s)
         """,
         (
             event["camera"], event["zone"], event["objects"],
             event["start_time"], event["end_time"], event["det_id"],
-            event["has_clip"], event["has_snapshot"],
+            event["has_clip"], event["has_snapshot"], initial_video_status,
         ),
     )
 
@@ -149,9 +157,116 @@ def mark_crop_failed(event_id: int) -> None:
     )
 
 
+def set_telegram_photo_message_id(event_id: int, message_id: int) -> None:
+    _execute(
+        "UPDATE yard_stats.raw_events SET telegram_photo_message_id = %s WHERE id = %s",
+        (message_id, event_id),
+    )
+
+
+def reap_stale_video_processing() -> None:
+    _execute(
+        """
+        UPDATE yard_stats.raw_events
+        SET video_status = 'retry', video_status_changed_at = now()
+        WHERE video_status = 'processing'
+          AND video_status_changed_at < now() - (%s * interval '1 minute')
+        """,
+        (config.STALE_MINUTES,),
+    )
+
+
+def count_video_in_progress() -> int:
+    rows = _execute(
+        "SELECT count(*)::int AS in_progress_count FROM yard_stats.raw_events WHERE video_status = 'processing'",
+        fetch=True,
+    )
+    return rows[0]["in_progress_count"] if rows else 0
+
+
+def claim_video_batch(limit: int) -> list:
+    # Only claims rows the crop stage has already finished with -- video download uses the same
+    # camera/start/end window regardless of crop_status, but there's no reason to spend download
+    # bandwidth on a row that might still fail crop-stage validation upstream, and this keeps the
+    # video stage a strict downstream consumer of the crop stage, same relationship the AI stage
+    # already has with crop_status='done'.
+    return _execute(
+        """
+        UPDATE yard_stats.raw_events
+        SET video_status = 'processing', video_status_changed_at = now()
+        WHERE id IN (
+            SELECT id FROM yard_stats.raw_events
+            WHERE crop_status = 'done' AND video_status IN ('new', 'retry')
+            ORDER BY created_at ASC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        RETURNING *
+        """,
+        (limit,),
+        fetch=True,
+    )
+
+
+def mark_video_done(event_id: int, video_path: str) -> None:
+    _execute(
+        """
+        UPDATE yard_stats.raw_events
+        SET video_status = 'done', video_status_changed_at = now(), video_path = %s
+        WHERE id = %s
+        """,
+        (video_path, event_id),
+    )
+
+
+def mark_video_retry_or_failed(event_id: int, max_attempts: int) -> None:
+    # Same retry-or-fail-with-cap CASE logic as mark_crop_failed/fail_ai_event.
+    _execute(
+        """
+        UPDATE yard_stats.raw_events
+        SET video_attempt_count = video_attempt_count + 1,
+            video_status = CASE WHEN video_attempt_count + 1 >= %s THEN 'failed' ELSE 'retry' END,
+            video_status_changed_at = now()
+        WHERE id = %s
+        """,
+        (max_attempts, event_id),
+    )
+
+
+def _delete_video_files(paths: list[str]) -> int:
+    # Filesystem side-effect, deliberately run outside any DB transaction -- a delete here can't
+    # be rolled back, so it happens after the caller already knows which rows/paths matched, not
+    # nested inside the DELETE statements themselves. Missing files (already deleted, or a path
+    # from before VIDEO_STORAGE_PATH was ever configured) are not treated as errors.
+    deleted = 0
+    for path in paths:
+        if not path:
+            continue
+        try:
+            os.remove(path)
+            deleted += 1
+        except FileNotFoundError:
+            pass
+        except OSError:
+            logger.warning("Failed to delete video file %s during retention cleanup", path, exc_info=True)
+    return deleted
+
+
 def run_retention_cleanup(retention_months: int) -> None:
     # Same FK-safe child-before-parent delete order as the (now superseded) n8n
-    # "retention-cleanup.json" workflow.
+    # "retention-cleanup.json" workflow -- video files are collected and removed first (their
+    # paths only exist on the raw_events rows about to be deleted), then the usual DB sweep runs.
+    video_paths = [
+        row["video_path"] for row in _execute(
+            """
+            SELECT video_path FROM yard_stats.raw_events
+            WHERE start_ts < now() - (%s || ' months')::interval AND video_path IS NOT NULL
+            """,
+            (retention_months,), fetch=True,
+        )
+    ]
+    deleted_files = _delete_video_files(video_paths)
+
     _execute(
         """
         DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id IN (
@@ -176,7 +291,10 @@ def run_retention_cleanup(retention_months: int) -> None:
         "DELETE FROM yard_stats.raw_events WHERE start_ts < now() - (%s || ' months')::interval",
         (retention_months,),
     )
-    logger.info("Retention cleanup applied (retention_months=%s)", retention_months)
+    logger.info(
+        "Retention cleanup applied (retention_months=%s, video_files_deleted=%s)",
+        retention_months, deleted_files,
+    )
 
 
 def purge_older_than(cutoff: datetime, execute: bool) -> dict:
@@ -211,7 +329,16 @@ def purge_older_than(cutoff: datetime, execute: bool) -> dict:
         )[0]["c"],
     }
 
+    video_paths = [
+        row["video_path"] for row in _execute(
+            "SELECT video_path FROM yard_stats.raw_events WHERE start_ts < %s AND video_path IS NOT NULL",
+            (cutoff,), fetch=True,
+        )
+    ]
+    counts["video_files"] = len(video_paths)
+
     if execute:
+        deleted_files = _delete_video_files(video_paths)
         _execute(
             """
             DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id IN (
@@ -230,7 +357,7 @@ def purge_older_than(cutoff: datetime, execute: bool) -> dict:
         )
         _execute("DELETE FROM yard_stats.visits WHERE start_ts < %s", (cutoff,))
         _execute("DELETE FROM yard_stats.raw_events WHERE start_ts < %s", (cutoff,))
-        logger.info("Ad-hoc purge executed (cutoff=%s, counts=%s)", cutoff, counts)
+        logger.info("Ad-hoc purge executed (cutoff=%s, counts=%s, video_files_deleted=%s)", cutoff, counts, deleted_files)
 
     return counts
 
@@ -242,14 +369,21 @@ def list_events(
     end: datetime | None = None,
     crop_status: str | None = None,
     ai_status: str | None = None,
+    video_status: str | None = None,
     limit: int = 20,
     offset: int = 0,
 ) -> list:
     clauses = []
     params: list = []
     if object_type:
-        clauses.append("objects = %s")
-        params.append(object_type)
+        # Comma-separated ("car,truck") or a single value -- "all"/omitted means no filter.
+        # `objects` is a free-text label (see mqtt_ingest.parse_payload: Frigate's single
+        # `after.label` per row today, not an actual joined multi-label list), so this matches
+        # on exact equality against any of the requested types rather than an array/substring op.
+        types = [t.strip() for t in object_type.split(",") if t.strip() and t.strip().lower() != "all"]
+        if types:
+            clauses.append("objects = ANY(%s)")
+            params.append(types)
     if camera:
         clauses.append("camera = %s")
         params.append(camera)
@@ -265,12 +399,16 @@ def list_events(
     if ai_status:
         clauses.append("ai_status = %s")
         params.append(ai_status)
+    if video_status:
+        clauses.append("video_status = %s")
+        params.append(video_status)
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.extend([limit, offset])
     return _execute(
         f"""
-        SELECT id, camera, zone, objects, start_ts, end_ts, crop_status, ai_status, sub_label, score
+        SELECT id, camera, zone, objects, start_ts, end_ts, crop_status, ai_status, video_status,
+               sub_label, score, (video_path IS NOT NULL) AS has_video
         FROM yard_stats.raw_events
         {where}
         ORDER BY start_ts DESC

@@ -18,19 +18,21 @@ Everything is **MQTT-in, API-in, Postgres-out** — nothing here touches Frigate
 ```
 frigate-llm/
   frigate/                   # MAIN project folder -- the pipeline, plus Frigate's own config
-    docker-compose.yml        # ONE file, two Compose profiles: pipeline + nvr (see below)
+    docker-compose.yml        # ONE file, three Compose profiles: pipeline + nvr + mqtt (see below)
     .env.example                # ONE shared template covering both stacks below -- see comments
     sql/queue-debug.sql         # manual check/fix/reset queries for the raw_events queue
     backup-postgres-projects.sh
-    ingest-worker/               # the main service -- see below
+    ingest-worker/               # the main service -- see below (includes static/, the web UI)
+    mosquitto/                    # config/data/log for the optional local MQTT broker profile
     frigate.conf                 # Frigate's own config, read by the "frigate" service/profile
   n8n/                        # additional folder -- importable workflow JSON (AI stage, reports, Q&A)
 ```
 
-`frigate/docker-compose.yml` holds two independent stacks as Compose profiles -- `pipeline`
-(postgres-projects + ingest-worker) and `nvr` (Frigate itself) -- that still deploy to two
-different hosts despite sharing one file and one `.env.example`/`.env`. Profiles are opt-in
-(`docker compose --profile pipeline up -d` / `docker compose --profile nvr up -d`); a bare
+`frigate/docker-compose.yml` holds two independent stacks that still deploy to two different hosts
+despite sharing one file and one `.env.example`/`.env` -- `pipeline` (postgres-projects +
+ingest-worker) and `nvr` (Frigate itself) -- plus a third, fully optional `mqtt` profile (a local
+Mosquitto broker, for a from-scratch dev stack with no external broker dependency). Profiles are
+opt-in (`docker compose --profile pipeline up -d` / `docker compose --profile nvr up -d`); a bare
 `docker compose up -d` starts nothing, so there's no risk of starting the wrong stack on the wrong
 host. Each service only reads the environment variables it references, so the same `.env` can be
 copied to both hosts and each one only fills in / relies on its own section (documented via
@@ -47,19 +49,30 @@ Frigate (MQTT frigate/events, every object label: car/truck/person/dog/...)
    ▼
 ingest-worker/  (Python, one container, no LLM calls)
    - MQTT subscriber -> INSERT raw_events, unfiltered by label
-   - Poll loop, every POLL_INTERVAL_SECONDS:
+   - Crop-stage poll loop, every POLL_INTERVAL_SECONDS:
        reap stale crop_status='processing' -> count in-progress -> claim batch (FOR UPDATE SKIP LOCKED)
        -> GET Frigate event (region/sub_label/score) -> crop via built-in ffmpeg, size-capped
        -> store crop_image_base64, sub_label, score -> mark crop_status done/retry/failed
-   - Also applies schema.sql on every startup (idempotent) and runs retention cleanup on a slow cadence
+       -> fire-and-forget Telegram photo (telegram.py), store its message_id for later reply-threading
+   - Video-stage poll loop (own thread, only started if STORE_VIDEO=true), same shape as the crop
+     stage but downstream of it (claims crop_status='done' rows):
+       reap stale video_status='processing' -> count in-progress -> claim batch
+       -> wait VIDEO_INITIAL_WAIT_SECONDS on a fresh claim (Frigate may not have finalized the clip
+       yet) -> GET Frigate's clip.mp4 endpoint -> store to VIDEO_STORAGE_PATH, path only in Postgres
+       -> mark video_status done/retry/failed -> fire-and-forget Telegram video, replying to the
+       stored photo message_id if present
+   - Also applies schema.sql on every startup (idempotent) and runs retention cleanup on a slow
+     cadence (DB rows *and* their video files, once `video_path` is set)
    - FastAPI surface (Swagger UI at :8080/docs): unauthenticated admin/test endpoints
      (health/status/manual-crop/manual-retention, not part of the normal pipeline) plus an
-     X-API-Key-protected API (/events, /sightings, /stats, /reports, /ai-queue) that n8n and other
-     consumers call instead of querying Postgres directly -- this now includes the AI-stage queue
-     mechanics (claim/complete/fail), not just read-only queries
+     X-API-Key-protected API (/events, /sightings, /stats, /reports, /ai-queue, /media/video)
+     that n8n and other consumers call instead of querying Postgres directly -- this now includes
+     the AI-stage queue mechanics (claim/complete/fail), not just read-only queries -- plus a
+     static web report UI at /ui (Alpine.js, no build step) over that same API
    │  (crop_status = 'done', crop_image_base64/sub_label/score already on the row)
    ▼
-n8n Metadata Processor (car/truck/person, one shared queue) -- AI stage only, no Frigate/crop calls
+n8n Metadata Processor (car/truck/person, one shared queue) -- AI stage only, no Frigate/crop/video/
+Telegram calls
    - POST /ai-queue/claim -- reap stale, count in-progress, atomically claim a batch, all in one call
    - route by object type, call the VLM(s) directly against the claimed row's crop_image_base64
    - POST /sightings/vehicles or /sightings/persons -- insert + mark ai_status='done' in one call
@@ -70,35 +83,46 @@ Daily Report / Q&A agent (n8n) -- read-only, calls ingest-worker's query/report 
    (which itself only ever reads *_sightings rows, i.e. AI-analyzed events)
 ```
 
-Two independent queue state machines live on `raw_events` -- `crop_status`/`crop_status_changed_at`/
-`crop_attempt_count` and `ai_status`/`ai_status_changed_at`/`ai_attempt_count` -- and
-`ingest-worker` now *mechanically executes both* (the crop-stage poll loop owns the first
-directly; the `/ai-queue/*` endpoints own the second on n8n's behalf). n8n still *decides policy*
-for the AI stage -- `parallel_limit`/`stale_minutes`/`max_age_hours` are query params on
-`/ai-queue/claim` and `max_attempts` is a query param on `/ai-queue/{id}/fail`, all editable
-directly in those n8n HTTP Request nodes without touching `ingest-worker` code, the same "tune it
-here" spirit the old `Queue Config` node had. `ingest-worker` still never calls an LLM -- n8n
-still owns the actual VLM call and prompt; it just no longer runs raw SQL to do so.
+Three independent queue state machines live on `raw_events` -- `crop_status`/`crop_status_changed_at`/
+`crop_attempt_count`, `video_status`/`video_status_changed_at`/`video_attempt_count`, and
+`ai_status`/`ai_status_changed_at`/`ai_attempt_count` -- and `ingest-worker` *mechanically executes
+all three* (the crop- and video-stage poll loops own the first two directly, each in its own
+thread; the `/ai-queue/*` endpoints own the third on n8n's behalf). The video stage is a strict
+downstream consumer of the crop stage (it only claims `crop_status='done'` rows), the same
+relationship the AI stage already has with `crop_status`. n8n still *decides policy* for the AI
+stage -- `parallel_limit`/`stale_minutes`/`max_age_hours` are query params on `/ai-queue/claim` and
+`max_attempts` is a query param on `/ai-queue/{id}/fail`, all editable directly in those n8n HTTP
+Request nodes without touching `ingest-worker` code, the same "tune it here" spirit the old
+`Queue Config` node had. `ingest-worker` still never calls an LLM -- n8n still owns the actual VLM
+call and prompt; it just no longer runs raw SQL to do so. n8n also never touches Telegram, video
+storage, or Frigate directly -- those are entirely `ingest-worker`'s mechanical concern
+(`video.py`/`video_worker.py`/`telegram.py`), ported from the `FrigateRetry.json` n8n workflow this
+replaced rather than added to n8n.
 
-Both stages use the same shape: `new` (not picked up) → `processing` (claimed, work in flight) →
+All three stages use the same shape: `new` (not picked up) → `processing` (claimed, work in flight) →
 `retry` (crashed/reaped, or errored below that stage's attempt cap) → `failed` (errored at/above
-the cap, terminal) → `done`. `FOR UPDATE SKIP LOCKED` is what makes claiming race-safe against
-overlapping runs (multiple n8n executions, or this service's own poll loop).
+the cap, terminal) → `done`. `video_status` additionally has `skipped`, set at ingest time when
+`STORE_VIDEO=false` so the video queue never claims those rows at all. `FOR UPDATE SKIP LOCKED` is
+what makes claiming race-safe against overlapping runs (multiple n8n executions, or this service's
+own poll loops).
 
 ## Key pieces
 
-- **`ingest-worker`** does everything that isn't an LLM call: MQTT ingestion, both queue state
-  machines (crop-stage directly, AI-stage via API), Frigate bbox lookup, ffmpeg cropping, and a
-  read/query/report/AI-queue API over the data it collects
-  (`api.py`/`db.py`/`report.py`/`schemas.py`/`auth.py`). It's intentionally dumb/mechanical so it
-  can be plain, testable Python instead of n8n Code-node gymnastics. Self-contained: builds from
-  its own folder, bakes `schema.sql` into the image, needs only Postgres + MQTT + Frigate's HTTP
-  API to run.
+- **`ingest-worker`** does everything that isn't an LLM call: MQTT ingestion, all three queue state
+  machines (crop- and video-stage directly, AI-stage via API), Frigate bbox lookup, ffmpeg
+  cropping, clip download/storage, Telegram notifications, and a read/query/report/AI-queue/media
+  API over the data it collects (`api.py`/`db.py`/`report.py`/`schemas.py`/`auth.py`/`video.py`/
+  `video_worker.py`/`telegram.py`), plus the static web report UI (`static/`) served over that same
+  API. It's intentionally dumb/mechanical so it can be plain, testable Python instead of n8n
+  Code-node gymnastics. Self-contained: builds from its own folder, bakes `schema.sql` and
+  `static/` into the image, needs only Postgres + MQTT + Frigate's HTTP API to run (plus Telegram's
+  API if `TELEGRAM_ENABLED=true`).
 - **n8n** owns everything AI-shaped: deciding when to claim work and calling the VLM(s), the daily
-  report, and the Q&A workflow. Its processors never touch Frigate's API or crop anything
-  themselves — they only ever read `crop_image_base64` that's already sitting on the claimed row,
-  and no longer run raw SQL at all — claim/complete/fail all go through `ingest-worker`'s
-  `/ai-queue/*` and `/sightings/*` endpoints. `ingest-worker` never calls an LLM, by design.
+  report, and the Q&A workflow. Its processors never touch Frigate's API, crop or video anything
+  themselves, and never call Telegram — they only ever read `crop_image_base64` that's already
+  sitting on the claimed row, and no longer run raw SQL at all — claim/complete/fail all go through
+  `ingest-worker`'s `/ai-queue/*` and `/sightings/*` endpoints. `ingest-worker` never calls an LLM,
+  by design.
 - **VLM inference** goes through the user's existing `llama_slot_proxy` setup — one more per-agent
   slot/port pointing at its own `.gguf` + `mmproj` pair. Vehicle attributes and plate OCR are a
   single combined call to one model (merged for speed -- see `n8n/metadata-processor.json`'s
@@ -150,6 +174,41 @@ on-the-fly thumbnail per row (`THUMBNAIL_MAX_DIMENSION`, default 240px, via
 `crop.scale_image_base64`) for the inline preview, and only embeds the full-size image once, in
 the lightbox.
 
+### Video storage, Telegram notifications, and the web report UI
+
+`STORE_VIDEO=true` turns on the third queue stage (`video_status`) and its poll loop thread
+(`video_worker.py`/`video.py`). Frigate is often still finalizing the recording segment when the
+`end` event fires, so a freshly claimed row waits `VIDEO_INITIAL_WAIT_SECONDS` before the first
+download attempt; the clip is fetched from Frigate's own
+`/api/{camera}/start/{start_ts-5s}/end/{end_ts+5s}/clip.mp4` endpoint (not the event-id endpoint
+`crop.py` uses), and a response at/below `VIDEO_MIN_VALID_BYTES` is treated as Frigate's
+not-ready-yet placeholder rather than a real clip, retried up to `VIDEO_MAX_ATTEMPTS` times. Only
+the resulting filesystem path (`VIDEO_STORAGE_PATH/{YYYY}/{MM}/{DD}/{object_type}-{event_id}-
+{start_ts_epoch}.mp4`) is stored in Postgres (`video_path`) -- the file itself lives on disk only.
+This whole stage ports the behavioral spec proved out by the `FrigateRetry.json` n8n workflow it
+replaces, straight into Python rather than adding new n8n nodes.
+
+`TELEGRAM_ENABLED=true` turns on fire-and-forget notifications (`telegram.py`): a photo right after
+crop (regardless of `STORE_VIDEO` -- photo-only is a valid steady state), and, once a clip is
+stored, a video sent as a reply to that photo (`telegram_photo_message_id`, persisted on the row --
+a durable version of the `FrigateRetry.json` workflow's in-memory `pendingReplies` map, so the
+reply-threading survives a service restart). Both directions are wrapped so a Telegram failure
+(bad token, rate limit, network blip) can never take down the crop or video poll loop.
+
+The web report UI (`/ui`, static files baked into the image, Alpine.js vendored locally -- no CDN
+requests) reads the same API everything else does: `GET /events` (filterable by
+`object_type`/`crop_status`/`ai_status`/`video_status`, defaults to the last 1 hour),
+`GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same `crop.scale_image_base64` helper
+`report.py` uses) for the grid, and `GET /media/video/{id}` (range-request `FileResponse`, so the
+browser's scrubber works) or `GET /events/{id}/image` for the lightbox depending on `has_video`.
+Those three endpoints alone also accept the API key as an `?api_key=` query param (in addition to
+the usual `X-API-Key` header) since `<img>`/`<video>` tags can't attach custom headers -- the UI
+itself just stores the key in a long-lived cookie after validating it against the API once.
+
+An optional `mosquitto` Compose profile (`--profile mqtt`) provides a local/dev MQTT broker for
+bringing up the whole pipeline from scratch without an existing broker -- fully opt-in, never
+collides with a production broker unless you deliberately point `MQTT_HOST=mosquitto` at it.
+
 ### Cropping — `region`, not `box`, and why it's capped
 
 Frigate's event `data.box` is the tight detected-object box — often just a few percent of the
@@ -170,9 +229,11 @@ so there's no analysis benefit to sending a bigger image, only more load on the 
 
 ### Schema (`yard_stats`)
 
-- `raw_events` — one row per Frigate `end` event, any label. Carries both queue state machines
+- `raw_events` — one row per Frigate `end` event, any label. Carries all three queue state machines
   plus `crop_image_base64`, `sub_label` (Frigate's own LPR read), `score` — all captured by
-  `ingest-worker` from one Frigate API fetch, so n8n never needs to call Frigate itself.
+  `ingest-worker` from one Frigate API fetch, so n8n never needs to call Frigate itself — and,
+  when video storage is on, `video_path` (filesystem path only, never the file itself) and
+  `telegram_photo_message_id` (for threading the later video reply).
 - `visits` — deduplicated, cross-camera-merged events (not yet wired into the current pipeline).
 - `vehicle_sightings` / `person_sightings` — one row per AI-analyzed event. `vehicle_sightings`
   keeps `plate_text_frigate` (from `raw_events.sub_label`) next to `plate_text_llm` (the OCR
@@ -191,12 +252,14 @@ so there's no analysis benefit to sending a bigger image, only more load on the 
 - Version/store prompts in one place (a `Set` node / small config table), not inlined across
   multiple n8n workflows.
 - Unattended workflows retry-with-a-cap rather than failing immediately or retrying forever:
-  both queue stages increment an attempt counter and only go terminal (`failed`) at/above
-  `MAX_ATTEMPTS` (default 3) — below that, a failure goes back to `retry` and is picked up on a
-  later run, not looped within the same execution.
+  all three queue stages increment an attempt counter and only go terminal (`failed`) at/above
+  that stage's max-attempts setting (`MAX_ATTEMPTS`/`VIDEO_MAX_ATTEMPTS`, both default small) —
+  below that, a failure goes back to `retry` and is picked up on a later run, not looped within
+  the same execution.
 - Treat plate text and clips as semi-sensitive data — `ingest-worker` applies a retention sweep
-  (`RETENTION_MONTHS`, default 12) on its own schedule (`RETENTION_CHECK_INTERVAL_SECONDS`); an
-  equivalent n8n workflow existed early on but has since been removed from `n8n/` as superseded.
+  (`RETENTION_MONTHS`, default 12) on its own schedule (`RETENTION_CHECK_INTERVAL_SECONDS`),
+  deleting stored video files off disk (best-effort) alongside the DB rows; an equivalent n8n
+  workflow existed early on but has since been removed from `n8n/` as superseded.
 - The Coral's base detection model is the accuracy ceiling for anything reaching this pipeline
   (missed detections never generate an event at all) — a Frigate/Frigate+ concern, not something
   to compensate for at the LLM layer.
@@ -208,8 +271,11 @@ so there's no analysis benefit to sending a bigger image, only more load on the 
   (built by `.github/workflows/ingest-worker-image.yml`); use `docker compose --profile pipeline
   build ingest-worker` first only if overriding the compose file's `image:` with `build:
   ./ingest-worker` for local development.
+- Add `--profile mqtt` to also bring up a local Mosquitto broker (`MQTT_HOST=mosquitto`) for a
+  from-scratch local/dev stack with no external broker dependency.
 - Manual DB checks/fixes: `frigate/sql/queue-debug.sql` (status breakdowns, force-retry, resets).
-- Manual API testing: `http://<host>:8080/docs` (Swagger UI) once `ingest-worker` is running.
+- Manual API testing: `http://<host>:8080/docs` (Swagger UI) once `ingest-worker` is running; the
+  web report UI is at `http://<host>:8080/ui`.
 - n8n workflows are plain JSON exports under `n8n/` — import via n8n's UI, fill in credentials
   after import (`REPLACE_AFTER_IMPORT` placeholders), then manually trigger once against a few
   real rows before enabling a workflow's schedule trigger.

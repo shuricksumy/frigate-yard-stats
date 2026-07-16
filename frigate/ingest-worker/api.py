@@ -1,13 +1,18 @@
+import base64
+import os
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 
 import config
+import crop
 import crop_worker
 import db
 import report
 import schemas
-from auth import require_api_key
+from auth import require_api_key, require_api_key_header_or_query
 
 app = FastAPI(
     title="ingest-worker",
@@ -80,18 +85,26 @@ def purge_old_records(
 
 @app.get("/events", response_model=list[schemas.EventSummary], tags=["events"], dependencies=[Depends(require_api_key)])
 def get_events(
-    object_type: str | None = Query(None, description="Exact match on Frigate's object label, e.g. 'car', 'person', 'truck'"),
+    object_type: str | None = Query(None, description="Comma-separated Frigate object labels, e.g. 'car,truck'. Omit or pass 'all' for no filter"),
     camera: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
     crop_status: str | None = None,
     ai_status: str | None = None,
+    video_status: str | None = None,
+    hours: float = Query(1, gt=0, description="Used when start/end aren't both given -- window is the last N hours (default: last 1 hour)"),
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    """List raw_events, most recent first. No image field -- keeps list responses small; use
-    GET /events/{id} for a single event's full detail including its cropped image."""
-    return db.list_events(object_type, camera, start, end, crop_status, ai_status, limit, offset)
+    """List raw_events, most recent first. Defaults to the last 1 hour, every object type, every
+    ai_status -- matching the web report's default view. No image field -- keeps list responses
+    small; use GET /events/{id} for full detail or GET /events/{id}/thumbnail for a small preview
+    image."""
+    resolved_start, resolved_end = _resolve_window(start, end, hours)
+    return db.list_events(
+        object_type, camera, resolved_start, resolved_end,
+        crop_status, ai_status, video_status, limit, offset,
+    )
 
 
 @app.get("/events/{event_id}", response_model=schemas.EventDetail, tags=["events"], dependencies=[Depends(require_api_key)])
@@ -101,6 +114,45 @@ def get_event(event_id: int):
     if row is None:
         raise HTTPException(status_code=404, detail=f"raw_event {event_id} not found")
     return row
+
+
+@app.get("/events/{event_id}/thumbnail", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
+def get_event_thumbnail(event_id: int):
+    """A small on-the-fly JPEG (THUMBNAIL_MAX_DIMENSION, reuses report.py's same scale-down
+    helper) for the web report's grid view -- keeps GET /events list-sized responses light by
+    never embedding the full crop_image_base64 there. Accepts X-API-Key header or ?api_key= query
+    param since this is loaded directly by an <img> tag."""
+    row = db.get_raw_event(event_id)
+    if row is None or not row.get("crop_image_base64"):
+        raise HTTPException(status_code=404, detail=f"No crop image for raw_event {event_id}")
+    thumbnail_base64 = crop.scale_image_base64(row["crop_image_base64"], config.THUMBNAIL_MAX_DIMENSION)
+    return Response(content=base64.b64decode(thumbnail_base64), media_type="image/jpeg")
+
+
+@app.get("/events/{event_id}/image", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
+def get_event_image(event_id: int):
+    """Full-size crop as raw JPEG bytes (decodes the stored crop_image_base64) -- used by the web
+    report's lightbox when an event has no video to show instead. Accepts X-API-Key header or
+    ?api_key= query param since this is loaded directly by an <img> tag."""
+    row = db.get_raw_event(event_id)
+    if row is None or not row.get("crop_image_base64"):
+        raise HTTPException(status_code=404, detail=f"No crop image for raw_event {event_id}")
+    return Response(content=base64.b64decode(row["crop_image_base64"]), media_type="image/jpeg")
+
+
+@app.get("/media/video/{event_id}", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
+def get_event_video(event_id: int):
+    """Streams the stored clip off disk (range requests supported via Starlette's FileResponse,
+    so the browser's video scrubber works) -- never queried through Postgres, video_path only
+    ever points at a file under VIDEO_STORAGE_PATH. Accepts X-API-Key header or ?api_key= query
+    param since this is loaded directly by a <video> tag."""
+    row = db.get_raw_event(event_id)
+    if row is None or not row.get("video_path"):
+        raise HTTPException(status_code=404, detail=f"No video for raw_event {event_id}")
+    video_path = row["video_path"]
+    if not os.path.isfile(video_path):
+        raise HTTPException(status_code=404, detail=f"Video file missing on disk for raw_event {event_id}")
+    return FileResponse(video_path, media_type="video/mp4", filename=os.path.basename(video_path))
 
 
 @app.get("/sightings/vehicles", response_model=list[schemas.VehicleSighting], tags=["sightings"], dependencies=[Depends(require_api_key)])
@@ -201,3 +253,12 @@ def fail_ai_event(
     below max_attempts this goes back to ai_status='retry' (picked up on a future claim), at/above
     it goes terminal 'failed'."""
     return db.fail_ai_event(event_id, max_attempts)
+
+
+# Static web report UI (index.html/app.js/style.css/vendor/*) -- all local files, no CDN
+# requests. Calls back into GET /events, /events/{id}/thumbnail, /media/video/{id} above using an
+# API key the user enters once and stores in a cookie. Baked into the image by the Dockerfile
+# (COPY static/ ./static/); mounted last so it doesn't shadow any API route above.
+_STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+if os.path.isdir(_STATIC_DIR):
+    app.mount("/ui", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")

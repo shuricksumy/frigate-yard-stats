@@ -51,6 +51,21 @@ CREATE INDEX IF NOT EXISTS idx_raw_events_has_snapshot ON yard_stats.raw_events 
 CREATE INDEX IF NOT EXISTS idx_raw_events_crop_status ON yard_stats.raw_events (crop_status);
 CREATE INDEX IF NOT EXISTS idx_raw_events_ai_status ON yard_stats.raw_events (ai_status);
 
+-- Third queue stage, same shape as crop_status/ai_status: new -> processing -> retry/failed ->
+-- done, plus 'skipped' for when STORE_VIDEO=false (set at ingest time so the queue never claims
+-- those rows at all, rather than special-casing a disabled feature inside the poll loop).
+ALTER TABLE yard_stats.raw_events ADD COLUMN IF NOT EXISTS video_status TEXT NOT NULL DEFAULT 'new'
+  CHECK (video_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
+ALTER TABLE yard_stats.raw_events ADD COLUMN IF NOT EXISTS video_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE yard_stats.raw_events ADD COLUMN IF NOT EXISTS video_attempt_count INTEGER NOT NULL DEFAULT 0;
+-- Only the filesystem path is stored here -- the video file itself lives on disk only
+-- (VIDEO_STORAGE_PATH), never in Postgres.
+ALTER TABLE yard_stats.raw_events ADD COLUMN IF NOT EXISTS video_path TEXT;
+-- Durable equivalent of the n8n workflow's in-memory pendingReplies map -- lets the later video
+-- Telegram send reply-thread onto the earlier photo send, even across a service restart.
+ALTER TABLE yard_stats.raw_events ADD COLUMN IF NOT EXISTS telegram_photo_message_id BIGINT;
+CREATE INDEX IF NOT EXISTS idx_raw_events_video_status ON yard_stats.raw_events (video_status);
+
 CREATE TABLE IF NOT EXISTS yard_stats.visits (
   id SERIAL PRIMARY KEY,
   zone TEXT,

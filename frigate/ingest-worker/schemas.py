@@ -12,6 +12,8 @@ class EventSummary(BaseModel):
     end_ts: datetime
     crop_status: str
     ai_status: str
+    video_status: str
+    has_video: bool
     sub_label: str | None
     score: float | None
 

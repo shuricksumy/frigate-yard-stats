@@ -56,3 +56,32 @@ API_PORT = int(_env("API_PORT", "8080"))
 # Required on the read/query/report endpoints (X-API-Key header) -- NOT on /health, /status,
 # /crop/{id}, /retention/run, which stay as the existing unauthenticated internal admin surface.
 API_KEY = _env("API_KEY")
+
+# -------------------------------------------------
+# Video storage (third queue stage: video_status) -- see video.py / video_worker.py.
+# -------------------------------------------------
+STORE_VIDEO = _env("STORE_VIDEO", "false").lower() == "true"
+# Mount point inside the container -- pair with a bind mount in docker-compose.yml
+# (VIDEO_STORAGE_HOST_PATH on the host side). Files are laid out as
+# {VIDEO_STORAGE_PATH}/{YYYY}/{MM}/{DD}/{object_type}-{event_id}-{start_ts_epoch}.mp4.
+VIDEO_STORAGE_PATH = _env("VIDEO_STORAGE_PATH", "/data/video")
+# How many rows may be video_status='processing' at once -- kept separate from (and by default
+# lower than) PARALLEL_LIMIT so the video stage doesn't compete with the crop stage for Frigate's
+# API/bandwidth.
+VIDEO_PARALLEL_LIMIT = int(_env("VIDEO_PARALLEL_LIMIT", "1"))
+# Frigate is still finalizing the recording segment when the "end" event fires -- wait this long
+# before the *first* download attempt on a freshly claimed row (mirrors the n8n workflow's
+# "Wait 10s" node ahead of "Download Clip").
+VIDEO_INITIAL_WAIT_SECONDS = float(_env("VIDEO_INITIAL_WAIT_SECONDS", "10"))
+# A response body at/below this size is treated as Frigate's "not ready yet" placeholder, not a
+# real clip -- same >1000-byte check as the n8n workflow's "Check Clip Size" node.
+VIDEO_MIN_VALID_BYTES = int(_env("VIDEO_MIN_VALID_BYTES", "1000"))
+VIDEO_MAX_ATTEMPTS = int(_env("VIDEO_MAX_ATTEMPTS", "5"))
+VIDEO_RETRY_WAIT_SECONDS = float(_env("VIDEO_RETRY_WAIT_SECONDS", "5"))
+
+# -------------------------------------------------
+# Telegram notifications -- see telegram.py. Disabled (no-op) unless explicitly turned on.
+# -------------------------------------------------
+TELEGRAM_ENABLED = _env("TELEGRAM_ENABLED", "false").lower() == "true"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
