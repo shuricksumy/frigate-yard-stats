@@ -36,11 +36,11 @@
       <div class="filter-fields">
         <label class="search-field">
           Search AI analysis
-          <input type="text" x-model="filters.q" placeholder="e.g. red toyota, plate ABC123" :disabled="!!filters.eventId || viewMode === 'visits'">
+          <input type="text" x-model="filters.q" placeholder="e.g. red toyota, plate ABC123" :disabled="!!filters.eventId || viewMode === 'visits'" :title="viewMode === 'visits' ? 'Not available in Visits view -- switch to Events to search' : (filters.eventId ? 'Ignored while searching a specific Event ID' : '')">
         </label>
         <label>
           Time range
-          <select x-model.number="filters.hours" :disabled="!!(filters.eventId || filters.q)">
+          <select x-model.number="filters.hours" :disabled="!!(filters.eventId || filters.q || filters.start || filters.end)" :title="(filters.start || filters.end) ? 'Ignored while a custom date range (From/To) is set' : ((filters.eventId || filters.q) ? 'Ignored while searching by Event ID or text' : '')">
             <template x-for="h in hoursOptions" :key="h">
               <option :value="h" x-text="'Last ' + h + (h === 1 ? ' hour' : ' hours')"></option>
             </template>
@@ -50,19 +50,19 @@
         <div class="advanced-filters" x-show="advancedSearch" style="display:none">
           <label>
             Event ID
-            <input type="number" x-model="filters.eventId" placeholder="e.g. 1234" :disabled="viewMode === 'visits'">
+            <input type="number" x-model="filters.eventId" placeholder="e.g. 1234" :disabled="viewMode === 'visits'" :title="viewMode === 'visits' ? 'Not available in Visits view' : ''">
           </label>
           <label>
             From
-            <input type="datetime-local" x-model="filters.start" :disabled="!!(filters.eventId || filters.q)">
+            <input type="datetime-local" x-model="filters.start" :disabled="!!(filters.eventId || filters.q)" :title="(filters.eventId || filters.q) ? 'Ignored while searching by Event ID or text' : ''">
           </label>
           <label>
             To
-            <input type="datetime-local" x-model="filters.end" :disabled="!!(filters.eventId || filters.q)">
+            <input type="datetime-local" x-model="filters.end" :disabled="!!(filters.eventId || filters.q)" :title="(filters.eventId || filters.q) ? 'Ignored while searching by Event ID or text' : ''">
           </label>
           <label>
             Type
-            <select x-model="filters.objectType" :disabled="!!filters.eventId">
+            <select x-model="filters.objectType" :disabled="!!filters.eventId" :title="filters.eventId ? 'Ignored while searching a specific Event ID' : ''">
               <option value="all">All</option>
               <template x-for="type in objectTypes" :key="type">
                 <option :value="type" x-text="type.charAt(0).toUpperCase() + type.slice(1)"></option>
@@ -71,7 +71,7 @@
           </label>
           <label>
             AI status
-            <select x-model="filters.aiStatus" :disabled="!!filters.eventId || viewMode === 'visits'">
+            <select x-model="filters.aiStatus" :disabled="!!filters.eventId || viewMode === 'visits'" :title="viewMode === 'visits' ? 'Not available in Visits view' : (filters.eventId ? 'Ignored while searching a specific Event ID' : '')">
               <option value="all">All</option>
               <option value="new">New</option>
               <option value="processing">Processing</option>
@@ -81,7 +81,7 @@
             </select>
           </label>
           <label class="checkbox-label">
-            <input type="checkbox" x-model="filters.onlyWithMedia" :disabled="!!filters.eventId || viewMode === 'visits'">
+            <input type="checkbox" x-model="filters.onlyWithMedia" :disabled="!!filters.eventId || viewMode === 'visits'" :title="viewMode === 'visits' ? 'Not available in Visits view' : (filters.eventId ? 'Ignored while searching a specific Event ID' : '')">
             Only with media
           </label>
         </div>
