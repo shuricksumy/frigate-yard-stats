@@ -34,11 +34,16 @@ jobs:
 
       - name: Extract image metadata
         id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@v5.7.0
         with:
           images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          # metadata-action always calls the GitHub API to resolve repo info (default branch,
+          # used internally for `edge`-type tags) regardless of which tag types are configured --
+          # without an explicit github-token it falls back to process.env.GITHUB_TOKEN, which this
+          # workflow never exports, so that call runs unauthenticated and 404s against this repo.
+          github-token: ${{ secrets.GITHUB_TOKEN }}
           tags: |
-            type=raw,value=latest,enable={{is_default_branch}}
+            type=raw,value=latest
             type=sha,prefix=,format=short
 
       - name: Build and push
