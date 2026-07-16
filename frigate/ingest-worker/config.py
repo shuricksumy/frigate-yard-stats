@@ -144,6 +144,15 @@ VISIT_THUMB_CROP_PARALLEL_LIMIT = int(_env("VISIT_THUMB_CROP_PARALLEL_LIMIT", "1
 VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS = float(_env("VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS", "5"))
 VISIT_THUMB_CROP_MAX_ATTEMPTS = int(_env("VISIT_THUMB_CROP_MAX_ATTEMPTS", "3"))
 VISIT_THUMB_CROP_RETRY_WAIT_SECONDS = float(_env("VISIT_THUMB_CROP_RETRY_WAIT_SECONDS", "5"))
+# How close to the actual end of Frigate's returned clip the thumb_time offset is still allowed to
+# land (crop.crop_visit_thumbnail's ffprobe duration check) -- confirmed in production that
+# Frigate's continuous-recording clip endpoint can return noticeably less footage than requested
+# (a motion-based recording gap), and seeking too close to a real clip's tail can hit encoder/
+# keyframe edge cases regardless of the gap issue itself. 0.5s is a conservative default; raise it
+# if a particular camera/encoder combination still shows edge-of-clip artifacts, or lower it if a
+# camera reliably delivers full-duration clips and you want to squeeze out slightly more usable
+# offset range.
+VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS = float(_env("VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS", "0.5"))
 
 # -------------------------------------------------
 # Telegram notifications -- see telegram.py. Disabled (no-op) unless explicitly turned on.

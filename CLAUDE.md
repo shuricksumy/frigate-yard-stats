@@ -601,6 +601,35 @@ trade-off appropriate to how that consumer works:
   photo in place (`editMessageMedia`), which was considered and rejected as more moving parts for
   the same result.
 
+#### Bug: a truncated continuous-recording clip could silently produce a wrong-moment crop
+
+`crop_visit_thumbnail`'s offset math (`thumb_time - (visit.start_ts - 5s)`) assumes
+`video.build_clip_url`'s requested window (`start_ts-5s` to `end_ts+5s`) comes back in full. It
+doesn't always: confirmed live in production that Frigate's continuous-recording clip endpoint can
+silently return far less footage than requested -- a genuine case had a 13-second request
+(`start_ts-5` to `end_ts+5`) come back only ~4.06 seconds long (`ffprobe`-confirmed), almost
+certainly a motion-based recording gap rather than a "not ready yet" condition
+`VIDEO_MIN_VALID_BYTES` would catch (the response wasn't too *small*, just shorter in *duration*
+than the window asked for). The computed `thumb_time` offset (~6.1s) was past that real 4.06s of
+footage -- ffmpeg doesn't error when `-ss` seeks past the actual end of an HTTP-streamed input, it
+silently clamps to whatever frame is near the tail instead, so the resulting crop looked plausible
+but was quietly from the wrong moment, with nothing in logs or `thumb_crop_status='done'` to
+signal it. This was diagnosed by cross-referencing three things against the same visit: (1) the
+crop's own burned-in camera-OSD-clock timestamp reading ~5s earlier than `thumb_time`/`start_ts`
+predicted, (2) `ffprobe`'s reported clip duration (4.06s) vs. the requested window (13s), and (3) a
+sweep of frames grabbed at 0.1s/1.0s/2.0s/3.0s/3.9s offsets showing perfectly linear 1:1 playback
+within the clip -- ruling out a decode/seek-precision issue and pointing squarely at "the clip is
+shorter than we assumed" as the root cause (a *separate*, purely cosmetic ~5s drift between the
+camera's own onboard OSD clock and Frigate/NTP time is real too, but isn't what was causing the
+wrong-frame problem). Fixed by probing the actual clip duration (`crop._probe_duration_seconds`,
+`ffprobe -show_format`) before seeking and raising if the offset would land within
+`VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS` (default 0.5s) of it, so this now fails cleanly
+into the existing retry-then-fallback path (`visit_thumb_worker.mark_visit_thumb_crop_retry_or_failed`
+-> eventually the representative event's own crop) instead of silently returning a mistimed image.
+The margin is a tunable, not a bare `offset >= duration` check -- different cameras/encoders can
+behave differently right at a clip's tail (keyframe spacing, encoder flush artifacts) on top of
+the recording-gap issue itself, so there's no single universally-correct cutoff to hardcode.
+
 ### Camera allow-list
 
 `CAMERAS` (optional, comma-separated Frigate camera names, e.g. `outside,outside2`) gates both

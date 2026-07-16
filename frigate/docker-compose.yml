@@ -118,6 +118,10 @@ services:
       VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS: ${VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS:-5}
       VISIT_THUMB_CROP_MAX_ATTEMPTS: ${VISIT_THUMB_CROP_MAX_ATTEMPTS:-3}
       VISIT_THUMB_CROP_RETRY_WAIT_SECONDS: ${VISIT_THUMB_CROP_RETRY_WAIT_SECONDS:-5}
+      # How close to the end of Frigate's returned clip (ffprobe-measured) the thumb_time offset
+      # may still land -- confirmed in production that Frigate's continuous-recording clip
+      # endpoint can return noticeably less footage than requested. Tune per-camera if needed.
+      VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS: ${VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS:-0.5}
       # Telegram notifications (photo on crop, video reply once stored) -- see telegram.py.
       # Disabled by default; TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID only need to be set when on.
       TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}
