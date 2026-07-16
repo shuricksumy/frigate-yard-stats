@@ -224,6 +224,31 @@ on-the-fly thumbnail per row (`THUMBNAIL_MAX_DIMENSION`, default 240px, via
 `crop.scale_image_base64`) for the inline preview, and only embeds the full-size image once, in
 the lightbox.
 
+`/reports/generate` also takes the same `source=events|visits` param `/ai-queue/claim` does
+(`report.generate_report`/`db.get_report_data`) -- `source=visits` applies the identical dedup
+(`only_visit_representative`'s correlated subquery, inlined into `get_report_data`'s two sighting
+queries): only the sighting for a visit's earliest-linked raw_event, plus every sighting whose
+raw_event was never grouped into a visit at all, so one real-world visit spanning several det_ids
+(re-track, label flicker) shows up once in the report instead of once per det_id. Unlike the
+`source` param on the AI-queue claim (which changes which rows are *eligible to claim*, i.e. a
+live queue-state decision), this is a pure read-time filter over already-`done` sightings -- it
+never touches `ai_status`, so `n8n/daily-report.json` (events, `source=events`, the default) and
+`n8n/alerts-report.json` (visits, `source=visits`) can both run on their own schedules without
+any conflict, unlike the two metadata-processor workflows below.
+
+### AI-stage n8n workflows are mutually exclusive, not parallel
+
+`n8n/metadata-processor.json` ("Events") and `n8n/metadata-processor-alerts.json` ("Alerts/
+Visits") are identical except for `source=events` vs `source=visits` on their `Claim Next Batch
+(API)` node. Both claim from the same `ai_status` column on `raw_events` -- `source` only changes
+which rows are *eligible* to claim (see `claim_ai_batch`'s `only_visit_representative` above), not
+a separate queue or state machine, unlike the genuinely independent `STORE_VIDEO`/
+`STORE_VIDEO_ALERTS` and `TELEGRAM_ENABLED`/`TELEGRAM_ALERTS_ENABLED` pairs. Only one of the two
+should ever be active in n8n at a time -- running both concurrently doesn't give you two
+independent datasets, it just means whichever workflow's poll tick fires first wins a given row
+FOR UPDATE SKIP LOCKED, and the loser's claim call simply returns fewer or no rows that tick. A/B
+which is more suitable for your traffic by toggling which workflow is active, not by running both.
+
 ### Video storage, Telegram notifications, and the web report UI
 
 `STORE_VIDEO=true` turns on the third queue stage (`video_status`) and its poll loop thread

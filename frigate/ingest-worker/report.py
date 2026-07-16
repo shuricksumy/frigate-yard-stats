@@ -35,8 +35,8 @@ def _img_cell(image_base64: str | None, lightboxes: list, counter: list) -> str:
     )
 
 
-def generate_report(start: datetime, end: datetime) -> dict:
-    data = db.get_report_data(start, end)
+def generate_report(start: datetime, end: datetime, source: str = "events") -> dict:
+    data = db.get_report_data(start, end, source)
     cars = data["vehicles"]
     persons = data["persons"]
 

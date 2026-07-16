@@ -1118,28 +1118,49 @@ def fail_ai_event(event_id: int, max_attempts: int) -> dict:
     return rows[0]
 
 
-def get_report_data(start: datetime, end: datetime) -> dict:
+def get_report_data(start: datetime, end: datetime, source: str = "events") -> dict:
     # Same joins daily-report.json's two query nodes used to run directly -- filtered by
     # created_at (when the AI stage produced the sighting), not start_ts, matching that behavior.
-    vehicles = _execute(
+    # source="visits" (the alerts-report workflow) applies the same dedup claim_ai_batch's
+    # only_visit_representative does -- only the visit's earliest-linked raw_event's sighting, plus
+    # every sighting whose raw_event was never grouped into a visit at all -- so one real-world
+    # activity a visit grouped across several det_ids (re-track, label flicker) shows up once in
+    # the report instead of once per det_id.
+    visit_clause = ""
+    if source == "visits":
+        visit_clause = """
+        AND (
+            re.visit_id IS NULL
+            OR re.id = (
+                SELECT re2.id FROM yard_stats.raw_events re2
+                WHERE re2.visit_id = re.visit_id
+                ORDER BY re2.start_ts ASC, re2.id ASC
+                LIMIT 1
+            )
+        )
         """
-        SELECT re.camera, re.zone, re.start_ts, re.crop_image_base64,
+    vehicles = _execute(
+        f"""
+        SELECT re.id AS raw_event_id, re.camera, re.zone, re.start_ts, re.crop_image_base64,
                vs.color, vs.body_type, vs.make_guess, vs.make_confidence,
                vs.model_guess, vs.model_confidence, vs.notable_features,
                vs.plate_text_llm, vs.plate_text_frigate, vs.notes
         FROM yard_stats.vehicle_sightings vs
         JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
         WHERE vs.created_at >= %s AND vs.created_at <= %s
+        {visit_clause}
         ORDER BY re.start_ts ASC
         """,
         (start, end), fetch=True,
     )
     persons = _execute(
-        """
-        SELECT re.camera, re.zone, re.start_ts, re.crop_image_base64, ps.description, ps.notes
+        f"""
+        SELECT re.id AS raw_event_id, re.camera, re.zone, re.start_ts, re.crop_image_base64,
+               ps.description, ps.notes
         FROM yard_stats.person_sightings ps
         JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
         WHERE ps.created_at >= %s AND ps.created_at <= %s
+        {visit_clause}
         ORDER BY re.start_ts ASC
         """,
         (start, end), fetch=True,

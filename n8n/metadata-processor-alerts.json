@@ -1,5 +1,5 @@
 {
-  "name": "Yard Stats: Metadata Processor (Events)",
+  "name": "Yard Stats: Metadata Processor (Alerts/Visits)",
   "nodes": [
     {
       "id": "1",
@@ -19,7 +19,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [400, 300],
-      "notes": "Replaces the old Reap Stale Processing Items / Count In-Progress Items / Check Capacity / Claim Next Batch Postgres+Code+If nodes -- ingest-worker's /ai-queue/claim now does all four steps in one call (reap stale, count in-progress, compute capacity, atomically claim up to parallel_limit crop_status='done' rows FOR UPDATE SKIP LOCKED). Tune throughput by editing the query params below. One shared queue across all object_types (not claimed separately per type), newest event first -- older backlog only gets swept up once capacity isn't all consumed by newer rows. Returns {events: [...]} -- empty if no capacity or no work. max_age_hours (set to 6 below) means rows older than 6h are never claimed at all -- a safety valve so a stale backlog can't eat capacity that could go to fresher events. Delete the param (or raise the value) if you'd rather eventually process everything regardless of age. source=events (explicit here, also the default) claims every eligible raw_event independently, including every duplicate det_id a visit later groups together. IMPORTANT: this workflow and its sibling 'Yard Stats: Metadata Processor (Alerts/Visits)' both claim from the SAME ai_status queue on raw_events -- source only changes which rows are eligible, not a separate queue. Only ever activate one of the two at a time; running both means whichever polls first wins a given row, not two independent datasets.",
+      "notes": "Sibling of 'Yard Stats: Metadata Processor (Events)', differing only in source=visits: skips analyzing duplicate det_ids a visit already grouped together (re-track, label flicker, cross-camera-angle wasn't merged though -- see CLAUDE.md), claiming only the visit's earliest-linked raw_event, plus every raw_event never grouped into a visit at all. IMPORTANT: this workflow and its sibling both claim from the SAME ai_status queue on raw_events -- source only changes which rows are eligible, not a separate queue. Only ever activate one of the two at a time; running both means whichever polls first wins a given row, not two independent datasets. max_age_hours (set to 6 below) means rows older than 6h are never claimed at all -- same safety valve as the events-flow sibling.",
       "notesInFlow": true,
       "parameters": {
         "method": "POST",
@@ -31,7 +31,7 @@
             { "name": "parallel_limit", "value": "3" },
             { "name": "stale_minutes", "value": "5" },
             { "name": "max_age_hours", "value": "6" },
-            { "name": "source", "value": "events" }
+            { "name": "source", "value": "visits" }
           ]
         },
         "authentication": "genericCredentialType",
@@ -144,7 +144,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [1650, 100],
-      "notes": "Replaces the old Insert Person Sighting + Mark Done Postgres node pair -- ingest-worker's POST /sightings/persons inserts the sighting and marks ai_status='done' in one DB transaction.",
+      "notes": "ingest-worker's POST /sightings/persons inserts the sighting and marks ai_status='done' in one DB transaction -- same completion path the events-flow sibling uses, since source only affects claim-time eligibility, not completion.",
       "notesInFlow": true,
       "parameters": {
         "method": "POST",
@@ -197,7 +197,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [1650, 400],
-      "notes": "Replaces the old Insert Vehicle Sighting + Mark Done Postgres node pair -- ingest-worker's POST /sightings/vehicles inserts the sighting and marks ai_status='done' in one DB transaction.",
+      "notes": "ingest-worker's POST /sightings/vehicles inserts the sighting and marks ai_status='done' in one DB transaction -- same completion path the events-flow sibling uses, since source only affects claim-time eligibility, not completion.",
       "notesInFlow": true,
       "parameters": {
         "method": "POST",
@@ -298,9 +298,6 @@
       "main": [[{ "node": "Insert Vehicle Sighting (API)", "type": "main", "index": 0 }]]
     },
     "Insert Vehicle Sighting (API)": {
-      "main": [[{ "node": "Loop Over Claimed Events", "type": "main", "index": 0 }]]
-    },
-    "Send Vehicle Photo (Telegram)": {
       "main": [[{ "node": "Loop Over Claimed Events", "type": "main", "index": 0 }]]
     },
     "Handle Failure (API)": {

@@ -264,13 +264,14 @@ def generate_report(
     start: datetime | None = None,
     end: datetime | None = None,
     hours: float = Query(24, gt=0, description="Used when start/end aren't both given -- window is the last N hours"),
+    source: str = Query("events", pattern="^(events|visits)$", description="'events' (default) includes every sighting independently -- today's exact behavior. 'visits' dedups the same way POST /ai-queue/claim's source=visits does: only the sighting for a visit's earliest-linked raw_event, plus every sighting whose raw_event was never grouped into a visit -- for an alerts-scoped report where one real-world visit shouldn't show up once per det_id."),
 ):
     """Builds the same HTML report daily-report.json used to build itself in a Code node --
     n8n now just calls this and emails/Telegrams the result. Each row's inline image is a small
     on-the-fly thumbnail (never touching the stored full-quality crop); the full-size image is
     still available via the report's click-to-enlarge lightbox, embedded once, not twice."""
     resolved_start, resolved_end = _resolve_window(start, end, hours)
-    return report.generate_report(resolved_start, resolved_end)
+    return report.generate_report(resolved_start, resolved_end, source)
 
 
 @app.post("/ai-queue/claim", response_model=schemas.ClaimResponse, tags=["ai-queue"], dependencies=[Depends(require_api_key)])
