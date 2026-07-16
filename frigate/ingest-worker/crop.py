@@ -129,6 +129,12 @@ def _probe_duration_seconds(clip_url: str) -> float:
     return float(json.loads(result.stdout)["format"]["duration"])
 
 
+# Internal buffer against landing right at the very tail of whatever clip Frigate actually
+# returned -- not deployment-tunable (see crop_visit_thumbnail below for why), same idea as
+# _FALLBACK_FRAME_OFFSET_SECONDS above.
+_DURATION_SAFETY_MARGIN_SECONDS = 0.5
+
+
 def crop_visit_thumbnail(visit: dict, representative_event: dict) -> str:
     # visit["thumb_time"] is Frigate's own per-review "best frame" choice (see
     # mqtt_ingest.parse_review_payload) -- an absolute epoch timestamp, unlike
@@ -149,26 +155,30 @@ def crop_visit_thumbnail(visit: dict, representative_event: dict) -> str:
     # Matches build_clip_url's own -5s pre-roll exactly, so this offset lands at the same instant
     # within the fetched clip that thumb_time refers to in Frigate's own timeline.
     clip_start_epoch = int(_as_datetime(visit["start_ts"]).timestamp()) - 5
-    offset = visit["thumb_time"] - clip_start_epoch
+    # VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS (default 0) shifts the seek target relative to
+    # thumb_time -- positive moves later/forward, negative moves earlier. Exists because the
+    # actual frame ffmpeg lands on can consistently sit off from thumb_time by a fraction of a
+    # second on some cameras (e.g. keyframe spacing during the seek) -- this is a plain manual
+    # correction, tune it by comparing a few real crops against what thumb_time should show.
+    offset = visit["thumb_time"] - clip_start_epoch + config.VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS
 
     # Frigate's continuous-recording clip endpoint can silently return far less footage than the
     # requested start/end window -- confirmed in production: a 13s request (start_ts-5 to end_ts+5)
-    # came back only ~4.06s long (almost certainly a motion-based recording gap), while the
-    # computed thumb_time offset was ~6.1s -- past the end of what was actually there. Without this
-    # check, ffmpeg doesn't error on that; it silently clamps to whatever frame is near the tail of
-    # the truncated clip, returning a plausible-looking but wrong-moment crop with no signal
-    # anything went wrong (this is what was actually happening, not clock drift, though a separate
-    # ~5s camera OSD clock drift is also real and cosmetic-only). Failing explicitly here instead
-    # routes through the normal retry-then-fallback path (visit_thumb_worker.py ->
-    # mark_visit_thumb_crop_retry_or_failed), which is far better than a silently mistimed crop
-    # that's supposed to be the well-timed one. VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS is
-    # a tunable buffer (not just a bare offset >= duration check) -- different cameras/encoders can
-    # behave differently right at a clip's tail (keyframe spacing, encoder flush artifacts), and
-    # this isn't something to hardcode a single "universally correct" margin for.
+    # came back only ~4.06s long (a genuine recording gap -- record.continuous.days was 0 in
+    # frigate.conf, so nothing outside actual motion was ever kept), while the computed thumb_time
+    # offset was ~6.1s -- past the end of what was actually there. Without this check, ffmpeg
+    # doesn't error on that; it silently clamps to whatever frame is near the tail of the truncated
+    # clip, returning a plausible-looking but wrong-moment crop with no signal anything went wrong.
+    # Failing explicitly here instead routes through the normal retry-then-fallback path
+    # (visit_thumb_worker.py -> mark_visit_thumb_crop_retry_or_failed). _DURATION_SAFETY_MARGIN_SECONDS
+    # is a small fixed buffer for encoder/keyframe edge cases right at a clip's tail -- it does NOT
+    # compensate for a real gap like the one above (no margin value would have; the gap there was
+    # ~1.8s), so it's not exposed as a setting -- if this fires a lot, the actual fix is Frigate's
+    # own recording retention (record.continuous.days), not this margin.
     duration = _probe_duration_seconds(clip_url)
-    if offset >= duration - config.VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS:
+    if offset >= duration - _DURATION_SAFETY_MARGIN_SECONDS:
         raise ValueError(
-            f"thumb_time offset {offset:.3f}s is within {config.VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS}s "
+            f"thumb_time offset {offset:.3f}s is within {_DURATION_SAFETY_MARGIN_SECONDS}s "
             f"of the actual clip duration {duration:.3f}s for visit id={visit.get('id')} -- "
             f"Frigate likely has a recording gap for this window"
         )

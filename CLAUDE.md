@@ -621,14 +621,32 @@ sweep of frames grabbed at 0.1s/1.0s/2.0s/3.0s/3.9s offsets showing perfectly li
 within the clip -- ruling out a decode/seek-precision issue and pointing squarely at "the clip is
 shorter than we assumed" as the root cause (a *separate*, purely cosmetic ~5s drift between the
 camera's own onboard OSD clock and Frigate/NTP time is real too, but isn't what was causing the
-wrong-frame problem). Fixed by probing the actual clip duration (`crop._probe_duration_seconds`,
-`ffprobe -show_format`) before seeking and raising if the offset would land within
-`VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS` (default 0.5s) of it, so this now fails cleanly
-into the existing retry-then-fallback path (`visit_thumb_worker.mark_visit_thumb_crop_retry_or_failed`
--> eventually the representative event's own crop) instead of silently returning a mistimed image.
-The margin is a tunable, not a bare `offset >= duration` check -- different cameras/encoders can
-behave differently right at a clip's tail (keyframe spacing, encoder flush artifacts) on top of
-the recording-gap issue itself, so there's no single universally-correct cutoff to hardcode.
+wrong-frame problem; separately, this camera's `frigate.conf` had `record.continuous.days: 0`,
+meaning nothing outside actual detected motion was ever retained -- the real, permanent fix for
+the recording-gap side of this is raising that in `frigate.conf`, not anything in `ingest-worker`).
+Fixed by probing the actual clip duration (`crop._probe_duration_seconds`, `ffprobe -show_format`)
+before seeking and raising if the offset would land within `crop._DURATION_SAFETY_MARGIN_SECONDS`
+(a fixed `0.5`, intentionally **not** an env-configurable setting -- see below) of it, so this now
+fails cleanly into the existing retry-then-fallback path
+(`visit_thumb_worker.mark_visit_thumb_crop_retry_or_failed` -> eventually the representative
+event's own crop) instead of silently returning a mistimed image.
+
+This margin is a buffer against landing right at the very tail of whatever duration Frigate *did*
+return (encoder/keyframe rounding: e.g. offset=6.05s vs. an actual duration of 6.1s is technically
+before the end, but close enough that ffmpeg can still grab a garbled/black tail frame) -- it does
+nothing for `thumb_time` landing far later than what actually got recorded (the recording-gap case
+above had a ~1.8s deficit; no margin value papers over a gap that size). Originally shipped as
+`VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS`, an env var -- removed after review because it
+doesn't address the problem operators actually hit (a real time-shift, not an edge-of-clip
+rounding case) and just added a confusing knob that looked like it should help but couldn't.
+Demoted to a fixed internal constant, same treatment as `crop._FALLBACK_FRAME_OFFSET_SECONDS`.
+
+**`VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS`** (default `0`) is the actual tunable for "my crops
+consistently land a bit off from `thumb_time`" -- a plain manual shift of the seek target applied
+before the duration check (positive = later/forward, negative = earlier/backward). Unlike the
+margin above, this directly addresses a real, observed symptom (a camera's crops consistently
+looking ~1s off from the expected moment, most likely keyframe spacing during the seek) --
+tune it by comparing a handful of real crops against what `thumb_time` should show.
 
 ### Camera allow-list
 

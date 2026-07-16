@@ -161,10 +161,11 @@ def test_crop_visit_thumbnail_succeeds_when_offset_is_within_actual_duration(mon
     assert crop.crop_visit_thumbnail(visit, representative_event) == "base64result"
 
 
-def test_crop_visit_thumbnail_respects_configurable_duration_safety_margin(monkeypatch):
-    # VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS is tunable, not a hardcoded bare
-    # offset >= duration check -- different cameras/encoders can behave differently right at a
-    # clip's tail, so this confirms the margin is actually read from config, not baked in.
+def test_crop_visit_thumbnail_duration_safety_margin_is_a_fixed_internal_constant(monkeypatch):
+    # _DURATION_SAFETY_MARGIN_SECONDS is intentionally NOT a deployment setting (it only guards
+    # encoder/keyframe edge cases right at a clip's tail, not real recording gaps -- no env var
+    # controls it) -- confirms it's still applied, and that changing the internal constant
+    # directly changes the behavior (proving it's actually used, not dead code).
     monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
     monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 11.0)
     monkeypatch.setattr(crop, "crop_and_scale", lambda clip_url, offset, box: "base64result")
@@ -178,13 +179,49 @@ def test_crop_visit_thumbnail_respects_configurable_duration_safety_margin(monke
     representative_event = {"det_id": "1784219191.5-abc123"}
 
     # Default margin (0.5s) leaves exactly zero headroom (10.5 >= 11.0 - 0.5) -- must raise.
-    monkeypatch.setattr(config, "VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS", 0.5)
+    monkeypatch.setattr(crop, "_DURATION_SAFETY_MARGIN_SECONDS", 0.5)
     try:
         crop.crop_visit_thumbnail(visit, representative_event)
         assert False, "expected ValueError"
     except ValueError:
         pass
 
-    # A smaller configured margin (0.1s) leaves enough headroom -- must succeed.
-    monkeypatch.setattr(config, "VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS", 0.1)
+    # A smaller margin (0.1s) leaves enough headroom -- must succeed.
+    monkeypatch.setattr(crop, "_DURATION_SAFETY_MARGIN_SECONDS", 0.1)
     assert crop.crop_visit_thumbnail(visit, representative_event) == "base64result"
+
+
+def test_crop_visit_thumbnail_offset_adjust_shifts_the_seek_target(monkeypatch):
+    # VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS is the real, deployment-tunable knob for "my crops
+    # consistently land a bit off from thumb_time" -- positive shifts later/forward, negative
+    # shifts earlier/backward. Default (0) must leave the offset exactly at thumb_time.
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
+    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 20.0)
+
+    captured = {}
+
+    def fake_crop_and_scale(clip_url, offset, box):
+        captured["offset"] = offset
+        return "base64result"
+
+    monkeypatch.setattr(crop, "crop_and_scale", fake_crop_and_scale)
+
+    visit = {
+        "start_ts": 1784219191.0,
+        "end_ts": 1784219201.0,
+        "cameras": "outside2",
+        "thumb_time": 1784219196.5,  # base offset = 10.5s
+    }
+    representative_event = {"det_id": "1784219191.5-abc123"}
+
+    monkeypatch.setattr(config, "VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS", 0.0)
+    crop.crop_visit_thumbnail(visit, representative_event)
+    assert captured["offset"] == 10.5
+
+    monkeypatch.setattr(config, "VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS", 1.2)
+    crop.crop_visit_thumbnail(visit, representative_event)
+    assert captured["offset"] == 10.5 + 1.2
+
+    monkeypatch.setattr(config, "VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS", -1.2)
+    crop.crop_visit_thumbnail(visit, representative_event)
+    assert captured["offset"] == 10.5 - 1.2
