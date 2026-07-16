@@ -52,9 +52,8 @@ h1 { font-size: 1.3rem; margin: 0; }
 
 .filters {
   display: flex;
-  flex-wrap: wrap;
+  flex-direction: column;
   gap: 12px;
-  align-items: end;
   background: var(--card);
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -62,7 +61,19 @@ h1 { font-size: 1.3rem; margin: 0; }
   margin-bottom: 16px;
 }
 
-.filters label {
+/* Filter inputs (Search/Time range/advanced fields) and action controls (Advanced filters
+   toggle, Reset, Auto-refresh, Search) are visually distinct rows -- mixing bare text-link
+   buttons and a checkbox into the same wrapping row as labeled inputs left them bottom-aligned
+   to a box with no caption above it, which reads as randomly misaligned even though the flex
+   math was technically doing what it was told. */
+.filter-fields {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: end;
+}
+
+.filter-fields label {
   display: flex;
   flex-direction: column;
   font-size: 0.8rem;
@@ -70,15 +81,32 @@ h1 { font-size: 1.3rem; margin: 0; }
   gap: 4px;
 }
 
-.filters .search-field {
+.filter-fields .search-field {
   /* Grows to fill whatever space is left in the row -- large in simple mode (few other fields
      competing for room), shrinks back on its own once advanced mode adds more fields, no
      viewMode-conditional CSS needed. */
   flex: 1 1 240px;
 }
 
-.filters .search-field input {
+.filter-fields .search-field input {
   width: 100%;
+}
+
+.filter-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.filter-actions-secondary,
+.filter-actions-primary {
+  display: flex;
+  align-items: center;
+  gap: 16px;
 }
 
 input, select, button {
