@@ -134,7 +134,7 @@ are actually enforced.
   API. It's intentionally dumb/mechanical so it can be plain, testable Python instead of n8n
   Code-node gymnastics. Self-contained: builds from its own folder, bakes `schema.sql` and
   `static/` into the image, needs only Postgres + MQTT + Frigate's HTTP API to run (plus Telegram's
-  API if `TELEGRAM_ENABLED=true`).
+  API if `TELEGRAM_EVENTS_ENABLED=true`).
 - **n8n** owns everything AI-shaped: deciding when to claim work and calling the VLM(s), the daily
   report, and the Q&A workflow. Its processors never touch Frigate's API, crop or video anything
   themselves, and never call Telegram — they only ever read `crop_image_base64` that's already
@@ -257,7 +257,7 @@ Visits") are identical except for `source=events` vs `source=visits` on their `C
 (API)` node. Both claim from the same `ai_status` column on `raw_events` -- `source` only changes
 which rows are *eligible* to claim (see `claim_ai_batch`'s `only_visit_representative` above), not
 a separate queue or state machine, unlike the genuinely independent `STORE_VIDEO`/
-`STORE_VIDEO_ALERTS` and `TELEGRAM_ENABLED`/`TELEGRAM_ALERTS_ENABLED` pairs. Only one of the two
+`STORE_VIDEO_ALERTS` and `TELEGRAM_EVENTS_ENABLED`/`TELEGRAM_ALERTS_ENABLED` pairs. Only one of the two
 should ever be active in n8n at a time -- running both concurrently doesn't give you two
 independent datasets, it just means whichever workflow's poll tick fires first wins a given row
 FOR UPDATE SKIP LOCKED, and the loser's claim call simply returns fewer or no rows that tick. A/B
@@ -292,7 +292,7 @@ in production: a clip was already gone `"No recordings found for the specified t
 the behavioral spec proved out by the `FrigateRetry.json` n8n workflow it replaces, straight into
 Python rather than adding new n8n nodes.
 
-`TELEGRAM_ENABLED=true` turns on fire-and-forget notifications (`telegram.py`): a photo right after
+`TELEGRAM_EVENTS_ENABLED=true` turns on fire-and-forget notifications (`telegram.py`): a photo right after
 crop (regardless of `STORE_VIDEO` -- photo-only is a valid steady state), and, once a clip is
 stored, a video sent as a reply to that photo (`telegram_photo_message_id`, persisted on the row --
 a durable version of the `FrigateRetry.json` workflow's in-memory `pendingReplies` map, so the
@@ -325,7 +325,7 @@ one summary message per visit (`telegram.send_visit_summary`), fired once from
 Uses the visit's representative event's `crop_image_base64` as a photo if the crop stage has
 already finished it by the time the review closes; falls back to a text-only `sendMessage`
 otherwise, since crop timing isn't guaranteed to have caught up yet. Independent of
-`TELEGRAM_ENABLED` above (the existing per-raw_event photo/video messages) -- both, either, or
+`TELEGRAM_EVENTS_ENABLED` above (the existing per-raw_event photo/video messages) -- both, either, or
 neither can be on at once, specifically so you can compare which notification granularity is more
 useful for your traffic rather than committing to one upfront.
 
@@ -687,7 +687,7 @@ Using `visit_id` to actually reduce work is now available but opt-in, not the de
 /ai-queue/claim`'s `source=visits` skips analyzing duplicate det_ids a visit already grouped (see
 Query/report/AI-queue API above), and `STORE_VIDEO_ALERTS`/`TELEGRAM_ALERTS_ENABLED` add
 independent per-visit video/notification flows alongside (not instead of) the existing per-event
-`STORE_VIDEO`/`TELEGRAM_ENABLED` ones (see Video storage above). All three are deliberately
+`STORE_VIDEO`/`TELEGRAM_EVENTS_ENABLED` ones (see Video storage above). All three are deliberately
 independent switches from their events-flow counterparts -- the point is to A/B per-event vs.
 per-visit behavior against real traffic, not to pick one and commit. `GET /visits` remains the
 read-only comparison view for judging `visits` data itself, separate from these behavior switches.

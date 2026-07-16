@@ -153,14 +153,14 @@ VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS = float(_env("VISIT_THUMB_CROP_OFFSET_ADJ
 # -------------------------------------------------
 # Telegram notifications -- see telegram.py. Disabled (no-op) unless explicitly turned on.
 # -------------------------------------------------
-TELEGRAM_ENABLED = _env("TELEGRAM_ENABLED", "false").lower() == "true"
+TELEGRAM_EVENTS_ENABLED = _env("TELEGRAM_EVENTS_ENABLED", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # Independent switch for the alerts/visits flow -- a single summary notification per visit
 # (photo + caption if the representative event's crop is already available, text-only otherwise),
-# fired once when a Frigate review closes. Separate from TELEGRAM_ENABLED above, which gates the
-# existing per-raw_event photo/video notifications -- lets you A/B whether per-event or per-visit
-# notifications (or both, or neither) are more useful for your traffic.
+# fired once when a Frigate review closes. Separate from TELEGRAM_EVENTS_ENABLED above, which
+# gates the existing per-raw_event photo/video notifications -- lets you A/B whether per-event or
+# per-visit notifications (or both, or neither) are more useful for your traffic.
 TELEGRAM_ALERTS_ENABLED = _env("TELEGRAM_ALERTS_ENABLED", "false").lower() == "true"
 
 # -------------------------------------------------

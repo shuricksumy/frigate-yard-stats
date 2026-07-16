@@ -122,11 +122,11 @@ services:
       VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS: ${VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS:-0}
       # Telegram notifications (photo on crop, video reply once stored) -- see telegram.py.
       # Disabled by default; TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID only need to be set when on.
-      TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}
+      TELEGRAM_EVENTS_ENABLED: ${TELEGRAM_EVENTS_ENABLED:-false}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
       # Independent switch for the alerts/visits flow -- one summary notification per visit
-      # instead of the per-event photo/video messages TELEGRAM_ENABLED controls.
+      # instead of the per-event photo/video messages TELEGRAM_EVENTS_ENABLED controls.
       TELEGRAM_ALERTS_ENABLED: ${TELEGRAM_ALERTS_ENABLED:-false}
       # Object labels your Frigate config actually produces -- drives the web UI's Type filter
       # dropdown (GET /object-types) so it doesn't need a frontend change to pick up a new label.
