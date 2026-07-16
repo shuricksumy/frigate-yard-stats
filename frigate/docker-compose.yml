@@ -98,11 +98,17 @@ services:
       # clip that's very likely already gone). Unset/blank = no age limit.
       VIDEO_MAX_AGE_HOURS: ${VIDEO_MAX_AGE_HOURS:-}
       VIDEO_RETRY_WAIT_SECONDS: ${VIDEO_RETRY_WAIT_SECONDS:-5}
+      # Independent video-storage switch for the alerts/visits flow (frigate/reviews) -- one clip
+      # per visit's whole span, separate from STORE_VIDEO above. Shares the VIDEO_* tuning above.
+      STORE_VIDEO_ALERTS: ${STORE_VIDEO_ALERTS:-false}
       # Telegram notifications (photo on crop, video reply once stored) -- see telegram.py.
       # Disabled by default; TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID only need to be set when on.
       TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      # Independent switch for the alerts/visits flow -- one summary notification per visit
+      # instead of the per-event photo/video messages TELEGRAM_ENABLED controls.
+      TELEGRAM_ALERTS_ENABLED: ${TELEGRAM_ALERTS_ENABLED:-false}
       # Object labels your Frigate config actually produces -- drives the web UI's Type filter
       # dropdown (GET /object-types) so it doesn't need a frontend change to pick up a new label.
       OBJECT_TYPES: ${OBJECT_TYPES:-car,truck,person,dog}

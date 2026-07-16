@@ -50,7 +50,8 @@ Frigate (MQTT frigate/events, every object label: car/truck/person/dog/...
    ▼
 ingest-worker/  (Python, one container, no LLM calls)
    - MQTT subscriber -> INSERT raw_events, unfiltered by label
-   - Second MQTT subscriber (frigate/reviews) -> INSERT visits, link raw_events.visit_id
+   - Second MQTT subscriber (frigate/reviews) -> INSERT visits, link raw_events.visit_id ->
+     fire-and-forget Telegram visit summary if TELEGRAM_ALERTS_ENABLED
    - Crop-stage poll loop, every POLL_INTERVAL_SECONDS:
        reap stale crop_status='processing' -> count in-progress -> claim batch (FOR UPDATE SKIP LOCKED)
        -> GET Frigate event (region/sub_label/score) -> crop via built-in ffmpeg, size-capped
@@ -63,6 +64,9 @@ ingest-worker/  (Python, one container, no LLM calls)
        yet) -> GET Frigate's clip.mp4 endpoint -> store to VIDEO_STORAGE_PATH, path only in Postgres
        -> mark video_status done/retry/failed -> fire-and-forget Telegram video, replying to the
        stored photo message_id if present
+   - Alert-video-stage poll loop (own thread, only started if STORE_VIDEO_ALERTS=true), same shape
+     again but against visits instead of raw_events -- one clip per visit's whole span, independent
+     of the events flow above
    - Also applies schema.sql on every startup (idempotent) and runs retention cleanup on a slow
      cadence (DB rows *and* their video files, once `video_path` is set)
    - FastAPI surface (Swagger UI at :8080/docs): unauthenticated admin/test endpoints
@@ -185,6 +189,26 @@ also already have a stored video (`video_status='done'`) ready, for a future wor
 both artifacts before processing. The VLM call itself still only ever uses the image regardless --
 no model in this setup analyzes video directly; `require_video` only changes which rows are
 eligible to claim, not what gets sent to the VLM.
+
+The optional `source` param (`events`, the default, or `visits`) lets n8n A/B which grouping level
+the AI stage analyzes, without touching completion at all -- `POST /sightings/vehicles|persons`
+still mark the exact same claimed raw_event's `ai_status='done'` either way, since this is purely
+a claim-time filter (`db.claim_ai_batch`'s `only_visit_representative` param), not a schema or
+queue-state change (no `ai_status` column was added to `visits`). `source=visits` skips analyzing
+every duplicate det_id a visit (see "Visit grouping" below) already grouped together -- only the
+visit's earliest-linked raw_event is eligible, computed via a correlated subquery
+(`id = (SELECT ... WHERE re2.visit_id = raw_events.visit_id ORDER BY start_ts, id LIMIT 1)`) --
+plus every raw_event that was never grouped into a visit at all (`visit_id IS NULL`), so events
+Frigate's review never bundled still get analyzed one-to-one exactly as `source=events` would.
+
+(Bug fixed in passing while building `source`: `claim_ai_batch`'s `RETURNING yard_stats.raw_events.*`
+never included the computed `has_video`/`has_image` fields `EventDetail` requires -- every call
+that actually claimed rows was crashing at FastAPI's response-serialization step with a 500,
+*after* the UPDATE had already committed `ai_status='processing'` in the DB. n8n never received
+the claimed rows, which then sat until `stale_minutes` reaped them back to `retry` and the cycle
+repeated -- confirmed by reproducing the exact 500 locally, then confirming claims complete
+cleanly end-to-end once the two computed columns were added to the `RETURNING` clause.)
+
 `POST /sightings/vehicles` and
 `POST /sightings/persons` insert the sighting and mark `ai_status='done'` in one DB transaction
 (`db.complete_vehicle_sighting`/`complete_person_sighting`, temporarily flipping the module
@@ -235,6 +259,33 @@ stored, a video sent as a reply to that photo (`telegram_photo_message_id`, pers
 a durable version of the `FrigateRetry.json` workflow's in-memory `pendingReplies` map, so the
 reply-threading survives a service restart). Both directions are wrapped so a Telegram failure
 (bad token, rate limit, network blip) can never take down the crop or video poll loop.
+
+`STORE_VIDEO_ALERTS=true` turns on a fourth, independent video queue -- same `new` -> `processing`
+-> `retry`/`failed` -> `done`/`skipped` shape, but on `visits` instead of `raw_events`
+(`alert_video_worker.py`, its own poll thread, only started when the flag is on). One clip per
+visit's whole `start_ts`->`end_ts` span (not per det_id) is fetched from the same Frigate
+continuous-recording endpoint `video.py` already uses for the events flow, via a small adapter
+dict (`{start_ts, end_ts, camera: visit["cameras"], det_id: "visit-{id}"}`) so `download_clip`/
+`build_clip_url` need no changes -- and stored under `VIDEO_STORAGE_PATH/visits/...` with a
+`visit-` filename prefix (`video.store_visit_clip`) so it's never confused with a per-event clip
+that happens to share the same numeric id (visit ids and raw_event ids are independent sequences).
+Shares `VIDEO_PARALLEL_LIMIT`/`VIDEO_INITIAL_WAIT_SECONDS`/`VIDEO_MIN_VALID_BYTES`/
+`VIDEO_MAX_ATTEMPTS`/`VIDEO_RETRY_WAIT_SECONDS`/`VIDEO_MAX_AGE_HOURS` with the events flow
+(mechanically identical download/validation logic) -- only the on/off switch and the poll thread
+are separate, so the two flows can be A/B'd without doubling every tuning knob. Retention cleanup
+(`run_retention_cleanup`/`purge_older_than`) collects and deletes `visits.video_path` files the
+same way it already did for `raw_events.video_path`, so a visit-level clip doesn't outlive its
+retention window as an orphaned file once its DB row is swept.
+
+`TELEGRAM_ALERTS_ENABLED=true` turns on a separate notification path for the alerts/visits flow --
+one summary message per visit (`telegram.send_visit_summary`), fired once from
+`mqtt_ingest._handle_review_message` right after `db.record_visit` succeeds (not from a poll loop).
+Uses the visit's representative event's `crop_image_base64` as a photo if the crop stage has
+already finished it by the time the review closes; falls back to a text-only `sendMessage`
+otherwise, since crop timing isn't guaranteed to have caught up yet. Independent of
+`TELEGRAM_ENABLED` above (the existing per-raw_event photo/video messages) -- both, either, or
+neither can be on at once, specifically so you can compare which notification granularity is more
+useful for your traffic rather than committing to one upfront.
 
 `GET /events` also defaults `has_media=true` -- rows with neither `crop_image_base64` nor
 `video_path` (not yet `crop_status='done'`, including `'skipped'` rows) are hidden by default
@@ -382,11 +433,14 @@ review, even though both cameras share zone names specifically so a cross-camera
 framing genuinely different angles/areas of the same yard, so a raw_event appearing once per
 camera is correct, wanted behavior, not duplication to collapse.
 
-Not yet built: using `visit_id` to actually reduce work (e.g. skipping AI-queue/Telegram-
-notification duplication for other rows in an already-processed visit) -- that's a real behavior
-change (which of a visit's raw_events "wins" for analysis) best decided from real `visits` volume/
-patterns, not guessed at up front. `GET /visits` (below) exists to let that data accumulate and be
-compared visually before any such change is made.
+Using `visit_id` to actually reduce work is now available but opt-in, not the default: `POST
+/ai-queue/claim`'s `source=visits` skips analyzing duplicate det_ids a visit already grouped (see
+Query/report/AI-queue API above), and `STORE_VIDEO_ALERTS`/`TELEGRAM_ALERTS_ENABLED` add
+independent per-visit video/notification flows alongside (not instead of) the existing per-event
+`STORE_VIDEO`/`TELEGRAM_ENABLED` ones (see Video storage above). All three are deliberately
+independent switches from their events-flow counterparts -- the point is to A/B per-event vs.
+per-visit behavior against real traffic, not to pick one and commit. `GET /visits` remains the
+read-only comparison view for judging `visits` data itself, separate from these behavior switches.
 
 `review.alerts`/`review.detections` in `frigate.conf` currently share identical `required_zones`
 per camera, so `severity` (`alert` vs `detection`) isn't a useful noise filter today -- nearly

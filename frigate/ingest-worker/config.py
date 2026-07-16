@@ -99,12 +99,27 @@ VIDEO_RETRY_WAIT_SECONDS = float(_env("VIDEO_RETRY_WAIT_SECONDS", "5"))
 _video_max_age_hours_env = os.environ.get("VIDEO_MAX_AGE_HOURS")
 VIDEO_MAX_AGE_HOURS = float(_video_max_age_hours_env) if _video_max_age_hours_env else None
 
+# Independent video-storage switch for the alerts/visits flow (frigate/reviews) -- separate from
+# STORE_VIDEO above, which only ever gates the events flow (frigate/events, per-raw_event clips).
+# Both flows share the same VIDEO_PARALLEL_LIMIT/VIDEO_INITIAL_WAIT_SECONDS/VIDEO_MIN_VALID_BYTES/
+# VIDEO_MAX_ATTEMPTS/VIDEO_RETRY_WAIT_SECONDS/VIDEO_MAX_AGE_HOURS tuning above (mechanically
+# identical download/validation logic, just against visits instead of raw_events) -- only the
+# on/off switch is separate, so you can toggle each flow independently without doubling every
+# tuning knob. See alert_video_worker.py.
+STORE_VIDEO_ALERTS = _env("STORE_VIDEO_ALERTS", "false").lower() == "true"
+
 # -------------------------------------------------
 # Telegram notifications -- see telegram.py. Disabled (no-op) unless explicitly turned on.
 # -------------------------------------------------
 TELEGRAM_ENABLED = _env("TELEGRAM_ENABLED", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+# Independent switch for the alerts/visits flow -- a single summary notification per visit
+# (photo + caption if the representative event's crop is already available, text-only otherwise),
+# fired once when a Frigate review closes. Separate from TELEGRAM_ENABLED above, which gates the
+# existing per-raw_event photo/video notifications -- lets you A/B whether per-event or per-visit
+# notifications (or both, or neither) are more useful for your traffic.
+TELEGRAM_ALERTS_ENABLED = _env("TELEGRAM_ALERTS_ENABLED", "false").lower() == "true"
 
 # -------------------------------------------------
 # Web report UI -- see static/index.html. Frigate object labels aren't fixed (depends on your

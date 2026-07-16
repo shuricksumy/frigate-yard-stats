@@ -74,6 +74,26 @@ def store_clip(row: dict, content: bytes) -> str:
     return path
 
 
+def store_visit_clip(visit: dict, content: bytes) -> str:
+    # Mirrors store_clip, but under a "visits" subdirectory and a "visit-" filename prefix so a
+    # visit's whole-span clip is never confused with a per-event clip that happens to share the
+    # same numeric id (visit ids and raw_event ids are independent sequences) -- see
+    # alert_video_worker.py.
+    start = _as_datetime(visit["start_ts"])
+    day_dir = os.path.join(
+        config.VIDEO_STORAGE_PATH, "visits",
+        f"{start:%Y}", f"{start:%m}", f"{start:%d}",
+    )
+    os.makedirs(day_dir, exist_ok=True)
+
+    object_type = _primary_object_type(visit)
+    filename = f"visit-{object_type}-{visit['id']}-{int(start.timestamp())}-{start:%Y%m%dT%H%M%SZ}.mp4"
+    path = os.path.join(day_dir, filename)
+    with open(path, "wb") as f:
+        f.write(content)
+    return path
+
+
 def extract_frame_jpeg(video_path: str, max_dimension: int | None = None) -> bytes:
     # Fallback for events that have a stored clip but no crop_image_base64 -- shouldn't happen
     # today (claim_video_batch only ever claims crop_status='done' rows, so a video always implies

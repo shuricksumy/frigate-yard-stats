@@ -102,6 +102,17 @@ ALTER TABLE yard_stats.raw_events DROP CONSTRAINT IF EXISTS raw_events_visit_id_
 ALTER TABLE yard_stats.raw_events ADD CONSTRAINT raw_events_visit_id_fkey
   FOREIGN KEY (visit_id) REFERENCES yard_stats.visits(id);
 
+-- Fourth video-storage queue, same shape/columns as raw_events' video_status (new -> processing
+-- -> retry/failed -> done, plus 'skipped' when STORE_VIDEO_ALERTS=false) but on visits instead of
+-- raw_events -- one clip per visit (its whole start_ts->end_ts span), independent of whether any
+-- of its linked raw_events also has its own per-event video. See alert_video_worker.py.
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS video_status TEXT NOT NULL DEFAULT 'new'
+  CHECK (video_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS video_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS video_attempt_count INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS video_path TEXT;
+CREATE INDEX IF NOT EXISTS idx_visits_video_status ON yard_stats.visits (video_status);
+
 CREATE TABLE IF NOT EXISTS yard_stats.vehicle_sightings (
   id SERIAL PRIMARY KEY,
   raw_event_id INTEGER REFERENCES yard_stats.raw_events(id),

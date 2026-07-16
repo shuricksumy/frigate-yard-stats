@@ -5,6 +5,7 @@ import paho.mqtt.client as mqtt
 
 import config
 import db
+import telegram
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +98,19 @@ def _handle_review_message(msg):
         )
     except Exception:
         logger.exception("Failed to record visit for camera=%s", review.get("camera"))
+        return
+
+    if config.TELEGRAM_ALERTS_ENABLED and visit_id is not None:
+        try:
+            representative = db.get_representative_event_for_visit(visit_id)
+            image_base64 = representative.get("crop_image_base64") if representative else None
+            telegram.send_visit_summary(
+                review["camera"], review["objects"], len(review["det_ids"]) or 1, image_base64,
+            )
+        except Exception:
+            # Never let a Telegram hiccup take down the MQTT message handler -- same belt-and-
+            # suspenders wrapping as video_worker's send_video call.
+            logger.warning("Telegram visit summary send raised unexpectedly for visit id=%s", visit_id, exc_info=True)
 
 
 def start() -> mqtt.Client:

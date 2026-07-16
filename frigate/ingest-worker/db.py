@@ -139,17 +139,22 @@ def record_visit(review: dict) -> int | None:
     # a list -- so cameras/camera_count are set for just that one camera; a cross-camera merge on
     # top of this (same zone, overlapping time window, different camera) is a separate, not-yet-
     # built layer. Insert + link in one transaction, same pattern as complete_vehicle_sighting.
+    # video_status starts 'skipped' (not 'new') when STORE_VIDEO_ALERTS is off -- same reasoning
+    # as insert_raw_event's initial_video_status: a cheap flag set once at insert, so the visit
+    # video queue's WHERE clause never even considers these rows while the feature is disabled.
+    initial_video_status = "new" if config.STORE_VIDEO_ALERTS else "skipped"
     conn = get_conn()
     conn.autocommit = False
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                INSERT INTO yard_stats.visits (zone, objects, start_ts, end_ts, cameras, camera_count)
-                VALUES (%s, %s, to_timestamp(%s), to_timestamp(%s), %s, 1)
+                INSERT INTO yard_stats.visits (zone, objects, start_ts, end_ts, cameras, camera_count, video_status)
+                VALUES (%s, %s, to_timestamp(%s), to_timestamp(%s), %s, 1, %s)
                 RETURNING id
                 """,
-                (review["zone"], review["objects"], review["start_time"], review["end_time"], review["camera"]),
+                (review["zone"], review["objects"], review["start_time"], review["end_time"],
+                 review["camera"], initial_video_status),
             )
             visit_id = cur.fetchone()["id"]
             if review["det_ids"]:
@@ -168,6 +173,100 @@ def record_visit(review: dict) -> int | None:
         raise
     finally:
         conn.autocommit = True
+
+
+def get_representative_event_for_visit(visit_id: int) -> dict | None:
+    # The visit's earliest-linked raw_event (same "representative" definition as list_visits) --
+    # used right after record_visit to grab a crop image for the Telegram visit-summary
+    # notification, if one's already available (the crop stage may not have finished by the time
+    # the review closes -- see telegram.send_visit_summary).
+    rows = _execute(
+        """
+        SELECT id, camera, objects, crop_image_base64
+        FROM yard_stats.raw_events
+        WHERE visit_id = %s
+        ORDER BY start_ts ASC, id ASC
+        LIMIT 1
+        """,
+        (visit_id,), fetch=True,
+    )
+    return rows[0] if rows else None
+
+
+def reap_stale_visit_video_processing() -> None:
+    _execute(
+        """
+        UPDATE yard_stats.visits
+        SET video_status = 'retry', video_status_changed_at = now()
+        WHERE video_status = 'processing'
+          AND video_status_changed_at < now() - (%s * interval '1 minute')
+        """,
+        (config.STALE_MINUTES,),
+    )
+
+
+def count_visit_video_in_progress() -> int:
+    rows = _execute(
+        "SELECT count(*)::int AS c FROM yard_stats.visits WHERE video_status = 'processing'",
+        fetch=True,
+    )
+    return rows[0]["c"] if rows else 0
+
+
+def claim_visit_video_batch(limit: int, max_age_hours: float | None = None) -> list:
+    # Mirrors claim_video_batch exactly (CTE form for the same FOR UPDATE SKIP LOCKED reason, and
+    # the same newest-first + max_age_hours safety valve), just against visits instead of
+    # raw_events -- one clip per visit's whole start_ts->end_ts span, independent of any per-event
+    # video. See alert_video_worker.py.
+    age_clause = ""
+    params: list = []
+    if max_age_hours is not None:
+        age_clause = "AND start_ts >= now() - (%s * interval '1 hour')"
+        params.append(max_age_hours)
+    params.append(limit)
+    return _execute(
+        f"""
+        WITH claimable AS (
+            SELECT id FROM yard_stats.visits
+            WHERE video_status IN ('new', 'retry')
+            {age_clause}
+            ORDER BY start_ts DESC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE yard_stats.visits
+        SET video_status = 'processing', video_status_changed_at = now()
+        FROM claimable
+        WHERE yard_stats.visits.id = claimable.id
+        RETURNING yard_stats.visits.*
+        """,
+        params,
+        fetch=True,
+    )
+
+
+def mark_visit_video_done(visit_id: int, video_path: str) -> None:
+    _execute(
+        """
+        UPDATE yard_stats.visits
+        SET video_status = 'done', video_status_changed_at = now(), video_path = %s
+        WHERE id = %s
+        """,
+        (video_path, visit_id),
+    )
+
+
+def mark_visit_video_retry_or_failed(visit_id: int, max_attempts: int) -> None:
+    _execute(
+        """
+        UPDATE yard_stats.visits
+        SET video_attempt_count = video_attempt_count + 1,
+            video_status = CASE WHEN video_attempt_count + 1 >= %s THEN 'failed' ELSE 'retry' END,
+            video_status_changed_at = now()
+        WHERE id = %s
+        """,
+        (max_attempts, visit_id),
+    )
 
 
 def reap_stale_processing() -> None:
@@ -377,10 +476,21 @@ def run_retention_cleanup(retention_months: int) -> None:
     # Same FK-safe child-before-parent delete order as the (now superseded) n8n
     # "retention-cleanup.json" workflow -- video files are collected and removed first (their
     # paths only exist on the raw_events rows about to be deleted), then the usual DB sweep runs.
+    # visits can now also have a video_path (see alert_video_worker.py) -- collected the same way,
+    # otherwise a visit-level clip would be orphaned on disk once its DB row is deleted below.
     video_paths = [
         row["video_path"] for row in _execute(
             """
             SELECT video_path FROM yard_stats.raw_events
+            WHERE start_ts < now() - (%s || ' months')::interval AND video_path IS NOT NULL
+            """,
+            (retention_months,), fetch=True,
+        )
+    ]
+    video_paths += [
+        row["video_path"] for row in _execute(
+            """
+            SELECT video_path FROM yard_stats.visits
             WHERE start_ts < now() - (%s || ' months')::interval AND video_path IS NOT NULL
             """,
             (retention_months,), fetch=True,
@@ -453,6 +563,12 @@ def purge_older_than(cutoff: datetime, execute: bool) -> dict:
     video_paths = [
         row["video_path"] for row in _execute(
             "SELECT video_path FROM yard_stats.raw_events WHERE start_ts < %s AND video_path IS NOT NULL",
+            (cutoff,), fetch=True,
+        )
+    ]
+    video_paths += [
+        row["video_path"] for row in _execute(
+            "SELECT video_path FROM yard_stats.visits WHERE start_ts < %s AND video_path IS NOT NULL",
             (cutoff,), fetch=True,
         )
     ]
@@ -788,6 +904,7 @@ def claim_ai_batch(
     stale_minutes: int,
     max_age_hours: float | None = None,
     require_video: bool = False,
+    only_visit_representative: bool = False,
 ) -> list:
     # Replaces what used to be four separate n8n nodes (Reap Stale Processing Items, Count
     # In-Progress Items, Check Capacity, Claim Next Batch) with one call. Same FOR UPDATE SKIP
@@ -826,6 +943,27 @@ def claim_ai_batch(
     # than just the image. The VLM call itself still only ever uses the image -- no model in this
     # setup analyzes video directly -- this only changes which rows are eligible to claim.
     video_clause = "AND video_status = 'done'" if require_video else ""
+    # only_visit_representative=true ("source=visits" on POST /ai-queue/claim) skips analyzing
+    # every duplicate det_id a visit grouped together -- only the visit's earliest-linked raw_event
+    # (same "representative" definition list_visits uses) is eligible, plus every raw_event that
+    # was never grouped into a visit at all (visit_id IS NULL), so events Frigate's review never
+    # bundled still get analyzed one-to-one same as today. Deliberately doesn't touch ai_status
+    # semantics or completion at all -- POST /sightings/vehicles|persons still mark the exact same
+    # raw_event's ai_status='done' regardless of source, so this is purely a claim-time filter, not
+    # a schema/queue change (no ai_status column added to visits).
+    visit_clause = ""
+    if only_visit_representative:
+        visit_clause = """
+        AND (
+            visit_id IS NULL
+            OR id = (
+                SELECT re2.id FROM yard_stats.raw_events re2
+                WHERE re2.visit_id = raw_events.visit_id
+                ORDER BY re2.start_ts ASC, re2.id ASC
+                LIMIT 1
+            )
+        )
+        """
     age_clause = ""
     params: list = [object_types]
     if max_age_hours is not None:
@@ -838,6 +976,7 @@ def claim_ai_batch(
             SELECT id FROM yard_stats.raw_events
             WHERE objects = ANY(%s) AND crop_status = 'done' AND ai_status IN ('new', 'retry')
             {video_clause}
+            {visit_clause}
             {age_clause}
             ORDER BY created_at DESC
             LIMIT %s
@@ -847,7 +986,9 @@ def claim_ai_batch(
         SET ai_status = 'processing', ai_status_changed_at = now()
         FROM claimable
         WHERE yard_stats.raw_events.id = claimable.id
-        RETURNING yard_stats.raw_events.*
+        RETURNING yard_stats.raw_events.*,
+                  (yard_stats.raw_events.video_path IS NOT NULL) AS has_video,
+                  (yard_stats.raw_events.crop_image_base64 IS NOT NULL) AS has_image
         """,
         params,
         fetch=True,

@@ -3,6 +3,7 @@ import threading
 
 import uvicorn
 
+import alert_video_worker
 import config
 import crop_worker
 import db
@@ -23,6 +24,10 @@ def main():
     # STORE_VIDEO=false, rather than a thread that runs and no-ops forever.
     if config.STORE_VIDEO:
         threading.Thread(target=video_worker.run_forever, name="video_worker", daemon=True).start()
+    # Independent switch, independent thread -- STORE_VIDEO_ALERTS can be on/off regardless of
+    # STORE_VIDEO, so the two flows can be A/B'd separately.
+    if config.STORE_VIDEO_ALERTS:
+        threading.Thread(target=alert_video_worker.run_forever, name="alert_video_worker", daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=config.API_PORT)
 
 
