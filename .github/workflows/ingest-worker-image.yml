@@ -33,18 +33,32 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Extract image metadata
+        # Computed directly instead of via docker/metadata-action: that action makes an
+        # unconditional internal `repos.get()` GitHub API call on every run (baked into its
+        # main.ts, not something any input can disable) which has been intermittently returning
+        # a malformed (HTML, not JSON) response on this repo's Actions runners -- confirmed not
+        # our config (repo is public, api.github.com/repos/... returns clean 200 JSON from here,
+        # GitHub status is green) and not a known bug in the action itself (reproduced the exact
+        # dist bundle locally with no/bad tokens -- always got normal Octokit JSON errors, never
+        # this HTML). Our actual usage is two plain tags plus standard OCI labels -- simple enough
+        # to compute directly and drop the dependency on that flaky, unnecessary API call.
         id: meta
-        uses: docker/metadata-action@v5.7.0
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          # metadata-action always calls the GitHub API to resolve repo info (default branch,
-          # used internally for `edge`-type tags) regardless of which tag types are configured --
-          # without an explicit github-token it falls back to process.env.GITHUB_TOKEN, which this
-          # workflow never exports, so that call runs unauthenticated and 404s against this repo.
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          tags: |
-            type=raw,value=latest
-            type=sha,prefix=,format=short
+        run: |
+          IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
+          SHORT_SHA="${GITHUB_SHA::7}"
+          {
+            echo "tags<<TAGS_EOF"
+            echo "${IMAGE}:latest"
+            echo "${IMAGE}:${SHORT_SHA}"
+            echo "TAGS_EOF"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo "labels<<LABELS_EOF"
+            echo "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}"
+            echo "org.opencontainers.image.revision=${{ github.sha }}"
+            echo "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "LABELS_EOF"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Build and push
         uses: docker/build-push-action@v6
