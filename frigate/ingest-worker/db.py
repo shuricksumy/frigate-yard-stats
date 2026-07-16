@@ -72,6 +72,37 @@ def get_raw_event(event_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
+def get_vehicle_sighting_for_event(raw_event_id: int) -> dict | None:
+    # For GET /events/{id} -- surfaces the AI analysis result (plate, color, description) in the
+    # web UI's lightbox once ai_status='done'. At most one row ever exists per raw_event_id.
+    rows = _execute(
+        """
+        SELECT vs.id, vs.raw_event_id, re.camera, re.zone, re.start_ts,
+               vs.color, vs.body_type, vs.make_guess, vs.make_confidence,
+               vs.model_guess, vs.model_confidence, vs.notable_features,
+               vs.plate_text_llm, vs.plate_text_frigate, vs.plate_confidence, vs.notes
+        FROM yard_stats.vehicle_sightings vs
+        JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
+        WHERE vs.raw_event_id = %s
+        """,
+        (raw_event_id,), fetch=True,
+    )
+    return rows[0] if rows else None
+
+
+def get_person_sighting_for_event(raw_event_id: int) -> dict | None:
+    rows = _execute(
+        """
+        SELECT ps.id, ps.raw_event_id, re.camera, re.zone, re.start_ts, ps.description, ps.notes
+        FROM yard_stats.person_sightings ps
+        JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
+        WHERE ps.raw_event_id = %s
+        """,
+        (raw_event_id,), fetch=True,
+    )
+    return rows[0] if rows else None
+
+
 def insert_raw_event(event: dict) -> None:
     # video_status starts 'skipped' (not 'new') when STORE_VIDEO is off -- a cheap flag set once
     # at ingest, so the video queue's WHERE video_status IN ('new','retry') never even considers
@@ -125,6 +156,15 @@ def claim_next_batch(limit: int) -> list:
     # node, just running in one process instead of possibly-overlapping n8n executions. Ingests
     # every Frigate label (car, truck, person, dog, ...), not just car/person.
     #
+    # ORDER BY created_at DESC (not ASC) -- newest-eligible-first, same deliberate priority
+    # inversion as claim_ai_batch/claim_video_batch: when a backlog outnumbers available capacity,
+    # the most recent rows win and older ones keep waiting, only getting swept up once the backlog
+    # drops below capacity. Crop is the very first stage -- everything downstream (video, AI) can
+    # only ever become eligible after crop_status='done', so an oldest-first crop queue means fresh
+    # events wait behind however large the backlog is before they're even croppable at all. This
+    # was flipped after confirming in production the crop backlog was tens of thousands of rows
+    # deep and growing faster than PARALLEL_LIMIT could clear it oldest-first.
+    #
     # CTE, not a plain `WHERE id IN (SELECT ... LIMIT %s FOR UPDATE SKIP LOCKED)` subquery --
     # confirmed in practice that the subquery form does NOT reliably cap the UPDATE at `limit`
     # rows when the subquery self-references the same table being updated (reproduced: 3 eligible
@@ -135,7 +175,7 @@ def claim_next_batch(limit: int) -> list:
         WITH claimable AS (
             SELECT id FROM yard_stats.raw_events
             WHERE has_snapshot = true AND crop_status IN ('new', 'retry')
-            ORDER BY created_at ASC
+            ORDER BY created_at DESC
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         )
@@ -203,21 +243,37 @@ def count_video_in_progress() -> int:
     return rows[0]["in_progress_count"] if rows else 0
 
 
-def claim_video_batch(limit: int) -> list:
+def claim_video_batch(limit: int, max_age_hours: float | None = None) -> list:
     # Only claims rows the crop stage has already finished with -- video download uses the same
     # camera/start/end window regardless of crop_status, but there's no reason to spend download
     # bandwidth on a row that might still fail crop-stage validation upstream, and this keeps the
     # video stage a strict downstream consumer of the crop stage, same relationship the AI stage
     # already has with crop_status='done'.
     #
+    # ORDER BY created_at DESC (not ASC) -- newest-eligible-first, same reasoning as
+    # claim_next_batch/claim_ai_batch: under a backlog, keeps the video stage caught up on fresh
+    # events instead of working through however old a backlog has piled up first. Pairs with
+    # max_age_hours below for backlog that's too old to bother with at all.
+    #
     # CTE, not a plain `WHERE id IN (SELECT ... LIMIT %s FOR UPDATE SKIP LOCKED)` subquery -- see
     # claim_next_batch's comment for why (confirmed the subquery form over-claims past `limit`).
+    #
+    # max_age_hours -- same throughput safety valve as claim_ai_batch's: past this cutoff, a row
+    # just stays video_status='new'/'retry' indefinitely rather than spending an attempt on a clip
+    # that's very likely already rolled off Frigate's continuous-recording buffer.
+    age_clause = ""
+    params: list = []
+    if max_age_hours is not None:
+        age_clause = "AND created_at >= now() - (%s * interval '1 hour')"
+        params.append(max_age_hours)
+    params.append(limit)
     return _execute(
-        """
+        f"""
         WITH claimable AS (
             SELECT id FROM yard_stats.raw_events
             WHERE crop_status = 'done' AND video_status IN ('new', 'retry')
-            ORDER BY created_at ASC
+            {age_clause}
+            ORDER BY created_at DESC
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         )
@@ -227,7 +283,7 @@ def claim_video_batch(limit: int) -> list:
         WHERE yard_stats.raw_events.id = claimable.id
         RETURNING yard_stats.raw_events.*
         """,
-        (limit,),
+        params,
         fetch=True,
     )
 
@@ -394,17 +450,48 @@ def list_events(
     crop_status: str | None = None,
     ai_status: str | None = None,
     video_status: str | None = None,
-    has_image: bool = True,
+    has_media: bool = True,
+    event_id: int | None = None,
+    q: str | None = None,
     limit: int = 20,
     offset: int = 0,
 ) -> list:
     clauses = []
     params: list = []
-    if has_image:
-        # Default view: hide rows with no crop_image_base64 (crop_status not yet 'done' --
-        # including the 'skipped' rows has_snapshot=false produces, which will never get one) so
-        # the grid isn't full of thumbnails that 404. Pass has_image=false to see everything.
-        clauses.append("crop_image_base64 IS NOT NULL")
+    join = ""
+    if q and q.strip():
+        # Free-text search across the AI analysis result, not raw_events itself -- only ever
+        # matches rows that already have a vehicle_sighting or person_sighting (i.e. ai_status
+        # already 'done'), so it composes fine with has_media's default (those rows always have an
+        # image already, by the same crop_status='done' invariant everything else here relies on).
+        # LEFT JOIN both sighting tables rather than picking one, since object_type isn't required
+        # alongside q -- a raw_event only ever matches at most one of the two.
+        join = """
+        LEFT JOIN yard_stats.vehicle_sightings vs ON vs.raw_event_id = re.id
+        LEFT JOIN yard_stats.person_sightings ps ON ps.raw_event_id = re.id
+        """
+        term = f"%{q.strip()}%"
+        clauses.append("""(
+            vs.color ILIKE %s OR vs.body_type ILIKE %s OR vs.make_guess ILIKE %s OR
+            vs.model_guess ILIKE %s OR vs.notable_features ILIKE %s OR
+            vs.plate_text_llm ILIKE %s OR vs.plate_text_frigate ILIKE %s OR vs.notes ILIKE %s OR
+            ps.description ILIKE %s OR ps.notes ILIKE %s
+        )""")
+        params.extend([term] * 10)
+    if has_media and event_id is None:
+        # Default view: hide rows with neither a crop image nor a stored video (crop_status not
+        # yet 'done' -- including the 'skipped' rows has_snapshot=false produces, which will never
+        # get one) so the grid isn't full of cards with nothing to show. In practice video_path is
+        # never set without crop_image_base64 already being set too (claim_video_batch only claims
+        # crop_status='done' rows), so this is currently equivalent to crop-image-only, but checks
+        # both so it stays correct if that invariant ever changes. Pass has_media=false to see
+        # everything. Skipped entirely when event_id is given -- searching for one specific known
+        # event should find it regardless of whether it has media, same reasoning as event_id
+        # bypassing the time window at the API layer.
+        clauses.append("(re.crop_image_base64 IS NOT NULL OR re.video_path IS NOT NULL)")
+    if event_id is not None:
+        clauses.append("re.id = %s")
+        params.append(event_id)
     if object_type:
         # Comma-separated ("car,truck") or a single value -- "all"/omitted means no filter.
         # `objects` is a free-text label (see mqtt_ingest.parse_payload: Frigate's single
@@ -412,37 +499,39 @@ def list_events(
         # on exact equality against any of the requested types rather than an array/substring op.
         types = [t.strip() for t in object_type.split(",") if t.strip() and t.strip().lower() != "all"]
         if types:
-            clauses.append("objects = ANY(%s)")
+            clauses.append("re.objects = ANY(%s)")
             params.append(types)
     if camera:
-        clauses.append("camera = %s")
+        clauses.append("re.camera = %s")
         params.append(camera)
     if start:
-        clauses.append("start_ts >= %s")
+        clauses.append("re.start_ts >= %s")
         params.append(start)
     if end:
-        clauses.append("start_ts <= %s")
+        clauses.append("re.start_ts <= %s")
         params.append(end)
     if crop_status:
-        clauses.append("crop_status = %s")
+        clauses.append("re.crop_status = %s")
         params.append(crop_status)
     if ai_status:
-        clauses.append("ai_status = %s")
+        clauses.append("re.ai_status = %s")
         params.append(ai_status)
     if video_status:
-        clauses.append("video_status = %s")
+        clauses.append("re.video_status = %s")
         params.append(video_status)
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.extend([limit, offset])
     return _execute(
         f"""
-        SELECT id, camera, zone, objects, start_ts, end_ts, crop_status, ai_status, video_status,
-               sub_label, score, (video_path IS NOT NULL) AS has_video,
-               (crop_image_base64 IS NOT NULL) AS has_image
-        FROM yard_stats.raw_events
+        SELECT DISTINCT re.id, re.camera, re.zone, re.objects, re.start_ts, re.end_ts,
+               re.crop_status, re.ai_status, re.video_status,
+               re.sub_label, re.score, (re.video_path IS NOT NULL) AS has_video,
+               (re.crop_image_base64 IS NOT NULL) AS has_image
+        FROM yard_stats.raw_events re
+        {join}
         {where}
-        ORDER BY start_ts DESC
+        ORDER BY re.start_ts DESC
         LIMIT %s OFFSET %s
         """,
         params,
@@ -590,6 +679,7 @@ def claim_ai_batch(
     parallel_limit: int,
     stale_minutes: int,
     max_age_hours: float | None = None,
+    require_video: bool = False,
 ) -> list:
     # Replaces what used to be four separate n8n nodes (Reap Stale Processing Items, Count
     # In-Progress Items, Check Capacity, Claim Next Batch) with one call. Same FOR UPDATE SKIP
@@ -622,6 +712,12 @@ def claim_ai_batch(
     # CTE, not a plain `WHERE id IN (SELECT ... LIMIT %s FOR UPDATE SKIP LOCKED)` subquery -- see
     # claim_next_batch's comment for why (confirmed the subquery form over-claims past `limit`,
     # i.e. past available_capacity here -- exactly the cap this function exists to enforce).
+    # require_video=true adds AND video_status = 'done' -- claim_video_batch only ever claims
+    # crop_status='done' rows, so this is strictly narrower than the default (image guaranteed
+    # either way), for a future workflow that wants both artifacts ready before processing rather
+    # than just the image. The VLM call itself still only ever uses the image -- no model in this
+    # setup analyzes video directly -- this only changes which rows are eligible to claim.
+    video_clause = "AND video_status = 'done'" if require_video else ""
     age_clause = ""
     params: list = [object_types]
     if max_age_hours is not None:
@@ -633,6 +729,7 @@ def claim_ai_batch(
         WITH claimable AS (
             SELECT id FROM yard_stats.raw_events
             WHERE objects = ANY(%s) AND crop_status = 'done' AND ai_status IN ('new', 'retry')
+            {video_clause}
             {age_clause}
             ORDER BY created_at DESC
             LIMIT %s

@@ -171,6 +171,18 @@ being processed strictly in arrival order, and only get swept up once the backlo
 drops below capacity. The optional `max_age_hours` param goes further: rows older than that cutoff
 are never claimed at all (they stay `ai_status='new'` indefinitely), a throughput safety valve for
 when incoming events outpace analysis capacity and stale backlog isn't worth spending capacity on.
+`claim_next_batch` (crop) and `claim_video_batch` (video) claim newest-first too, for the same
+reason -- crop is the very first stage, so an oldest-first crop queue meant fresh events waited
+behind however deep a backlog had piled up before they were even croppable at all, which cascades
+to everything downstream since video/AI can't start until `crop_status='done'`. Confirmed
+necessary in production: the crop backlog reached five digits and kept growing faster than
+`PARALLEL_LIMIT` could clear it oldest-first.
+An image is always guaranteed on every claimed row (`crop_status='done'` is a hard requirement,
+not configurable) -- the optional `require_video` param narrows further, only claiming rows that
+also already have a stored video (`video_status='done'`) ready, for a future workflow that wants
+both artifacts before processing. The VLM call itself still only ever uses the image regardless --
+no model in this setup analyzes video directly; `require_video` only changes which rows are
+eligible to claim, not what gets sent to the VLM.
 `POST /sightings/vehicles` and
 `POST /sightings/persons` insert the sighting and mark `ai_status='done'` in one DB transaction
 (`db.complete_vehicle_sighting`/`complete_person_sighting`, temporarily flipping the module
@@ -196,9 +208,24 @@ download attempt; the clip is fetched from Frigate's own
 `crop.py` uses), and a response at/below `VIDEO_MIN_VALID_BYTES` is treated as Frigate's
 not-ready-yet placeholder rather than a real clip, retried up to `VIDEO_MAX_ATTEMPTS` times. Only
 the resulting filesystem path (`VIDEO_STORAGE_PATH/{YYYY}/{MM}/{DD}/{object_type}-{event_id}-
-{start_ts_epoch}.mp4`) is stored in Postgres (`video_path`) -- the file itself lives on disk only.
-This whole stage ports the behavioral spec proved out by the `FrigateRetry.json` n8n workflow it
-replaces, straight into Python rather than adding new n8n nodes.
+{start_ts_epoch}-{start_ts_iso}.mp4` -- epoch for a stable/sortable key, an ISO-ish UTC timestamp
+alongside it since the epoch alone isn't recognizable at a glance in a directory listing) is
+stored in Postgres (`video_path`) -- the file itself lives on disk only. The `{YYYY}/{MM}/{DD}`
+folder is keyed on the *event's* `start_ts`, not on when the file was actually written -- under a
+backlog, a folder for a day that's already passed can still gain new files today if that backlog
+hasn't been swept up yet (`claim_video_batch` claims newest-first, see above, so this is now the
+exception once fresh events are caught up, not the default state it was before that change). The
+worker is also single-threaded, one clip at a time regardless of `VIDEO_PARALLEL_LIMIT` -- that
+only lets it claim/burn through a bigger batch per poll tick without the inter-item poll-sleep,
+not true concurrent downloads. `VIDEO_MAX_AGE_HOURS`, if set, goes further than newest-first
+ordering alone: same throughput safety valve as the AI queue's `max_age_hours` (see above) --
+past the cutoff a row just stays `video_status='new'`/`'retry'` rather than spending an attempt
+on a clip that's very likely already rolled off Frigate's continuous-recording buffer (confirmed
+in production: a clip was already gone `"No recordings found for the specified time range"` only
+~36 minutes after the event -- a much shorter retention window than the event-scoped clip
+`crop.py` reads from, which persisted for over an hour in the same test). This whole stage ports
+the behavioral spec proved out by the `FrigateRetry.json` n8n workflow it replaces, straight into
+Python rather than adding new n8n nodes.
 
 `TELEGRAM_ENABLED=true` turns on fire-and-forget notifications (`telegram.py`): a photo right after
 crop (regardless of `STORE_VIDEO` -- photo-only is a valid steady state), and, once a clip is
@@ -207,20 +234,56 @@ a durable version of the `FrigateRetry.json` workflow's in-memory `pendingReplie
 reply-threading survives a service restart). Both directions are wrapped so a Telegram failure
 (bad token, rate limit, network blip) can never take down the crop or video poll loop.
 
-`GET /events` also defaults `has_image=true` -- rows with no `crop_image_base64` (not yet
-`crop_status='done'`, including `'skipped'` rows) are hidden by default since there's nothing to
-show in a thumbnail for them; pass `has_image=false` to see every row regardless. The web UI's
-"Only with images" checkbox (checked by default) is this same param, not a client-side filter.
+`GET /events` also defaults `has_media=true` -- rows with neither `crop_image_base64` nor
+`video_path` (not yet `crop_status='done'`, including `'skipped'` rows) are hidden by default
+since there's nothing to show for them; pass `has_media=false` to see every row regardless. The
+web UI's "Only with media" checkbox (checked by default) is this same param, not a client-side
+filter. In practice `video_path` is never set without `crop_image_base64` already being set too
+(`claim_video_batch` only ever claims `crop_status='done'` rows), so this is currently equivalent
+to crop-image-only -- but the check covers both so it stays correct if that invariant ever
+changes. `GET /events?event_id=<id>` exact-matches a single event and bypasses every other filter
+(time window and `has_media` included) -- searching for one specific known event should find it
+regardless, not get filtered out by the defaults built for browsing a range.
+
+`GET /events?q=<text>` free-text searches (case-insensitive substring) across the AI analysis
+result -- `vehicle_sightings`' color/body_type/make_guess/model_guess/notable_features/
+plate_text_llm/plate_text_frigate/notes, or `person_sightings`' description/notes -- via a `LEFT
+JOIN` to both tables (`SELECT DISTINCT` guards against a fan-out if either sighting table ever had
+more than one row per `raw_event_id`, which nothing enforces at the schema level). Only ever
+matches rows that already have a sighting, i.e. `ai_status='done'`, so it composes harmlessly with
+`has_media`'s default. Like `event_id`, `q` bypasses the time window entirely -- searching your
+whole sightings history, not the visible date range.
+
+`GET /events/{id}/thumbnail` and `GET /events/{id}/image` fall back to extracting a frame from the
+stored video (`video.extract_frame_jpeg`, ffmpeg, 0.1s in to dodge a black first frame on some
+encoders) when there's a video but no crop image -- belt and suspenders for the same reason
+`has_media` checks both; not reachable in practice today either.
+
+`GET /object-types` returns `config.OBJECT_TYPES` (from the `OBJECT_TYPES` env var,
+comma-separated, e.g. `car,truck,person,dog`) -- Frigate's object labels aren't fixed (depends on
+your model/config), so the web UI's Type filter dropdown is populated from this at load time
+instead of being hardcoded in the HTML; add a label to the env var and it shows up in the
+dropdown on next restart.
+
+`GET /events/{id}` also returns `vehicle_sighting`/`person_sighting` (via
+`db.get_vehicle_sighting_for_event`/`get_person_sighting_for_event`, one targeted indexed lookup
+each, tried unconditionally rather than branching on `objects` since at most one ever matches) --
+`null` until `ai_status='done'`. Kept off the `GET /events` list response deliberately (same
+reasoning as `crop_image_base64` already being list-response-only) -- the web UI's lightbox fetches
+full detail only when actually opened, not for every row in a page.
 
 The web report UI (`/ui`, static files baked into the image, Alpine.js vendored locally -- no CDN
 requests) reads the same API everything else does: `GET /events` (filterable by
-`object_type`/`crop_status`/`ai_status`/`video_status`/`has_image`, defaults to the last 1 hour,
-images-only), `GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same `crop.scale_image_base64` helper
-`report.py` uses) for the grid, and `GET /media/video/{id}` (range-request `FileResponse`, so the
-browser's scrubber works) or `GET /events/{id}/image` for the lightbox depending on `has_video`.
-Those three endpoints alone also accept the API key as an `?api_key=` query param (in addition to
-the usual `X-API-Key` header) since `<img>`/`<video>` tags can't attach custom headers -- the UI
-itself just stores the key in a long-lived cookie after validating it against the API once.
+`object_type`/`crop_status`/`ai_status`/`video_status`/`has_media`/`event_id`/`q`, defaults to the
+last 1 hour, media-only), `GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same
+`crop.scale_image_base64` helper `report.py` uses) for the grid, and `GET /media/video/{id}`
+(range-request `FileResponse`, so the browser's scrubber works) or `GET /events/{id}/image` for
+the lightbox depending on `has_video`/`has_image` -- when an event has both, toggle buttons switch
+between them (video shown by default) instead of only ever picking one; the lightbox also shows
+the AI analysis result (via `GET /events/{id}`) once `ai_status='done'`. Those three endpoints
+alone also accept the API key as an `?api_key=` query param (in addition to the usual `X-API-Key`
+header) since `<img>`/`<video>` tags can't attach custom headers -- the UI itself just stores the
+key in a long-lived cookie after validating it against the API once.
 
 An optional `mosquitto` Compose profile (`--profile mqtt`) provides a local/dev MQTT broker for
 bringing up the whole pipeline from scratch without an existing broker -- fully opt-in, never
@@ -243,6 +306,21 @@ cropping).
 Because `region` can be large, the cropped JPEG is downscaled to `MAX_CROP_DIMENSION` (default
 1280px, long side) before being base64-encoded — VLMs downsample beyond that internally anyway,
 so there's no analysis benefit to sending a bigger image, only more load on the vision encoder.
+
+`crop.py` grabs its frame from the *midpoint* of the event's own start/end span -- but for a
+long-lived tracked object (a car sitting in a zone for 20+ minutes, say), Frigate's saved event
+clip can be much shorter than that logical span (confirmed in production: a ~20-minute event's
+clip was only ~7 minutes long). Seeking `-ss <midpoint>` past the real end of that shorter file
+doesn't error -- ffmpeg exits 0 having written nothing, so it isn't caught via the subprocess's
+exit code, only surfaces later when the next ffmpeg call tries to read the (missing) frame file.
+`crop_and_scale` checks for that and retries once at a small fixed offset near the start of the
+clip, which is always within whatever got saved regardless of how much the tail was truncated.
+
+`CROP_INITIAL_WAIT_SECONDS` (default 5s, same idea as `VIDEO_INITIAL_WAIT_SECONDS`) gives Frigate
+a head start to finalize the event/clip before the *first* crop attempt on a freshly claimed row
+-- confirmed in production that even an ordinary short event's crop can fail this way if attempted
+immediately after the "end" MQTT message, not just long events tripping the clip-duration fallback
+above. Only applies once per row (`crop_attempt_count == 0`), not on every retry pass.
 
 ### Schema (`yard_stats`)
 

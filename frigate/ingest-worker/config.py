@@ -30,6 +30,11 @@ RECORD_HEIGHT = int(_env("RECORD_HEIGHT", "2160"))
 PARALLEL_LIMIT = int(_env("PARALLEL_LIMIT", "2"))
 STALE_MINUTES = int(_env("STALE_MINUTES", "5"))
 MAX_ATTEMPTS = int(_env("MAX_ATTEMPTS", "3"))
+# Frigate is still finalizing the event/clip when the "end" MQTT message fires -- wait this long
+# before the *first* crop attempt on a freshly claimed row (mirrors VIDEO_INITIAL_WAIT_SECONDS;
+# confirmed in production that a short event's crop can genuinely fail this way, not just long
+# events tripping the clip-duration fallback in crop.py).
+CROP_INITIAL_WAIT_SECONDS = float(_env("CROP_INITIAL_WAIT_SECONDS", "5"))
 MAX_CROP_DIMENSION = int(_env("MAX_CROP_DIMENSION", "1280"))
 CROP_PADDING_PCT = float(_env("CROP_PADDING_PCT", "0.2"))
 # A second, much smaller copy of the same crop -- for report/preview UIs that would otherwise
@@ -78,6 +83,15 @@ VIDEO_INITIAL_WAIT_SECONDS = float(_env("VIDEO_INITIAL_WAIT_SECONDS", "10"))
 VIDEO_MIN_VALID_BYTES = int(_env("VIDEO_MIN_VALID_BYTES", "1000"))
 VIDEO_MAX_ATTEMPTS = int(_env("VIDEO_MAX_ATTEMPTS", "5"))
 VIDEO_RETRY_WAIT_SECONDS = float(_env("VIDEO_RETRY_WAIT_SECONDS", "5"))
+# If set, never claim rows older than this many hours -- same throughput safety valve as
+# /ai-queue/claim's max_age_hours, applied here since the video stage's clip source (Frigate's
+# continuous-recording buffer, a much shorter retention window than the event-scoped clip crop.py
+# reads from) can roll a clip off before a backlogged worker ever gets to it -- confirmed in
+# production a clip was already gone ~36 minutes after the event. Past this cutoff a row just
+# stays video_status='new'/'retry' indefinitely rather than burning attempts on a clip that's
+# very likely already gone. Unset (None) means no age limit, matching the AI queue's own default.
+_video_max_age_hours_env = os.environ.get("VIDEO_MAX_AGE_HOURS")
+VIDEO_MAX_AGE_HOURS = float(_video_max_age_hours_env) if _video_max_age_hours_env else None
 
 # -------------------------------------------------
 # Telegram notifications -- see telegram.py. Disabled (no-op) unless explicitly turned on.
@@ -85,3 +99,11 @@ VIDEO_RETRY_WAIT_SECONDS = float(_env("VIDEO_RETRY_WAIT_SECONDS", "5"))
 TELEGRAM_ENABLED = _env("TELEGRAM_ENABLED", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+
+# -------------------------------------------------
+# Web report UI -- see static/index.html. Frigate object labels aren't fixed (depends on your
+# model/config, e.g. car/truck/person/dog), so the UI's "Type" filter dropdown is populated from
+# this list (via GET /object-types) rather than being hardcoded in the HTML -- add a label here
+# and it shows up in the dropdown on next restart, no frontend change needed.
+# -------------------------------------------------
+OBJECT_TYPES = [t.strip() for t in _env("OBJECT_TYPES", "car,truck,person,dog").split(",") if t.strip()]

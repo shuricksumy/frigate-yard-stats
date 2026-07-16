@@ -71,6 +71,9 @@ services:
       PARALLEL_LIMIT: ${PARALLEL_LIMIT:-2}
       STALE_MINUTES: ${STALE_MINUTES:-5}
       MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
+      # Frigate is still finalizing the event/clip when "end" fires -- wait this long before the
+      # first crop attempt on a freshly claimed row (same idea as VIDEO_INITIAL_WAIT_SECONDS).
+      CROP_INITIAL_WAIT_SECONDS: ${CROP_INITIAL_WAIT_SECONDS:-5}
       POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-5}
       # How long to keep data before it's deleted, and how often to check.
       RETENTION_MONTHS: ${RETENTION_MONTHS:-12}
@@ -89,12 +92,20 @@ services:
       VIDEO_INITIAL_WAIT_SECONDS: ${VIDEO_INITIAL_WAIT_SECONDS:-10}
       VIDEO_MIN_VALID_BYTES: ${VIDEO_MIN_VALID_BYTES:-1000}
       VIDEO_MAX_ATTEMPTS: ${VIDEO_MAX_ATTEMPTS:-5}
+      # Optional -- if set, never claim video for rows older than this many hours (Frigate's
+      # continuous-recording buffer that clips come from has a much shorter retention than its
+      # saved events, so a backlogged worker attempting a very old row just burns attempts on a
+      # clip that's very likely already gone). Unset/blank = no age limit.
+      VIDEO_MAX_AGE_HOURS: ${VIDEO_MAX_AGE_HOURS:-}
       VIDEO_RETRY_WAIT_SECONDS: ${VIDEO_RETRY_WAIT_SECONDS:-5}
       # Telegram notifications (photo on crop, video reply once stored) -- see telegram.py.
       # Disabled by default; TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID only need to be set when on.
       TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      # Object labels your Frigate config actually produces -- drives the web UI's Type filter
+      # dropdown (GET /object-types) so it doesn't need a frontend change to pick up a new label.
+      OBJECT_TYPES: ${OBJECT_TYPES:-car,truck,person,dog}
     ports:
       # Admin/debug endpoints (unauthenticated) plus the read/query/report API (X-API-Key
       # required) plus the static web report UI at /ui -- Swagger UI at /docs, ReDoc at /redoc.

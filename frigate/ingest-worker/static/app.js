@@ -41,17 +41,35 @@ function eventsApp() {
     loading: false,
     limit: 24,
     offset: 0,
+    objectTypes: [],
 
-    filters: { objectType: "all", aiStatus: "all", onlyWithImages: true, ...defaultWindow() },
+    filters: { objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "", ...defaultWindow() },
 
     lightboxEvent: null,
+    lightboxMode: "video",
+    lightboxDetail: null,
+    lightboxLoading: false,
 
     init() {
       const stored = getCookie(API_KEY_COOKIE);
       if (stored) {
         this.apiKey = stored;
         this.hasApiKey = true;
+        this.fetchObjectTypes();
         this.fetchEvents();
+      }
+    },
+
+    async fetchObjectTypes() {
+      // Frigate's object labels aren't fixed (depends on your model/config) -- the Type dropdown
+      // is populated from the server's OBJECT_TYPES config instead of being hardcoded here.
+      try {
+        const resp = await fetch("/object-types", { headers: { "X-API-Key": this.apiKey } });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.objectTypes = data.object_types || [];
+      } catch (err) {
+        console.error(err);
       }
     },
 
@@ -70,6 +88,7 @@ function eventsApp() {
       this.apiKey = candidate;
       this.hasApiKey = true;
       this.apiKeyInput = "";
+      this.fetchObjectTypes();
       this.fetchEvents();
     },
 
@@ -107,19 +126,33 @@ function eventsApp() {
     async fetchEvents() {
       this.loading = true;
       try {
+        const eventId = String(this.filters.eventId || "").trim();
+        const q = String(this.filters.q || "").trim();
         const params = new URLSearchParams({
           limit: String(this.limit),
           offset: String(this.offset),
-          has_image: String(!!this.filters.onlyWithImages),
         });
-        if (this.filters.objectType && this.filters.objectType !== "all") {
-          params.set("object_type", this.filters.objectType);
+        if (eventId) {
+          // Searching by a specific known id -- ignores every other filter (date window
+          // included, server-side) rather than trying to compose with them.
+          params.set("event_id", eventId);
+        } else {
+          params.set("has_media", String(!!this.filters.onlyWithMedia));
+          if (this.filters.objectType && this.filters.objectType !== "all") {
+            params.set("object_type", this.filters.objectType);
+          }
+          if (this.filters.aiStatus && this.filters.aiStatus !== "all") {
+            params.set("ai_status", this.filters.aiStatus);
+          }
+          if (q) {
+            // A text search spans your whole history, not just the visible date window --
+            // matches the API's own event_id/q window-bypass behavior.
+            params.set("q", q);
+          } else {
+            if (this.filters.start) params.set("start", new Date(this.filters.start).toISOString());
+            if (this.filters.end) params.set("end", new Date(this.filters.end).toISOString());
+          }
         }
-        if (this.filters.aiStatus && this.filters.aiStatus !== "all") {
-          params.set("ai_status", this.filters.aiStatus);
-        }
-        if (this.filters.start) params.set("start", new Date(this.filters.start).toISOString());
-        if (this.filters.end) params.set("end", new Date(this.filters.end).toISOString());
 
         const resp = await fetch(`/events?${params.toString()}`, {
           headers: { "X-API-Key": this.apiKey },
@@ -147,12 +180,48 @@ function eventsApp() {
       return `/media/video/${eventId}?api_key=${encodeURIComponent(this.apiKey)}`;
     },
 
-    openLightbox(event) {
+    async openLightbox(event) {
       this.lightboxEvent = event;
+      // Default to video when both exist -- richer than a still frame -- but the toggle buttons
+      // (shown only when both are present) let you switch to the image side and back.
+      this.lightboxMode = event.has_video ? "video" : "image";
+      this.lightboxDetail = null;
+      if (event.ai_status !== "done") return;
+      // The AI analysis result (plate, color, description) isn't in the list response -- keeps
+      // GET /events light -- so fetch it only when actually opening an analyzed event.
+      this.lightboxLoading = true;
+      try {
+        const resp = await fetch(`/events/${event.id}`, { headers: { "X-API-Key": this.apiKey } });
+        if (resp.ok) this.lightboxDetail = await resp.json();
+      } catch (err) {
+        console.error(err);
+      } finally {
+        this.lightboxLoading = false;
+      }
     },
 
     closeLightbox() {
       this.lightboxEvent = null;
+      this.lightboxDetail = null;
+    },
+
+    sightingFields() {
+      const d = this.lightboxDetail;
+      if (!d) return [];
+      if (d.vehicle_sighting) {
+        const vs = d.vehicle_sighting;
+        return [
+          ["Color", vs.color], ["Body type", vs.body_type],
+          ["Make", vs.make_guess], ["Model", vs.model_guess],
+          ["Plate (LLM)", vs.plate_text_llm], ["Plate (Frigate)", vs.plate_text_frigate],
+          ["Notable features", vs.notable_features], ["Notes", vs.notes],
+        ].filter(([, value]) => value);
+      }
+      if (d.person_sighting) {
+        const ps = d.person_sighting;
+        return [["Description", ps.description], ["Notes", ps.notes]].filter(([, value]) => value);
+      }
+      return [];
     },
 
     formatTs(iso) {

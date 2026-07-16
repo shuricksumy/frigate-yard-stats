@@ -12,6 +12,12 @@ logger = logging.getLogger(__name__)
 
 def process_claimed_event(row: dict) -> None:
     event_id = row["id"]
+    # Frigate is still finalizing the event/clip right after the "end" event fires -- give it a
+    # head start before the first attempt (mirrors video_worker's VIDEO_INITIAL_WAIT_SECONDS).
+    # Only wait on a genuinely fresh claim, not every retry pass through this row --
+    # crop_attempt_count == 0 means this is the first attempt.
+    if row.get("crop_attempt_count", 0) == 0:
+        time.sleep(config.CROP_INITIAL_WAIT_SECONDS)
     try:
         result = crop.crop_event(row)
         db.mark_crop_done(event_id, result["crop_image_base64"], result["sub_label"], result["score"])
@@ -48,10 +54,10 @@ def run_once() -> None:
 
 def run_forever() -> None:
     logger.info(
-        "crop_worker starting: parallel_limit=%s stale_minutes=%s max_attempts=%s poll_interval=%ss "
-        "retention_months=%s retention_check_interval=%ss",
-        config.PARALLEL_LIMIT, config.STALE_MINUTES, config.MAX_ATTEMPTS, config.POLL_INTERVAL_SECONDS,
-        config.RETENTION_MONTHS, config.RETENTION_CHECK_INTERVAL_SECONDS,
+        "crop_worker starting: parallel_limit=%s stale_minutes=%s max_attempts=%s initial_wait=%ss "
+        "poll_interval=%ss retention_months=%s retention_check_interval=%ss",
+        config.PARALLEL_LIMIT, config.STALE_MINUTES, config.MAX_ATTEMPTS, config.CROP_INITIAL_WAIT_SECONDS,
+        config.POLL_INTERVAL_SECONDS, config.RETENTION_MONTHS, config.RETENTION_CHECK_INTERVAL_SECONDS,
     )
     while True:
         try:

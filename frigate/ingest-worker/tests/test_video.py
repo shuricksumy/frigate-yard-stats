@@ -55,7 +55,9 @@ def test_store_clip_writes_date_partitioned_path(tmp_path, monkeypatch):
 
     path = video.store_clip(row, content)
 
-    expected_path = tmp_path / "2026" / "07" / "15" / "car-42-1784154175.mp4"
+    # Epoch seconds plus a human-readable UTC timestamp alongside it (epoch alone isn't
+    # recognizable at a glance in a directory listing).
+    expected_path = tmp_path / "2026" / "07" / "15" / "car-42-1784154175-20260715T222255Z.mp4"
     assert path == str(expected_path)
     assert expected_path.read_bytes() == content
 

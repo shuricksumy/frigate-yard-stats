@@ -1,4 +1,6 @@
 import os
+import subprocess
+import tempfile
 from datetime import datetime, timezone
 
 import requests
@@ -62,8 +64,31 @@ def store_clip(row: dict, content: bytes) -> str:
     os.makedirs(day_dir, exist_ok=True)
 
     object_type = _primary_object_type(row)
-    filename = f"{object_type}-{row['id']}-{int(start.timestamp())}.mp4"
+    # Epoch seconds (stable, sortable, matches the event's start_ts exactly) plus a human-readable
+    # UTC timestamp alongside it -- the epoch alone isn't recognizable at a glance in a directory
+    # listing.
+    filename = f"{object_type}-{row['id']}-{int(start.timestamp())}-{start:%Y%m%dT%H%M%SZ}.mp4"
     path = os.path.join(day_dir, filename)
     with open(path, "wb") as f:
         f.write(content)
     return path
+
+
+def extract_frame_jpeg(video_path: str, max_dimension: int | None = None) -> bytes:
+    # Fallback for events that have a stored clip but no crop_image_base64 -- shouldn't happen
+    # today (claim_video_batch only ever claims crop_status='done' rows, so a video always implies
+    # a crop image already exists), but the web UI's thumbnail/image endpoints use this defensively
+    # so a future change to that invariant doesn't leave those events with nothing to show.
+    # 0.1s in, not frame 0 -- some encoders' very first frame is black/incomplete.
+    with tempfile.TemporaryDirectory() as tmp:
+        frame_path = os.path.join(tmp, "frame.jpg")
+        vf = []
+        if max_dimension is not None:
+            vf.append(f"scale='min({max_dimension},iw)':'min({max_dimension},ih)':force_original_aspect_ratio=decrease")
+        cmd = ["ffmpeg", "-y", "-ss", "0.1", "-i", video_path, "-frames:v", "1"]
+        if vf:
+            cmd += ["-vf", ",".join(vf)]
+        cmd.append(frame_path)
+        subprocess.run(cmd, check=True, capture_output=True)
+        with open(frame_path, "rb") as f:
+            return f.read()

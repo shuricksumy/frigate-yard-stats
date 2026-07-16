@@ -29,25 +29,33 @@
 
     <form class="filters" @submit.prevent="applyFilters()">
       <label>
+        Event ID
+        <input type="number" x-model="filters.eventId" placeholder="e.g. 1234">
+      </label>
+      <label>
+        Search AI analysis
+        <input type="text" x-model="filters.q" placeholder="e.g. red toyota, plate ABC123" :disabled="filters.eventId">
+      </label>
+      <label>
         From
-        <input type="datetime-local" x-model="filters.start">
+        <input type="datetime-local" x-model="filters.start" :disabled="filters.eventId || filters.q">
       </label>
       <label>
         To
-        <input type="datetime-local" x-model="filters.end">
+        <input type="datetime-local" x-model="filters.end" :disabled="filters.eventId || filters.q">
       </label>
       <label>
         Type
-        <select x-model="filters.objectType">
+        <select x-model="filters.objectType" :disabled="filters.eventId">
           <option value="all">All</option>
-          <option value="car">Car</option>
-          <option value="person">Person</option>
-          <option value="truck">Truck</option>
+          <template x-for="type in objectTypes" :key="type">
+            <option :value="type" x-text="type.charAt(0).toUpperCase() + type.slice(1)"></option>
+          </template>
         </select>
       </label>
       <label>
         AI status
-        <select x-model="filters.aiStatus">
+        <select x-model="filters.aiStatus" :disabled="filters.eventId">
           <option value="all">All</option>
           <option value="new">New</option>
           <option value="processing">Processing</option>
@@ -57,8 +65,8 @@
         </select>
       </label>
       <label class="checkbox-label">
-        <input type="checkbox" x-model="filters.onlyWithImages">
-        Only with images
+        <input type="checkbox" x-model="filters.onlyWithMedia" :disabled="filters.eventId">
+        Only with media
       </label>
       <button type="submit">Apply</button>
     </form>
@@ -69,8 +77,8 @@
     <div class="grid" x-show="!loading">
       <template x-for="event in events" :key="event.id">
         <div class="card">
-          <img x-show="event.has_image" :src="thumbnailUrl(event.id)" loading="lazy" @click="openLightbox(event)" alt="event thumbnail">
-          <div class="no-image" x-show="!event.has_image">no image (<span x-text="event.crop_status"></span>)</div>
+          <img x-show="event.has_image || event.has_video" :src="thumbnailUrl(event.id)" loading="lazy" @click="openLightbox(event)" alt="event thumbnail">
+          <div class="no-image" x-show="!event.has_image && !event.has_video">no media (<span x-text="event.crop_status"></span>)</div>
           <div class="meta">
             <div><strong x-text="event.objects || 'event'"></strong> — <span x-text="event.camera"></span></div>
             <div class="ts" x-text="formatTs(event.start_ts)"></div>
@@ -90,16 +98,34 @@
     </div>
   </div>
 
-  <!-- Lightbox: video if available, otherwise the full-size crop image. -->
+  <!-- Lightbox: video by default when available, image otherwise -- toggle buttons let you
+       switch between the two when an event has both. -->
   <div class="modal-backdrop" x-show="lightboxEvent" @click.self="closeLightbox()" style="display:none">
     <div class="modal lightbox">
       <button class="close" @click="closeLightbox()">&times;</button>
-      <template x-if="lightboxEvent && lightboxEvent.has_video">
+      <div class="lightbox-toggle" x-show="lightboxEvent && lightboxEvent.has_video && lightboxEvent.has_image" style="display:none">
+        <button :class="{ active: lightboxMode === 'video' }" @click="lightboxMode = 'video'">Video</button>
+        <button :class="{ active: lightboxMode === 'image' }" @click="lightboxMode = 'image'">Image</button>
+      </div>
+      <template x-if="lightboxEvent && lightboxEvent.has_video && lightboxMode === 'video'">
         <video controls autoplay :src="videoUrl(lightboxEvent.id)"></video>
       </template>
-      <template x-if="lightboxEvent && !lightboxEvent.has_video">
+      <template x-if="lightboxEvent && (lightboxMode === 'image' || !lightboxEvent.has_video)">
         <img :src="thumbnailUrl(lightboxEvent.id, true)" alt="event full image">
       </template>
+      <div class="lightbox-info" x-show="lightboxEvent && lightboxEvent.ai_status === 'done'" style="display:none">
+        <p class="lightbox-info-loading" x-show="lightboxLoading">Loading AI analysis…</p>
+        <template x-if="!lightboxLoading">
+          <dl>
+            <template x-for="[label, value] in sightingFields()" :key="label">
+              <div class="lightbox-info-row">
+                <dt x-text="label"></dt>
+                <dd x-text="value"></dd>
+              </div>
+            </template>
+          </dl>
+        </template>
+      </div>
     </div>
   </div>
 

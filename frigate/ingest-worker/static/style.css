@@ -178,13 +178,60 @@ button:disabled { opacity: 0.4; cursor: default; }
   background: black;
   max-width: 95vw;
   max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
 }
 
 .modal.lightbox img,
 .modal.lightbox video {
   max-width: 95vw;
-  max-height: 90vh;
+  max-height: 70vh;
   display: block;
+}
+
+.lightbox-info {
+  background: var(--card);
+  padding: 12px 16px;
+  max-width: 95vw;
+}
+
+.lightbox-info dl { margin: 0; }
+
+.lightbox-info-row {
+  display: flex;
+  gap: 8px;
+  padding: 5px 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.85rem;
+}
+
+.lightbox-info-row dt { color: var(--muted); min-width: 130px; flex-shrink: 0; }
+.lightbox-info-row dd { margin: 0; color: var(--text); }
+.lightbox-info-loading { color: var(--muted); margin: 0; padding: 8px 0; font-size: 0.85rem; }
+
+.lightbox-toggle {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  z-index: 1;
+  display: flex;
+  gap: 4px;
+}
+
+.lightbox-toggle button {
+  background: rgba(0, 0, 0, 0.6);
+  padding: 6px 12px;
+  font-size: 0.8rem;
+}
+
+.lightbox-toggle button.active {
+  background: var(--accent);
+}
+
+input:disabled, select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .modal .close {

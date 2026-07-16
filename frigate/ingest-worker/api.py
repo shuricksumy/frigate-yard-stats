@@ -12,6 +12,7 @@ import crop_worker
 import db
 import report
 import schemas
+import video
 from auth import require_api_key, require_api_key_header_or_query
 
 app = FastAPI(
@@ -83,6 +84,14 @@ def purge_old_records(
     return {"cutoff": cutoff, "dry_run": not confirm, "counts": counts}
 
 
+@app.get("/object-types", tags=["events"], dependencies=[Depends(require_api_key)])
+def get_object_types():
+    """Configured object labels (OBJECT_TYPES, comma-separated in .env) -- lets the web UI's Type
+    filter dropdown stay in sync with whatever labels your Frigate config actually produces
+    (e.g. car/truck/person/dog) without a frontend code change."""
+    return {"object_types": config.OBJECT_TYPES}
+
+
 @app.get("/events", response_model=list[schemas.EventSummary], tags=["events"], dependencies=[Depends(require_api_key)])
 def get_events(
     object_type: str | None = Query(None, description="Comma-separated Frigate object labels, e.g. 'car,truck'. Omit or pass 'all' for no filter"),
@@ -92,28 +101,38 @@ def get_events(
     crop_status: str | None = None,
     ai_status: str | None = None,
     video_status: str | None = None,
-    has_image: bool = Query(True, description="Only return rows with a stored crop image -- default true, since a row with none (crop_status not yet 'done', including 'skipped') has nothing to show in a thumbnail. Pass false to see every row regardless."),
-    hours: float = Query(1, gt=0, description="Used when start/end aren't both given -- window is the last N hours (default: last 1 hour)"),
+    has_media: bool = Query(True, description="Only return rows with a stored crop image and/or video -- default true, since a row with neither (crop_status not yet 'done', including 'skipped') has nothing to show. Pass false to see every row regardless."),
+    event_id: int | None = Query(None, description="Exact-match a single event by id -- ignores the start/end/hours window entirely, since you're looking for one specific known event, not browsing a range."),
+    q: str | None = Query(None, description="Free-text search (substring, case-insensitive) across the AI analysis result -- vehicle color/body_type/make/model/notable_features/plate/notes, or person description/notes. Only matches rows that already have a sighting (ai_status='done'). Ignores the start/end/hours window entirely, same reasoning as event_id -- you're searching your whole history, not browsing a range."),
+    hours: float = Query(1, gt=0, description="Used when start/end aren't both given -- window is the last N hours (default: last 1 hour). Ignored if event_id or q is given."),
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     """List raw_events, most recent first. Defaults to the last 1 hour, every object type, every
-    ai_status, images-only -- matching the web report's default view. No image field -- keeps list
+    ai_status, media-only -- matching the web report's default view. No image field -- keeps list
     responses small; use GET /events/{id} for full detail or GET /events/{id}/thumbnail for a
     small preview image."""
-    resolved_start, resolved_end = _resolve_window(start, end, hours)
+    if event_id is not None or (q and q.strip()):
+        resolved_start = resolved_end = None
+    else:
+        resolved_start, resolved_end = _resolve_window(start, end, hours)
     return db.list_events(
         object_type, camera, resolved_start, resolved_end,
-        crop_status, ai_status, video_status, has_image, limit, offset,
+        crop_status, ai_status, video_status, has_media, event_id, q, limit, offset,
     )
 
 
 @app.get("/events/{event_id}", response_model=schemas.EventDetail, tags=["events"], dependencies=[Depends(require_api_key)])
 def get_event(event_id: int):
-    """Single event's full detail, including its stored crop_image_base64."""
+    """Single event's full detail, including its stored crop_image_base64 and, once
+    ai_status='done', the AI analysis result (vehicle_sighting or person_sighting -- at most one
+    is ever populated)."""
     row = db.get_raw_event(event_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"raw_event {event_id} not found")
+    row = dict(row)
+    row["vehicle_sighting"] = db.get_vehicle_sighting_for_event(event_id)
+    row["person_sighting"] = db.get_person_sighting_for_event(event_id)
     return row
 
 
@@ -121,24 +140,36 @@ def get_event(event_id: int):
 def get_event_thumbnail(event_id: int):
     """A small on-the-fly JPEG (THUMBNAIL_MAX_DIMENSION, reuses report.py's same scale-down
     helper) for the web report's grid view -- keeps GET /events list-sized responses light by
-    never embedding the full crop_image_base64 there. Accepts X-API-Key header or ?api_key= query
-    param since this is loaded directly by an <img> tag."""
+    never embedding the full crop_image_base64 there. Falls back to a frame pulled from the stored
+    video if there's no crop image but there is a video (belt and suspenders -- in practice a video
+    always implies a crop image already exists). Accepts X-API-Key header or ?api_key= query param
+    since this is loaded directly by an <img> tag."""
     row = db.get_raw_event(event_id)
-    if row is None or not row.get("crop_image_base64"):
-        raise HTTPException(status_code=404, detail=f"No crop image for raw_event {event_id}")
-    thumbnail_base64 = crop.scale_image_base64(row["crop_image_base64"], config.THUMBNAIL_MAX_DIMENSION)
-    return Response(content=base64.b64decode(thumbnail_base64), media_type="image/jpeg")
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"raw_event {event_id} not found")
+    if row.get("crop_image_base64"):
+        thumbnail_base64 = crop.scale_image_base64(row["crop_image_base64"], config.THUMBNAIL_MAX_DIMENSION)
+        return Response(content=base64.b64decode(thumbnail_base64), media_type="image/jpeg")
+    if row.get("video_path") and os.path.isfile(row["video_path"]):
+        return Response(content=video.extract_frame_jpeg(row["video_path"], config.THUMBNAIL_MAX_DIMENSION), media_type="image/jpeg")
+    raise HTTPException(status_code=404, detail=f"No crop image or video for raw_event {event_id}")
 
 
 @app.get("/events/{event_id}/image", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
 def get_event_image(event_id: int):
     """Full-size crop as raw JPEG bytes (decodes the stored crop_image_base64) -- used by the web
-    report's lightbox when an event has no video to show instead. Accepts X-API-Key header or
-    ?api_key= query param since this is loaded directly by an <img> tag."""
+    report's lightbox when an event has no video, or when viewing the still image side of an event
+    that has both. Falls back to a frame pulled from the stored video if there's no crop image but
+    there is a video. Accepts X-API-Key header or ?api_key= query param since this is loaded
+    directly by an <img> tag."""
     row = db.get_raw_event(event_id)
-    if row is None or not row.get("crop_image_base64"):
-        raise HTTPException(status_code=404, detail=f"No crop image for raw_event {event_id}")
-    return Response(content=base64.b64decode(row["crop_image_base64"]), media_type="image/jpeg")
+    if row is None:
+        raise HTTPException(status_code=404, detail=f"raw_event {event_id} not found")
+    if row.get("crop_image_base64"):
+        return Response(content=base64.b64decode(row["crop_image_base64"]), media_type="image/jpeg")
+    if row.get("video_path") and os.path.isfile(row["video_path"]):
+        return Response(content=video.extract_frame_jpeg(row["video_path"]), media_type="image/jpeg")
+    raise HTTPException(status_code=404, detail=f"No crop image or video for raw_event {event_id}")
 
 
 @app.get("/media/video/{event_id}", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
@@ -213,6 +244,7 @@ def claim_ai_batch(
     parallel_limit: int = Query(3, ge=1, description="Max rows allowed ai_status='processing' at once"),
     stale_minutes: int = Query(5, ge=1, description="Reap rows stuck 'processing' longer than this"),
     max_age_hours: float | None = Query(None, gt=0, description="If set, never claim rows older than this many hours -- lets a backlog age out instead of being processed once it's stale. Omit for no age limit (default)."),
+    require_video: bool = Query(False, description="If true, only claim rows that also have a stored video ready (video_status='done'), not just a crop image. Default false -- an image is always guaranteed regardless (crop_status='done' is required either way); this only narrows further for a workflow that wants both artifacts before processing. The VLM call itself still only ever uses the image."),
 ):
     """Replaces n8n's old Reap Stale Processing Items / Count In-Progress Items / Check Capacity /
     Claim Next Batch nodes with one call: reaps stale rows, computes available capacity, and
@@ -222,7 +254,7 @@ def claim_ai_batch(
     `events` is an empty list if there's no capacity or no work -- n8n Split Out's the array then
     loops over whatever comes back."""
     types = [t.strip() for t in object_types.split(",") if t.strip()]
-    return {"events": db.claim_ai_batch(types, parallel_limit, stale_minutes, max_age_hours)}
+    return {"events": db.claim_ai_batch(types, parallel_limit, stale_minutes, max_age_hours, require_video)}
 
 
 @app.post("/sightings/vehicles", response_model=schemas.SightingCreated, tags=["sightings"], dependencies=[Depends(require_api_key)])

@@ -19,12 +19,6 @@ class EventSummary(BaseModel):
     score: float | None
 
 
-class EventDetail(EventSummary):
-    det_id: str | None
-    crop_image_base64: str | None
-    created_at: datetime
-
-
 class VehicleSighting(BaseModel):
     id: int
     raw_event_id: int
@@ -52,6 +46,16 @@ class PersonSighting(BaseModel):
     start_ts: datetime
     description: str | None
     notes: str | None
+
+
+class EventDetail(EventSummary):
+    det_id: str | None
+    crop_image_base64: str | None
+    created_at: datetime
+    # Populated only once ai_status='done' and a matching row exists -- at most one of the two is
+    # ever non-null (a raw_event is either a vehicle or a person, never both).
+    vehicle_sighting: VehicleSighting | None = None
+    person_sighting: PersonSighting | None = None
 
 
 class CameraCount(BaseModel):

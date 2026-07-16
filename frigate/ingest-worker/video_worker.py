@@ -49,16 +49,17 @@ def run_once() -> None:
     if available_capacity <= 0:
         return
 
-    for row in db.claim_video_batch(available_capacity):
+    for row in db.claim_video_batch(available_capacity, config.VIDEO_MAX_AGE_HOURS):
         process_claimed_event(row)
 
 
 def run_forever() -> None:
     logger.info(
         "video_worker starting: parallel_limit=%s initial_wait=%ss min_valid_bytes=%s "
-        "max_attempts=%s retry_wait=%ss poll_interval=%ss",
+        "max_attempts=%s retry_wait=%ss max_age_hours=%s poll_interval=%ss",
         config.VIDEO_PARALLEL_LIMIT, config.VIDEO_INITIAL_WAIT_SECONDS, config.VIDEO_MIN_VALID_BYTES,
-        config.VIDEO_MAX_ATTEMPTS, config.VIDEO_RETRY_WAIT_SECONDS, config.POLL_INTERVAL_SECONDS,
+        config.VIDEO_MAX_ATTEMPTS, config.VIDEO_RETRY_WAIT_SECONDS, config.VIDEO_MAX_AGE_HOURS,
+        config.POLL_INTERVAL_SECONDS,
     )
     while True:
         try:

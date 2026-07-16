@@ -66,6 +66,18 @@ def scale_image_base64(image_base64: str, max_dimension: int) -> str:
             return base64.b64encode(f.read()).decode()
 
 
+def _grab_frame(clip_url: str, timestamp_offset: float, frame_path: str) -> None:
+    subprocess.run(
+        ["ffmpeg", "-y", "-ss", str(timestamp_offset), "-i", clip_url, "-frames:v", "1", frame_path],
+        check=True, capture_output=True,
+    )
+
+
+# Fallback offset when the midpoint lands past the end of Frigate's saved clip -- always safely
+# within any real clip, however short.
+_FALLBACK_FRAME_OFFSET_SECONDS = 1.0
+
+
 def crop_and_scale(clip_url: str, timestamp_offset: float, box: list[float]) -> str:
     x1, y1, x2, y2 = box
     w, h = x2 - x1, y2 - y1
@@ -74,10 +86,15 @@ def crop_and_scale(clip_url: str, timestamp_offset: float, box: list[float]) -> 
 
     with tempfile.TemporaryDirectory() as tmp:
         frame_path = os.path.join(tmp, "frame.jpg")
-        subprocess.run(
-            ["ffmpeg", "-y", "-ss", str(timestamp_offset), "-i", clip_url, "-frames:v", "1", frame_path],
-            check=True, capture_output=True,
-        )
+        _grab_frame(clip_url, timestamp_offset, frame_path)
+        if not os.path.exists(frame_path):
+            # Frigate's saved clip for a long-lived tracked object can be much shorter than the
+            # event's own logical start/end span (confirmed in production: a ~20-minute stationary
+            # car produced a clip only ~7 minutes long) -- ffmpeg exits 0 with no output when -ss
+            # seeks past the actual end of the file rather than raising, so this can't be caught
+            # via the subprocess's exit code. Falling back to a small fixed offset near the start
+            # is always within an actual saved clip, however much its tail got truncated.
+            _grab_frame(clip_url, _FALLBACK_FRAME_OFFSET_SECONDS, frame_path)
 
         pad_x, pad_y = w * config.CROP_PADDING_PCT, h * config.CROP_PADDING_PCT
         crop_x1 = max(0, x1 - pad_x)
