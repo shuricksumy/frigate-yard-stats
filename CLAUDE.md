@@ -550,11 +550,56 @@ fields for observability. The web UI's Visits tab (`visitThumbnailUrl`/`lightbox
 grid/lightbox picks up the better-timed image automatically once it's ready, with no client-side
 fallback logic of its own.
 
-Deliberately NOT wired into `TELEGRAM_ALERTS_ENABLED`'s visit-summary message in this pass -- that
-message fires immediately when the review closes (long before the re-crop can complete), and
-retrofitting it to edit/replace an already-sent Telegram photo once the better crop lands is a
-separate decision (Bot API `editMessageMedia`, a materially different and riskier operation than
-today's fire-and-forget `sendPhoto`/`sendVideo`) than the read-only API/UI wiring above.
+(Bug fixed in production right after first deploying this: `ALTER TABLE ... ADD COLUMN
+thumb_crop_status ... DEFAULT 'new'` backfills that default onto every *pre-existing* visit row,
+but those rows' `thumb_time` is also `NULL` -- `record_visit` is the only thing that ever sets it,
+and only at INSERT time, never retroactively. `visit_thumb_worker` claimed one such row and
+crashed on `thumb_time - clip_start_epoch` against `None`, repeating on every retry until it hit
+`VISIT_THUMB_CROP_MAX_ATTEMPTS` and went `'failed'` -- confirmed live from production logs (a
+pre-existing visit crashing this exact way three times in a row right after the upgrade).
+`schema.sql` now includes an idempotent `UPDATE ... SET thumb_crop_status = 'skipped' WHERE
+thumb_time IS NULL AND thumb_crop_status IN ('new', 'retry', 'failed')`, re-run on every startup --
+correct to run unconditionally, since a row with no `thumb_time` can never succeed regardless of
+when it was created, not just as a one-time migration repair.)
+
+#### Wired into the AI queue, the alerts report, and Telegram
+
+All three remaining consumers now use the thumb-crop, each with a different cost/latency
+trade-off appropriate to how that consumer works:
+
+- **`POST /ai-queue/claim`** (`db.claim_ai_batch`): whenever a `source=visits` claim's row is a
+  visit's representative event, the response's `crop_image_base64` opportunistically prefers the
+  visit's own thumb-crop over the representative event's own crop *whenever it's already done by
+  claim time* -- zero latency cost, since this never changes which rows are eligible or when, only
+  which image comes back. The optional `require_thumb_crop` param goes further: it makes the claim
+  itself wait (`AND visit_id IS NOT NULL AND EXISTS (... v.thumb_crop_status = 'done')`) so the
+  crop is *guaranteed* to be the well-timed one, never the representative's -- a real trade-off
+  (alerts-flow analysis is delayed until the review closes and the re-crop finishes) that's opt-in,
+  not the default, since the right answer depends on your traffic. Deliberately scoped to
+  `source=visits` only -- under plain `source=events` (no dedup), several distinct raw_events can
+  share one visit, and overriding all of them with the identical thumb-crop image would mean
+  redundant VLM calls analyzing the same picture, not an improvement.
+- **`/reports/generate?source=visits`** (`db.get_report_data`): always prefers the visit's own
+  thumb-crop via `COALESCE(v.crop_image_base64, re.crop_image_base64)` (`LEFT JOIN
+  yard_stats.visits v ON v.id = re.visit_id AND v.thumb_crop_status = 'done'`) -- unconditional,
+  not opt-in, since a report runs well after the fact on a schedule, so unlike the AI queue there's
+  no real latency cost to just always taking the better image when it exists. `source=events`
+  reports never apply this (matches the AI queue's own scoping decision).
+- **`TELEGRAM_ALERTS_ENABLED`'s visit-summary message**: deferred, not edited after the fact.
+  `mqtt_ingest._handle_review_message` only sends the summary immediately when
+  `db.visit_thumb_crop_will_be_attempted(review)` is false (i.e. the flag is off, or Frigate ever
+  omits `thumb_time`) -- otherwise it skips the immediate send entirely, and
+  `visit_thumb_worker.process_claimed_visit` sends it once `thumb_crop_status` reaches a terminal
+  state: `done` -> the fresh high-res crop; `failed` (attempts exhausted) -> falls back to the
+  representative event's own crop (or text-only), so a visit is never left without its
+  notification just because the re-crop never panned out. `mark_visit_thumb_crop_retry_or_failed`
+  returns the resulting status specifically so the worker can tell "still retrying, don't send
+  yet" apart from "just went terminal, send now" without re-deriving that from the attempt-count
+  arithmetic itself. This is a genuine behavior change from before -- the notification now arrives
+  however long the review takes to close plus however long the re-crop takes, not near-instantly --
+  a deliberate trade (quality over speed) rather than the alternative of editing an already-sent
+  photo in place (`editMessageMedia`), which was considered and rejected as more moving parts for
+  the same result.
 
 ### Camera allow-list
 

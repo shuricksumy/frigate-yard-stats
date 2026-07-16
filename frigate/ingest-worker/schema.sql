@@ -131,6 +131,19 @@ ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_crop_status TEXT NO
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_crop_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_crop_attempt_count INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_visits_thumb_crop_status ON yard_stats.visits (thumb_crop_status);
+-- Any visit that existed before this migration got thumb_crop_status backfilled to the column's
+-- DEFAULT ('new') by the ALTER TABLE above, but thumb_time is also NULL for those pre-existing
+-- rows (it's only ever set by record_visit at INSERT time, never retroactively) -- without this,
+-- visit_thumb_worker crashes on them (thumb_time - clip_start_epoch against a NULL) and burns all
+-- VISIT_THUMB_CROP_MAX_ATTEMPTS before going 'failed'. Confirmed in production: an existing visit
+-- row (created before this feature was deployed) was claimed and crashed exactly this way right
+-- after upgrading. Also catches 'failed' -- a row that already burned its attempts this way
+-- reports a misleading "failed" (implies a real attempt went wrong) rather than "skipped" (never
+-- had a thumb_time to work with at all). Safe to re-run every startup -- a row with thumb_time IS
+-- NULL can never succeed regardless of when it was created, so forcing it to 'skipped' is always
+-- correct, not just a one-time repair.
+UPDATE yard_stats.visits SET thumb_crop_status = 'skipped'
+WHERE thumb_time IS NULL AND thumb_crop_status IN ('new', 'retry', 'failed');
 
 CREATE TABLE IF NOT EXISTS yard_stats.vehicle_sightings (
   id SERIAL PRIMARY KEY,

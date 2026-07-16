@@ -19,18 +19,18 @@ import pytest  # noqa: E402
 import db  # noqa: E402
 
 
-def _insert(start_ts_expr="now()", objects="car"):
+def _insert(start_ts_expr="now()", objects="car", crop_image_base64=None):
     det_id = f"pytest-{uuid.uuid4()}"
     rows = db._execute(
         f"""
         INSERT INTO yard_stats.raw_events
             (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot,
-             crop_status, ai_status)
+             crop_status, ai_status, crop_image_base64)
         VALUES ('pytest-cam', 'pytest-zone', %s, {start_ts_expr}, {start_ts_expr}, %s, true, true,
-                'done', 'new')
+                'done', 'new', %s)
         RETURNING id, det_id
         """,
-        (objects, det_id), fetch=True,
+        (objects, det_id, crop_image_base64), fetch=True,
     )
     return rows[0]["id"], rows[0]["det_id"]
 
@@ -118,6 +118,104 @@ def test_visits_only_still_claims_visit_representative(conn_ok):
         assert newer_id not in claimed_ids
     finally:
         _cleanup(older_id, newer_id, visit_id=visit_id)
+
+
+def test_require_thumb_crop_excludes_visit_whose_thumb_crop_is_not_done(conn_ok):
+    raw_id, det_id = _insert(crop_image_base64="event-crop")
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    # thumb_crop_status defaults to 'new' (VISIT_THUMB_CROP_ENABLED is off in tests, but this
+    # simulates a visit whose re-crop simply hasn't finished yet).
+    db._execute("UPDATE yard_stats.visits SET thumb_crop_status = 'new' WHERE id = %s", (visit_id,))
+    try:
+        claimed_ids = {
+            r["id"] for r in db.claim_ai_batch(
+                ["car"], parallel_limit=10, stale_minutes=5,
+                only_visit_representative=True, require_thumb_crop=True,
+            )
+        }
+        assert raw_id not in claimed_ids
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
+
+
+def test_require_thumb_crop_claims_visit_once_thumb_crop_is_done(conn_ok):
+    raw_id, det_id = _insert(crop_image_base64="event-crop")
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    db.mark_visit_thumb_crop_done(visit_id, "visit-crop")
+    try:
+        claimed = {
+            r["id"]: r for r in db.claim_ai_batch(
+                ["car"], parallel_limit=10, stale_minutes=5,
+                only_visit_representative=True, require_thumb_crop=True,
+            )
+        }
+        assert raw_id in claimed
+        assert claimed[raw_id]["crop_image_base64"] == "visit-crop"
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
+
+
+def test_claim_opportunistically_prefers_visit_thumb_crop_when_already_done(conn_ok):
+    # Independent of require_thumb_crop -- a plain source=visits claim should still prefer the
+    # visit's own well-timed crop over the representative event's crop whenever it's already done
+    # by claim time, at zero extra latency cost (this doesn't change which rows get claimed).
+    raw_id, det_id = _insert(crop_image_base64="event-crop")
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    db.mark_visit_thumb_crop_done(visit_id, "visit-crop")
+    try:
+        claimed = {
+            r["id"]: r for r in db.claim_ai_batch(
+                ["car"], parallel_limit=10, stale_minutes=5, only_visit_representative=True,
+            )
+        }
+        assert claimed[raw_id]["crop_image_base64"] == "visit-crop"
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
+
+
+def test_claim_falls_back_to_event_crop_when_thumb_crop_not_done(conn_ok):
+    raw_id, det_id = _insert(crop_image_base64="event-crop")
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    try:
+        claimed = {
+            r["id"]: r for r in db.claim_ai_batch(
+                ["car"], parallel_limit=10, stale_minutes=5, only_visit_representative=True,
+            )
+        }
+        assert claimed[raw_id]["crop_image_base64"] == "event-crop"
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
+
+
+def test_source_events_never_overridden_by_visit_thumb_crop(conn_ok):
+    # Plain source=events (only_visit_representative=False) must never substitute the visit's
+    # crop -- overriding every duplicate det_id under one visit with the identical image would be
+    # wasted/duplicate VLM analysis, not an improvement (see claim_ai_batch's comment).
+    raw_id, det_id = _insert(crop_image_base64="event-crop")
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    db.mark_visit_thumb_crop_done(visit_id, "visit-crop")
+    try:
+        claimed = {
+            r["id"]: r for r in db.claim_ai_batch(["car"], parallel_limit=10, stale_minutes=5)
+        }
+        assert claimed[raw_id]["crop_image_base64"] == "event-crop"
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
 
 
 def test_default_source_events_claims_every_grouped_event(conn_ok):

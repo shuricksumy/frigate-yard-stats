@@ -21,18 +21,18 @@ import pytest  # noqa: E402
 import db  # noqa: E402
 
 
-def _insert_raw_event(start_ts_expr="now()", objects="car"):
+def _insert_raw_event(start_ts_expr="now()", objects="car", crop_image_base64=None):
     det_id = f"pytest-{uuid.uuid4()}"
     rows = db._execute(
         f"""
         INSERT INTO yard_stats.raw_events
             (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot,
-             crop_status, ai_status)
+             crop_status, ai_status, crop_image_base64)
         VALUES ('pytest-cam', 'pytest-zone', %s, {start_ts_expr}, {start_ts_expr}, %s, true, true,
-                'done', 'done')
+                'done', 'done', %s)
         RETURNING id, det_id
         """,
-        (objects, det_id), fetch=True,
+        (objects, det_id, crop_image_base64), fetch=True,
     )
     return rows[0]["id"], rows[0]["det_id"]
 
@@ -122,3 +122,57 @@ def test_source_visits_still_includes_ungrouped_sighting(conn_ok):
         assert ungrouped_id in raw_event_ids
     finally:
         _cleanup(ungrouped_id)
+
+
+def test_source_visits_prefers_visit_thumb_crop_when_done(conn_ok):
+    # Reports run well after the fact (a scheduled window), so unlike the AI queue there's no
+    # latency cost to always preferring the visit's own well-timed re-crop here.
+    raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
+    _insert_vehicle_sighting(raw_id)
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    db.mark_visit_thumb_crop_done(visit_id, "visit-crop")
+    try:
+        start, end = _window()
+        data = db.get_report_data(start, end, source="visits")
+        match = next(v for v in data["vehicles"] if v["raw_event_id"] == raw_id)
+        assert match["crop_image_base64"] == "visit-crop"
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
+
+
+def test_source_visits_falls_back_to_representative_crop_when_thumb_crop_not_done(conn_ok):
+    raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
+    _insert_vehicle_sighting(raw_id)
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    try:
+        start, end = _window()
+        data = db.get_report_data(start, end, source="visits")
+        match = next(v for v in data["vehicles"] if v["raw_event_id"] == raw_id)
+        assert match["crop_image_base64"] == "representative-crop"
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
+
+
+def test_source_events_never_uses_visit_thumb_crop(conn_ok):
+    # source="events" (the default) never applies the visit-crop preference at all -- matches
+    # claim_ai_batch's own scoping decision (only source=visits substitutes the crop).
+    raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
+    _insert_vehicle_sighting(raw_id)
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    db.mark_visit_thumb_crop_done(visit_id, "visit-crop")
+    try:
+        start, end = _window()
+        data = db.get_report_data(start, end)
+        match = next(v for v in data["vehicles"] if v["raw_event_id"] == raw_id)
+        assert match["crop_image_base64"] == "representative-crop"
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)

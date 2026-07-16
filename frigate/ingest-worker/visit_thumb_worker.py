@@ -4,8 +4,29 @@ import time
 import config
 import crop
 import db
+import telegram
 
 logger = logging.getLogger(__name__)
+
+
+def _send_deferred_visit_summary(visit: dict, image_base64: str | None) -> None:
+    # Fires the visit-summary Telegram message mqtt_ingest.py deliberately skipped sending
+    # immediately (see visit_thumb_crop_will_be_attempted) -- this worker is the only place that
+    # ever settles a visit's thumb_crop_status to a terminal state (done or failed), so it's the
+    # only place that can know when it's finally time to send. Never raises, same
+    # belt-and-suspenders reasoning as every other Telegram call site in this project.
+    if not config.TELEGRAM_ALERTS_ENABLED:
+        return
+    visit_id = visit["id"]
+    try:
+        event_count = db.count_events_for_visit(visit_id)
+        message_id = telegram.send_visit_summary(
+            visit.get("cameras"), visit.get("objects"), event_count, image_base64,
+        )
+        if message_id is not None:
+            db.set_visit_telegram_photo_message_id(visit_id, message_id)
+    except Exception:
+        logger.warning("Deferred Telegram visit summary send failed for visit id=%s", visit_id, exc_info=True)
 
 
 def process_claimed_visit(visit: dict) -> None:
@@ -16,8 +37,8 @@ def process_claimed_visit(visit: dict) -> None:
     if visit.get("thumb_crop_attempt_count", 0) == 0:
         time.sleep(config.VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS)
 
+    representative = db.get_representative_event_for_visit(visit_id)
     try:
-        representative = db.get_representative_event_for_visit(visit_id)
         if representative is None or not representative.get("det_id"):
             raise ValueError(f"No representative raw_event with det_id for visit id={visit_id}")
 
@@ -27,14 +48,21 @@ def process_claimed_visit(visit: dict) -> None:
             "Cropped visit thumbnail for visit id=%s camera=%s thumb_time=%s",
             visit_id, visit.get("cameras"), visit.get("thumb_time"),
         )
+        _send_deferred_visit_summary(visit, crop_image_base64)
     except Exception:
         logger.warning(
             "Visit thumbnail crop failed for visit id=%s (attempt %s/%s)",
             visit_id, visit.get("thumb_crop_attempt_count", 0) + 1, config.VISIT_THUMB_CROP_MAX_ATTEMPTS,
             exc_info=True,
         )
-        db.mark_visit_thumb_crop_retry_or_failed(visit_id, config.VISIT_THUMB_CROP_MAX_ATTEMPTS)
-        if visit.get("thumb_crop_attempt_count", 0) + 1 < config.VISIT_THUMB_CROP_MAX_ATTEMPTS:
+        result = db.mark_visit_thumb_crop_retry_or_failed(visit_id, config.VISIT_THUMB_CROP_MAX_ATTEMPTS)
+        if result["thumb_crop_status"] == "failed":
+            # Terminal -- the re-crop will never succeed for this visit now, so send the deferred
+            # summary anyway, falling back to the representative event's own crop (or text-only
+            # if that's not ready either), rather than never notifying about this visit at all.
+            fallback_image = representative.get("crop_image_base64") if representative else None
+            _send_deferred_visit_summary(visit, fallback_image)
+        else:
             time.sleep(config.VISIT_THUMB_CROP_RETRY_WAIT_SECONDS)
 
 

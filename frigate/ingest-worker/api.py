@@ -327,6 +327,7 @@ def claim_ai_batch(
     require_video: bool = Query(False, description="If true, only claim rows that also have a stored video ready (video_status='done'), not just a crop image. Default false -- an image is always guaranteed regardless (crop_status='done' is required either way); this only narrows further for a workflow that wants both artifacts before processing. The VLM call itself still only ever uses the image."),
     source: str = Query("events", pattern="^(events|visits)$", description="'events' (default) analyzes every eligible raw_event independently -- today's exact behavior. 'visits' skips duplicate det_ids already grouped into a visit by Frigate's review/alert stream -- only the earliest (representative) raw_event per visit is claimed, plus every raw_event never grouped into a visit at all (unless visits_only is also set). Lets you A/B whether per-event or per-visit analysis produces better/less-redundant results; completion (POST /sightings/*) is identical either way, since this only changes which rows are eligible to claim, not ai_status semantics."),
     visits_only: bool = Query(False, description="Only meaningful when source=visits. If true, never claim a raw_event that Frigate's review/alert stream never grouped into a visit at all (visit_id IS NULL) -- strictly limits this call to actual alert/visit activity. Default false keeps source=visits' existing fallback: ungrouped events are still claimed so they don't sit unanalyzed forever if only a visits-scoped workflow is active."),
+    require_thumb_crop: bool = Query(False, description="Only meaningful when source=visits. If true, only claim a visit's representative event once that visit's own high-res re-crop at Frigate's thumb_time has finished (VISIT_THUMB_CROP_ENABLED, thumb_crop_status='done') -- guarantees the claimed crop_image_base64 is always the well-timed thumb-crop, never the representative event's own possibly-badly-timed one, at the cost of real latency (the re-crop only starts once the review closes). Default false: still opportunistically prefers the thumb-crop whenever it already happens to be done by claim time, just doesn't wait for it."),
 ):
     """Replaces n8n's old Reap Stale Processing Items / Count In-Progress Items / Check Capacity /
     Claim Next Batch nodes with one call: reaps stale rows, computes available capacity, and
@@ -340,6 +341,7 @@ def claim_ai_batch(
         types, parallel_limit, stale_minutes, max_age_hours, require_video,
         only_visit_representative=(source == "visits"),
         visits_only=visits_only,
+        require_thumb_crop=require_thumb_crop,
     )
     return {"events": events}
 

@@ -19,7 +19,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [450, 300],
-      "notes": "Sibling of 'Yard Stats: Daily Report', differing only in source=visits: report.py/db.get_report_data dedup the same way POST /ai-queue/claim's source=visits does -- only the sighting for a visit's earliest-linked raw_event, plus every sighting whose raw_event was never grouped into a visit, so one real-world visit spanning several det_ids (re-track, label flicker) shows up once in the report instead of once per det_id. Purely a read -- unlike the two metadata-processor workflows, this can run alongside the events-scoped Daily Report without any queue-sharing conflict.",
+      "notes": "Sibling of 'Yard Stats: Daily Report', differing only in source=visits: report.py/db.get_report_data dedup the same way POST /ai-queue/claim's source=visits does -- only the sighting for a visit's earliest-linked raw_event, plus every sighting whose raw_event was never grouped into a visit, so one real-world visit spanning several det_ids (re-track, label flicker) shows up once in the report instead of once per det_id. Purely a read -- unlike the two metadata-processor workflows, this can run alongside the events-scoped Daily Report without any queue-sharing conflict. Also always prefers the visit's own high-res thumb_time re-crop (VISIT_THUMB_CROP_ENABLED) over the representative event's crop when available -- unlike the AI queue, there's no latency trade-off here since this runs well after the fact on a schedule, so it's unconditional, not an opt-in param.",
       "notesInFlow": true,
       "parameters": {
         "method": "GET",

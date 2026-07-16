@@ -139,6 +139,13 @@ def get_visit(visit_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
+def visit_thumb_crop_will_be_attempted(review: dict) -> bool:
+    # Shared by record_visit (to set the initial thumb_crop_status) and mqtt_ingest's
+    # _handle_review_message (to decide whether the Telegram visit-summary send should fire
+    # immediately or be deferred to visit_thumb_worker -- see there for why).
+    return config.VISIT_THUMB_CROP_ENABLED and review.get("thumb_time") is not None
+
+
 def record_visit(review: dict) -> int | None:
     # Populates the previously-unwired visits table / raw_events.visit_id+reconciled from
     # Frigate's own review/alert grouping (frigate/reviews MQTT topic) -- one review segment
@@ -156,9 +163,7 @@ def record_visit(review: dict) -> int | None:
     # Same reasoning for thumb_crop_status -- also skipped if Frigate didn't actually provide a
     # thumb_time on this review (shouldn't happen based on live testing, but the re-crop can never
     # succeed without it regardless of attempts).
-    initial_thumb_crop_status = (
-        "new" if config.VISIT_THUMB_CROP_ENABLED and review.get("thumb_time") is not None else "skipped"
-    )
+    initial_thumb_crop_status = "new" if visit_thumb_crop_will_be_attempted(review) else "skipped"
     conn = get_conn()
     conn.autocommit = False
     try:
@@ -358,17 +363,25 @@ def mark_visit_thumb_crop_done(visit_id: int, crop_image_base64: str) -> None:
     )
 
 
-def mark_visit_thumb_crop_retry_or_failed(visit_id: int, max_attempts: int) -> None:
-    _execute(
+def mark_visit_thumb_crop_retry_or_failed(visit_id: int, max_attempts: int) -> dict:
+    # Returns the resulting status (not just None like the video-queue equivalent) so
+    # visit_thumb_worker can tell whether this was the final attempt -- if so, the deferred
+    # Telegram visit-summary send (see mqtt_ingest.visit_thumb_crop_will_be_attempted) needs to
+    # fire now, falling back to the representative event's own crop, since the re-crop will never
+    # succeed for this visit.
+    rows = _execute(
         """
         UPDATE yard_stats.visits
         SET thumb_crop_attempt_count = thumb_crop_attempt_count + 1,
             thumb_crop_status = CASE WHEN thumb_crop_attempt_count + 1 >= %s THEN 'failed' ELSE 'retry' END,
             thumb_crop_status_changed_at = now()
         WHERE id = %s
+        RETURNING thumb_crop_status, thumb_crop_attempt_count
         """,
         (max_attempts, visit_id),
+        fetch=True,
     )
+    return rows[0]
 
 
 def reap_stale_processing() -> None:
@@ -1017,6 +1030,7 @@ def claim_ai_batch(
     require_video: bool = False,
     only_visit_representative: bool = False,
     visits_only: bool = False,
+    require_thumb_crop: bool = False,
 ) -> list:
     # Replaces what used to be four separate n8n nodes (Reap Stale Processing Items, Count
     # In-Progress Items, Check Capacity, Claim Next Batch) with one call. Same FOR UPDATE SKIP
@@ -1085,19 +1099,52 @@ def claim_ai_batch(
             visit_clause = f"AND visit_id IS NOT NULL AND {representative_subquery}"
         else:
             visit_clause = f"AND (visit_id IS NULL OR {representative_subquery})"
+    # require_thumb_crop=true only ever narrows further when only_visit_representative is also set
+    # (thumb-crops only exist on visits, and only the representative row is ever eligible either
+    # way) -- waits for the visit's own well-timed re-crop (VISIT_THUMB_CROP_ENABLED,
+    # visit_thumb_worker.py) to finish before claiming at all, a genuine latency trade-off (the
+    # re-crop only starts once the review closes, well after crop_status='done') in exchange for a
+    # guarantee that this claim's crop_image_base64 (see below) is always the high-res thumb-crop,
+    # never the representative event's own possibly-badly-timed one.
+    thumb_crop_required_clause = ""
+    if only_visit_representative and require_thumb_crop:
+        thumb_crop_required_clause = """
+        AND visit_id IS NOT NULL
+        AND EXISTS (
+            SELECT 1 FROM yard_stats.visits v WHERE v.id = raw_events.visit_id AND v.thumb_crop_status = 'done'
+        )
+        """
     age_clause = ""
     params: list = [object_types]
     if max_age_hours is not None:
         age_clause = "AND created_at >= now() - (%s * interval '1 hour')"
         params.append(max_age_hours)
     params.append(available_capacity)
-    return _execute(
+    # Opportunistic upgrade (independent of require_thumb_crop, which only affects eligibility
+    # above): whenever the claimed row IS a visit's representative and that visit's thumb-crop
+    # already happens to be done by claim time, prefer it over the representative event's own
+    # crop_image_base64 -- zero latency cost, since this never changes which rows get claimed or
+    # when, only which image ends up in the response. Only computed for source=visits claims (a
+    # visit's thumb-crop is one artifact per visit; overriding every duplicate det_id's own crop
+    # under plain source=events would mean several distinct raw_events all getting sent to the VLM
+    # as the identical image, wasted analysis rather than a real improvement).
+    visit_thumb_crop_column = (
+        """,
+        (
+            SELECT v.crop_image_base64 FROM yard_stats.visits v
+            WHERE v.id = yard_stats.raw_events.visit_id AND v.thumb_crop_status = 'done'
+        ) AS visit_thumb_crop_base64
+        """
+        if only_visit_representative else ""
+    )
+    rows = _execute(
         f"""
         WITH claimable AS (
             SELECT id FROM yard_stats.raw_events
             WHERE objects = ANY(%s) AND crop_status = 'done' AND ai_status IN ('new', 'retry')
             {video_clause}
             {visit_clause}
+            {thumb_crop_required_clause}
             {age_clause}
             ORDER BY created_at DESC
             LIMIT %s
@@ -1110,10 +1157,16 @@ def claim_ai_batch(
         RETURNING yard_stats.raw_events.*,
                   (yard_stats.raw_events.video_path IS NOT NULL) AS has_video,
                   (yard_stats.raw_events.crop_image_base64 IS NOT NULL) AS has_image
+                  {visit_thumb_crop_column}
         """,
         params,
         fetch=True,
     )
+    for row in rows:
+        visit_crop = row.pop("visit_thumb_crop_base64", None)
+        if visit_crop:
+            row["crop_image_base64"] = visit_crop
+    return rows
 
 
 def complete_vehicle_sighting(
@@ -1217,6 +1270,8 @@ def get_report_data(start: datetime, end: datetime, source: str = "events") -> d
     # activity a visit grouped across several det_ids (re-track, label flicker) shows up once in
     # the report instead of once per det_id.
     visit_clause = ""
+    visit_join = ""
+    crop_image_expr = "re.crop_image_base64"
     if source == "visits":
         visit_clause = """
         AND (
@@ -1229,14 +1284,21 @@ def get_report_data(start: datetime, end: datetime, source: str = "events") -> d
             )
         )
         """
+        # Prefer the visit's own high-res re-crop at Frigate's thumb_time (VISIT_THUMB_CROP_ENABLED,
+        # visit_thumb_worker.py) over the representative event's own crop, when it's finished --
+        # reports run well after the fact (a scheduled daily/hourly window), so unlike the AI queue
+        # there's no real latency cost to just always preferring it here.
+        visit_join = "LEFT JOIN yard_stats.visits v ON v.id = re.visit_id AND v.thumb_crop_status = 'done'"
+        crop_image_expr = "COALESCE(v.crop_image_base64, re.crop_image_base64)"
     vehicles = _execute(
         f"""
-        SELECT re.id AS raw_event_id, re.camera, re.zone, re.start_ts, re.crop_image_base64,
+        SELECT re.id AS raw_event_id, re.camera, re.zone, re.start_ts, {crop_image_expr} AS crop_image_base64,
                vs.color, vs.body_type, vs.make_guess, vs.make_confidence,
                vs.model_guess, vs.model_confidence, vs.notable_features,
                vs.plate_text_llm, vs.plate_text_frigate, vs.notes
         FROM yard_stats.vehicle_sightings vs
         JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
+        {visit_join}
         WHERE vs.created_at >= %s AND vs.created_at <= %s
         {visit_clause}
         ORDER BY re.start_ts ASC
@@ -1245,10 +1307,11 @@ def get_report_data(start: datetime, end: datetime, source: str = "events") -> d
     )
     persons = _execute(
         f"""
-        SELECT re.id AS raw_event_id, re.camera, re.zone, re.start_ts, re.crop_image_base64,
+        SELECT re.id AS raw_event_id, re.camera, re.zone, re.start_ts, {crop_image_expr} AS crop_image_base64,
                ps.description, ps.notes
         FROM yard_stats.person_sightings ps
         JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
+        {visit_join}
         WHERE ps.created_at >= %s AND ps.created_at <= %s
         {visit_clause}
         ORDER BY re.start_ts ASC
