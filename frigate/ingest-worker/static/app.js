@@ -42,7 +42,7 @@ function eventsApp() {
     limit: 24,
     offset: 0,
 
-    filters: { objectType: "all", aiStatus: "all", ...defaultWindow() },
+    filters: { objectType: "all", aiStatus: "all", onlyWithImages: true, ...defaultWindow() },
 
     lightboxEvent: null,
 
@@ -110,6 +110,7 @@ function eventsApp() {
         const params = new URLSearchParams({
           limit: String(this.limit),
           offset: String(this.offset),
+          has_image: String(!!this.filters.onlyWithImages),
         });
         if (this.filters.objectType && this.filters.objectType !== "all") {
           params.set("object_type", this.filters.objectType);

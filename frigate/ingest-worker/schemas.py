@@ -14,6 +14,7 @@ class EventSummary(BaseModel):
     ai_status: str
     video_status: str
     has_video: bool
+    has_image: bool
     sub_label: str | None
     score: float | None
 

@@ -99,6 +99,28 @@ button:disabled { opacity: 0.4; cursor: default; }
   display: block;
 }
 
+.card .no-image {
+  width: 100%;
+  aspect-ratio: 4 / 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 8px;
+  color: var(--muted);
+  font-size: 0.8rem;
+  background: #16181c;
+}
+
+.checkbox-label {
+  display: flex;
+  flex-direction: row !important;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.85rem;
+  color: var(--text);
+}
+
 .card .meta {
   padding: 8px 10px;
   font-size: 0.85rem;

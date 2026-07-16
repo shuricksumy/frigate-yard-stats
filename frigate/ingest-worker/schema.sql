@@ -25,7 +25,7 @@ CREATE TABLE IF NOT EXISTS yard_stats.raw_events (
   --   done       -> crop_status: crop_image_base64 populated. ai_status: a row exists in
   --                 vehicle_sightings / person_sightings.
   crop_status TEXT NOT NULL DEFAULT 'new'
-    CHECK (crop_status IN ('new', 'processing', 'retry', 'failed', 'done')),
+    CHECK (crop_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped')),
   crop_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   crop_attempt_count INTEGER NOT NULL DEFAULT 0,
   ai_status TEXT NOT NULL DEFAULT 'new'
@@ -65,6 +65,18 @@ ALTER TABLE yard_stats.raw_events ADD COLUMN IF NOT EXISTS video_path TEXT;
 -- Telegram send reply-thread onto the earlier photo send, even across a service restart.
 ALTER TABLE yard_stats.raw_events ADD COLUMN IF NOT EXISTS telegram_photo_message_id BIGINT;
 CREATE INDEX IF NOT EXISTS idx_raw_events_video_status ON yard_stats.raw_events (video_status);
+
+-- crop_status gained a 'skipped' value: Frigate can emit a full "end" MQTT lifecycle for a
+-- tracked object it never actually persists as a real event (no snapshot ever committed) --
+-- confirmed in production by det_ids that 404 against Frigate's own /api/events/<id>. Cropping
+-- those can never succeed no matter how much queue throughput is added, so ingest_raw_event
+-- marks them crop_status='skipped' at ingest time (has_snapshot=false) instead of leaving them
+-- to pile up as an eternally-unprocessed 'new'. Existing deployments have the narrower 5-value
+-- constraint from before 'skipped' existed, so it's dropped and recreated here (a no-op past the
+-- first run, once the wider constraint is already in place).
+ALTER TABLE yard_stats.raw_events DROP CONSTRAINT IF EXISTS raw_events_crop_status_check;
+ALTER TABLE yard_stats.raw_events ADD CONSTRAINT raw_events_crop_status_check
+  CHECK (crop_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
 
 CREATE TABLE IF NOT EXISTS yard_stats.visits (
   id SERIAL PRIMARY KEY,

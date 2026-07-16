@@ -56,6 +56,10 @@
           <option value="done">Done</option>
         </select>
       </label>
+      <label class="checkbox-label">
+        <input type="checkbox" x-model="filters.onlyWithImages">
+        Only with images
+      </label>
       <button type="submit">Apply</button>
     </form>
 
@@ -65,7 +69,8 @@
     <div class="grid" x-show="!loading">
       <template x-for="event in events" :key="event.id">
         <div class="card">
-          <img :src="thumbnailUrl(event.id)" loading="lazy" @click="openLightbox(event)" alt="event thumbnail">
+          <img x-show="event.has_image" :src="thumbnailUrl(event.id)" loading="lazy" @click="openLightbox(event)" alt="event thumbnail">
+          <div class="no-image" x-show="!event.has_image">no image (<span x-text="event.crop_status"></span>)</div>
           <div class="meta">
             <div><strong x-text="event.objects || 'event'"></strong> — <span x-text="event.camera"></span></div>
             <div class="ts" x-text="formatTs(event.start_ts)"></div>

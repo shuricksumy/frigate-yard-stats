@@ -62,7 +62,11 @@ def get_status_breakdown() -> list:
 
 def get_raw_event(event_id: int) -> dict | None:
     rows = _execute(
-        "SELECT *, (video_path IS NOT NULL) AS has_video FROM yard_stats.raw_events WHERE id = %s",
+        """
+        SELECT *, (video_path IS NOT NULL) AS has_video,
+               (crop_image_base64 IS NOT NULL) AS has_image
+        FROM yard_stats.raw_events WHERE id = %s
+        """,
         (event_id,), fetch=True,
     )
     return rows[0] if rows else None
@@ -73,16 +77,23 @@ def insert_raw_event(event: dict) -> None:
     # at ingest, so the video queue's WHERE video_status IN ('new','retry') never even considers
     # these rows, rather than special-casing a disabled feature inside the poll loop.
     initial_video_status = "new" if config.STORE_VIDEO else "skipped"
+    # crop_status starts 'skipped' (not 'new') when has_snapshot is false -- Frigate can emit a
+    # full "end" MQTT lifecycle for a tracked object it never actually saved a snapshot for (seen
+    # in production: such det_ids 404 against Frigate's own /api/events/<id>), so cropping can
+    # never succeed for these regardless of retries. Skipping at ingest keeps the row (accurate
+    # yard-activity counts) without it piling up as an eternally-unprocessed 'new'.
+    initial_crop_status = "new" if event["has_snapshot"] else "skipped"
     _execute(
         """
         INSERT INTO yard_stats.raw_events
-            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot, video_status)
-        VALUES (%s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s, %s, %s, %s)
+            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot,
+             crop_status, video_status)
+        VALUES (%s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s, %s, %s, %s, %s)
         """,
         (
             event["camera"], event["zone"], event["objects"],
             event["start_time"], event["end_time"], event["det_id"],
-            event["has_clip"], event["has_snapshot"], initial_video_status,
+            event["has_clip"], event["has_snapshot"], initial_crop_status, initial_video_status,
         ),
     )
 
@@ -113,18 +124,26 @@ def claim_next_batch(limit: int) -> list:
     # FOR UPDATE SKIP LOCKED -- same atomic multi-row claim pattern as n8n's "Claim Next Batch"
     # node, just running in one process instead of possibly-overlapping n8n executions. Ingests
     # every Frigate label (car, truck, person, dog, ...), not just car/person.
+    #
+    # CTE, not a plain `WHERE id IN (SELECT ... LIMIT %s FOR UPDATE SKIP LOCKED)` subquery --
+    # confirmed in practice that the subquery form does NOT reliably cap the UPDATE at `limit`
+    # rows when the subquery self-references the same table being updated (reproduced: 3 eligible
+    # rows, LIMIT 2, claimed all 3). The CTE forms an optimization fence so the claimable-id set is
+    # computed exactly once and the outer UPDATE only ever touches those rows.
     return _execute(
         """
-        UPDATE yard_stats.raw_events
-        SET crop_status = 'processing', crop_status_changed_at = now()
-        WHERE id IN (
+        WITH claimable AS (
             SELECT id FROM yard_stats.raw_events
             WHERE has_snapshot = true AND crop_status IN ('new', 'retry')
             ORDER BY created_at ASC
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         )
-        RETURNING *
+        UPDATE yard_stats.raw_events
+        SET crop_status = 'processing', crop_status_changed_at = now()
+        FROM claimable
+        WHERE yard_stats.raw_events.id = claimable.id
+        RETURNING yard_stats.raw_events.*
         """,
         (limit,),
         fetch=True,
@@ -190,18 +209,23 @@ def claim_video_batch(limit: int) -> list:
     # bandwidth on a row that might still fail crop-stage validation upstream, and this keeps the
     # video stage a strict downstream consumer of the crop stage, same relationship the AI stage
     # already has with crop_status='done'.
+    #
+    # CTE, not a plain `WHERE id IN (SELECT ... LIMIT %s FOR UPDATE SKIP LOCKED)` subquery -- see
+    # claim_next_batch's comment for why (confirmed the subquery form over-claims past `limit`).
     return _execute(
         """
-        UPDATE yard_stats.raw_events
-        SET video_status = 'processing', video_status_changed_at = now()
-        WHERE id IN (
+        WITH claimable AS (
             SELECT id FROM yard_stats.raw_events
             WHERE crop_status = 'done' AND video_status IN ('new', 'retry')
             ORDER BY created_at ASC
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         )
-        RETURNING *
+        UPDATE yard_stats.raw_events
+        SET video_status = 'processing', video_status_changed_at = now()
+        FROM claimable
+        WHERE yard_stats.raw_events.id = claimable.id
+        RETURNING yard_stats.raw_events.*
         """,
         (limit,),
         fetch=True,
@@ -370,11 +394,17 @@ def list_events(
     crop_status: str | None = None,
     ai_status: str | None = None,
     video_status: str | None = None,
+    has_image: bool = True,
     limit: int = 20,
     offset: int = 0,
 ) -> list:
     clauses = []
     params: list = []
+    if has_image:
+        # Default view: hide rows with no crop_image_base64 (crop_status not yet 'done' --
+        # including the 'skipped' rows has_snapshot=false produces, which will never get one) so
+        # the grid isn't full of thumbnails that 404. Pass has_image=false to see everything.
+        clauses.append("crop_image_base64 IS NOT NULL")
     if object_type:
         # Comma-separated ("car,truck") or a single value -- "all"/omitted means no filter.
         # `objects` is a free-text label (see mqtt_ingest.parse_payload: Frigate's single
@@ -408,7 +438,8 @@ def list_events(
     return _execute(
         f"""
         SELECT id, camera, zone, objects, start_ts, end_ts, crop_status, ai_status, video_status,
-               sub_label, score, (video_path IS NOT NULL) AS has_video
+               sub_label, score, (video_path IS NOT NULL) AS has_video,
+               (crop_image_base64 IS NOT NULL) AS has_image
         FROM yard_stats.raw_events
         {where}
         ORDER BY start_ts DESC
@@ -587,6 +618,10 @@ def claim_ai_batch(
     # available_capacity do older rows get swept up too (the LIMIT stops cutting them off). Bursty
     # incoming traffic (e.g. a bunch of car events) then naturally deprioritizes stale backlog
     # instead of processing strictly in arrival order.
+    #
+    # CTE, not a plain `WHERE id IN (SELECT ... LIMIT %s FOR UPDATE SKIP LOCKED)` subquery -- see
+    # claim_next_batch's comment for why (confirmed the subquery form over-claims past `limit`,
+    # i.e. past available_capacity here -- exactly the cap this function exists to enforce).
     age_clause = ""
     params: list = [object_types]
     if max_age_hours is not None:
@@ -595,9 +630,7 @@ def claim_ai_batch(
     params.append(available_capacity)
     return _execute(
         f"""
-        UPDATE yard_stats.raw_events
-        SET ai_status = 'processing', ai_status_changed_at = now()
-        WHERE id IN (
+        WITH claimable AS (
             SELECT id FROM yard_stats.raw_events
             WHERE objects = ANY(%s) AND crop_status = 'done' AND ai_status IN ('new', 'retry')
             {age_clause}
@@ -605,7 +638,11 @@ def claim_ai_batch(
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         )
-        RETURNING *
+        UPDATE yard_stats.raw_events
+        SET ai_status = 'processing', ai_status_changed_at = now()
+        FROM claimable
+        WHERE yard_stats.raw_events.id = claimable.id
+        RETURNING yard_stats.raw_events.*
         """,
         params,
         fetch=True,

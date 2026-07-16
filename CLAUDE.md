@@ -101,10 +101,22 @@ replaced rather than added to n8n.
 
 All three stages use the same shape: `new` (not picked up) → `processing` (claimed, work in flight) →
 `retry` (crashed/reaped, or errored below that stage's attempt cap) → `failed` (errored at/above
-the cap, terminal) → `done`. `video_status` additionally has `skipped`, set at ingest time when
-`STORE_VIDEO=false` so the video queue never claims those rows at all. `FOR UPDATE SKIP LOCKED` is
-what makes claiming race-safe against overlapping runs (multiple n8n executions, or this service's
-own poll loops).
+the cap, terminal) → `done`. Both `video_status` and `crop_status` additionally have `skipped`, set
+at ingest time -- `video_status` when `STORE_VIDEO=false`, `crop_status` when the MQTT payload's
+`has_snapshot` is false. The latter matters because Frigate can emit a full `new`→`end` MQTT
+lifecycle for a tracked object it never actually persists as a real event (confirmed in production:
+such rows' `det_id` 404s against Frigate's own `/api/events/<id>`) -- cropping those can never
+succeed regardless of retries or queue throughput, so they're marked `skipped` immediately rather
+than piling up as an eternally-unprocessed `new`. `FOR UPDATE SKIP LOCKED` is what makes claiming
+race-safe against overlapping runs (multiple n8n executions, or this service's own poll loops) --
+but only when paired with a CTE, not a plain `WHERE id IN (SELECT ... LIMIT %s FOR UPDATE SKIP
+LOCKED)` subquery: confirmed in practice (reproduced directly in psql) that the subquery form,
+when it self-references the table being updated, does not reliably cap the claim at `limit` rows
+-- 3 eligible rows with `LIMIT 2` claimed all 3. All three claim functions
+(`claim_next_batch`/`claim_video_batch`/`claim_ai_batch`) use the CTE form
+(`WITH claimable AS (... LIMIT %s FOR UPDATE SKIP LOCKED) UPDATE ... FROM claimable WHERE
+raw_events.id = claimable.id`) so `PARALLEL_LIMIT`/`VIDEO_PARALLEL_LIMIT`/n8n's `parallel_limit`
+are actually enforced.
 
 ## Key pieces
 
@@ -195,10 +207,15 @@ a durable version of the `FrigateRetry.json` workflow's in-memory `pendingReplie
 reply-threading survives a service restart). Both directions are wrapped so a Telegram failure
 (bad token, rate limit, network blip) can never take down the crop or video poll loop.
 
+`GET /events` also defaults `has_image=true` -- rows with no `crop_image_base64` (not yet
+`crop_status='done'`, including `'skipped'` rows) are hidden by default since there's nothing to
+show in a thumbnail for them; pass `has_image=false` to see every row regardless. The web UI's
+"Only with images" checkbox (checked by default) is this same param, not a client-side filter.
+
 The web report UI (`/ui`, static files baked into the image, Alpine.js vendored locally -- no CDN
 requests) reads the same API everything else does: `GET /events` (filterable by
-`object_type`/`crop_status`/`ai_status`/`video_status`, defaults to the last 1 hour),
-`GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same `crop.scale_image_base64` helper
+`object_type`/`crop_status`/`ai_status`/`video_status`/`has_image`, defaults to the last 1 hour,
+images-only), `GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same `crop.scale_image_base64` helper
 `report.py` uses) for the grid, and `GET /media/video/{id}` (range-request `FileResponse`, so the
 browser's scrubber works) or `GET /events/{id}/image` for the lightbox depending on `has_video`.
 Those three endpoints alone also accept the API key as an `?api_key=` query param (in addition to

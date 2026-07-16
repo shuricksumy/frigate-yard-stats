@@ -92,18 +92,19 @@ def get_events(
     crop_status: str | None = None,
     ai_status: str | None = None,
     video_status: str | None = None,
+    has_image: bool = Query(True, description="Only return rows with a stored crop image -- default true, since a row with none (crop_status not yet 'done', including 'skipped') has nothing to show in a thumbnail. Pass false to see every row regardless."),
     hours: float = Query(1, gt=0, description="Used when start/end aren't both given -- window is the last N hours (default: last 1 hour)"),
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     """List raw_events, most recent first. Defaults to the last 1 hour, every object type, every
-    ai_status -- matching the web report's default view. No image field -- keeps list responses
-    small; use GET /events/{id} for full detail or GET /events/{id}/thumbnail for a small preview
-    image."""
+    ai_status, images-only -- matching the web report's default view. No image field -- keeps list
+    responses small; use GET /events/{id} for full detail or GET /events/{id}/thumbnail for a
+    small preview image."""
     resolved_start, resolved_end = _resolve_window(start, end, hours)
     return db.list_events(
         object_type, camera, resolved_start, resolved_end,
-        crop_status, ai_status, video_status, limit, offset,
+        crop_status, ai_status, video_status, has_image, limit, offset,
     )
 
 

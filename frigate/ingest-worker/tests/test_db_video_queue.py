@@ -4,7 +4,9 @@ Requires a reachable Postgres with schema.sql applied (POSTGRES_HOST/PORT/DB/USE
 vars, same as the running service -- e.g. run inside the ingest-worker container, or against the
 docker-compose 'pipeline' profile's postgres-projects). Each test creates its own raw_events rows
 (det_id prefixed 'pytest-') and cleans them up afterward so it doesn't depend on / interfere with
-whatever else is in the table.
+whatever else is in the table -- but several tests call claim_video_batch with a nonzero limit,
+which mutates (claims) whatever real rows happen to match its WHERE clause. Only run this suite
+against a local/throwaway Postgres, never against a shared or production database.
 """
 import os
 import uuid
