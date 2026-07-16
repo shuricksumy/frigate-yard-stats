@@ -168,17 +168,24 @@
       <template x-if="lightboxEvent && (lightboxMode === 'image' || !lightboxEvent.has_video)">
         <img :src="lightboxImageUrl()" alt="event full image">
       </template>
-      <div class="lightbox-info" x-show="lightboxEvent && lightboxEvent.ai_status === 'done'" style="display:none">
+      <div class="lightbox-info" x-show="lightboxEvent && (lightboxEvent.visitId || lightboxEvent.ai_status === 'done')" style="display:none">
         <p class="lightbox-info-loading" x-show="lightboxLoading">Loading AI analysis…</p>
         <template x-if="!lightboxLoading">
-          <dl>
-            <template x-for="[label, value] in sightingFields()" :key="label">
-              <div class="lightbox-info-row">
-                <dt x-text="label"></dt>
-                <dd x-text="value"></dd>
-              </div>
-            </template>
-          </dl>
+          <!-- One block per sighting -- a plain event has at most one; a visit can have several
+               (e.g. a car and a person grouped into the same real-world activity). -->
+          <template x-for="group in lightboxGroups" :key="group.title + JSON.stringify(group.fields)">
+            <div class="lightbox-info-group">
+              <h4 x-show="lightboxGroups.length > 1" x-text="group.title"></h4>
+              <dl>
+                <template x-for="[label, value] in group.fields" :key="label">
+                  <div class="lightbox-info-row">
+                    <dt x-text="label"></dt>
+                    <dd x-text="value"></dd>
+                  </div>
+                </template>
+              </dl>
+            </div>
+          </template>
         </template>
       </div>
     </div>

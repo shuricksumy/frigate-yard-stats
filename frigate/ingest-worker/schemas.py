@@ -77,6 +77,14 @@ class VisitSummary(BaseModel):
     has_video: bool
 
 
+class VisitSightings(BaseModel):
+    # One representative sighting per distinct object type the visit grouped together (see
+    # claim_ai_batch's only_visit_representative comment in db.py) -- e.g. a car and a person in
+    # the same visit each show up here, rather than just whichever was analyzed first.
+    vehicles: list[VehicleSighting]
+    persons: list[PersonSighting]
+
+
 class CameraCount(BaseModel):
     camera: str
     count: int

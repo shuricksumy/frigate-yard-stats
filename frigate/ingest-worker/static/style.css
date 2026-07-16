@@ -266,6 +266,15 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 .lightbox-info dl { margin: 0; }
 
+.lightbox-info-group + .lightbox-info-group { margin-top: 14px; }
+.lightbox-info-group h4 {
+  margin: 0 0 4px;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
 .lightbox-info-row {
   display: flex;
   flex-direction: column;

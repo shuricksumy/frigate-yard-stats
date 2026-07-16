@@ -142,6 +142,19 @@ def get_visits(
     return db.list_visits(object_type, camera, resolved_start, resolved_end, limit, offset)
 
 
+@app.get("/visits/{visit_id}/sightings", response_model=schemas.VisitSightings, tags=["events"], dependencies=[Depends(require_api_key)])
+def get_visit_sightings(visit_id: int):
+    """Every AI analysis result linked to this visit, not just the representative event's --
+    claim_ai_batch analyzes one representative event per distinct object type a visit grouped
+    together (see its only_visit_representative comment), so a visit spanning e.g. a car and a
+    person has one vehicle_sighting and one person_sighting here, not just whichever was analyzed
+    first. GET /events/{id} still only ever returns a single event's own sighting; this is the
+    visit-scoped combined view the web UI's lightbox uses instead."""
+    if db.get_visit(visit_id) is None:
+        raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
+    return db.get_sightings_for_visit(visit_id)
+
+
 @app.get("/events/{event_id}", response_model=schemas.EventDetail, tags=["events"], dependencies=[Depends(require_api_key)])
 def get_event(event_id: int):
     """Single event's full detail, including its stored crop_image_base64 and, once

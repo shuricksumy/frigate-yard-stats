@@ -195,25 +195,55 @@ the AI stage analyzes, without touching completion at all -- `POST /sightings/ve
 still mark the exact same claimed raw_event's `ai_status='done'` either way, since this is purely
 a claim-time filter (`db.claim_ai_batch`'s `only_visit_representative` param), not a schema or
 queue-state change (no `ai_status` column was added to `visits`). `source=visits` skips analyzing
-every duplicate det_id a visit (see "Visit grouping" below) already grouped together -- only the
-visit's earliest-linked raw_event is eligible, computed via a correlated subquery
-(`id = (SELECT ... WHERE re2.visit_id = raw_events.visit_id ORDER BY start_ts, id LIMIT 1)`) --
-plus every raw_event that was never grouped into a visit at all (`visit_id IS NULL`), so events
-Frigate's review never bundled still get analyzed one-to-one exactly as `source=events` would.
+every duplicate det_id a visit (see "Visit grouping" below) already grouped together -- one
+representative raw_event *per distinct object type* the visit grouped is eligible, computed via a
+correlated subquery partitioned by `(visit_id, objects)`, not `visit_id` alone (`id = (SELECT ...
+WHERE re2.visit_id = raw_events.visit_id AND re2.objects = raw_events.objects ORDER BY start_ts,
+id LIMIT 1)`) -- plus every raw_event that was never grouped into a visit at all (`visit_id IS
+NULL`), so events Frigate's review never bundled still get analyzed one-to-one exactly as
+`source=events` would.
+
+Partitioning by object type too (not just `visit_id`) is a fix, not the original behavior: a
+visit's det_ids can be several re-tracks of the *same* real object (tracker re-ID, label flicker --
+the case this dedup was originally built for) or genuinely distinct simultaneous objects (a car
+and a person in one visit). Partitioning by `visit_id` alone collapsed both cases down to a single
+analyzed event, silently dropping a whole object type whenever a visit happened to group more than
+one -- confirmed live: a visit with a car det_id and a person det_id only ever got the earlier of
+the two analyzed, never both, with nothing surfacing the gap (the other det_id just stayed
+`ai_status='new'` forever, since only the representative row is ever eligible under
+`source=visits`). Partitioning by `(visit_id, objects)` keeps the original same-type dedup (still
+just one analyzed event per repeated re-track) while giving each distinct object type in a visit
+its own representative -- `get_report_data`'s matching correlated subquery (`source=visits` on
+`/reports/generate`) got the identical fix, for the same reason: it would otherwise keep silently
+showing only one of a visit's already-analyzed sightings.
+
+`GET /visits/{visit_id}/sightings` is the visit-scoped combined read this enables -- every
+sighting linked to the visit (one per distinct object type, via `db.get_sightings_for_visit`), not
+just the single representative event `GET /events/{id}` returns. The web UI's visit lightbox
+(`static/app.js`'s `openLightbox`) calls this instead of `GET /events/{id}` whenever opened from
+the Visits view (`lightboxEvent.visitId` set), rendering one info block per returned sighting
+(`lightboxGroups`) instead of assuming at most one -- a visit with both a car and a person sighting
+now shows both, labeled, in the same lightbox. Unlike the plain per-event case, this fetch isn't
+gated on the visit's own `ai_status` (that field only reflects the visit's single earliest-linked
+event -- a different, display-only "representative" used by `list_visits`, unrelated to which
+events actually got analyzed) -- the visit branch always fetches, since one object type's sighting
+can be ready while another's is still pending.
 
 The optional `visits_only` param (default `false`, only meaningful alongside `source=visits`)
 drops that ungrouped-event fallback entirely -- with it set, a raw_event Frigate's review never
-grouped into a visit is never claimed by this call at all, however long it waits. Confirmed
-necessary in production: `n8n/metadata-processor-alerts.json` running with plain `source=visits`
+grouped into a visit is never claimed by this call at all, however long it waits. This used to be
+`n8n/metadata-processor-alerts.json`'s default config, back when there were two separate
+processing workflows (see below) -- confirmed necessary at the time because plain `source=visits`
 was still marking ordinary, non-alert raw_events `ai_status='done'` (visible as unexpected "done"
-rows under the web UI's Events tab, not the Visits tab) -- in one production window, 201 of 215
-raw_events had no `visit_id` at all, so the fallback branch, not actual visit representatives, was
-most of what that workflow claimed. `visits_only=true` (`n8n/metadata-processor-alerts.json`'s
-current config) makes the alerts flow strictly visit-scoped: `AND visit_id IS NOT NULL AND id =
-(...representative subquery...)` instead of `AND (visit_id IS NULL OR id = (...))`. Ungrouped
-events then only ever get analyzed by the events-flow sibling (`source=events`, the default) --
-another reason the two metadata-processor workflows are meant to be mutually exclusive, not both
-active at once (see below).
+rows under the web UI's Events tab, not the Visits tab) in a way that workflow didn't want, since
+its whole purpose was staying alerts-scoped while a separate events-only workflow handled the
+plain case. Now that `claim_ai_batch`'s dedup is object-type-aware (see below) rather than
+collapsing a whole visit to one event regardless of type, plain `source=visits` (i.e.
+`visits_only=false`) is a strict superset of the old events-only mode -- every ungrouped raw_event
+still gets analyzed one-to-one via the fallback, and every visit-grouped one gets analyzed once
+per distinct object type -- so `n8n/metadata-processor.json` (now the only processing workflow)
+just uses plain `source=visits` and never sets `visits_only`. The param still exists for anyone who
+wants to go back to strictly alert-scoped analysis (never touch an ungrouped raw_event at all).
 
 (Bug fixed in passing while building `source`: `claim_ai_batch`'s `RETURNING yard_stats.raw_events.*`
 never included the computed `has_video`/`has_image` fields `EventDetail` requires -- every call
@@ -240,28 +270,49 @@ the lightbox.
 
 `/reports/generate` also takes the same `source=events|visits` param `/ai-queue/claim` does
 (`report.generate_report`/`db.get_report_data`) -- `source=visits` applies the identical dedup
-(`only_visit_representative`'s correlated subquery, inlined into `get_report_data`'s two sighting
-queries): only the sighting for a visit's earliest-linked raw_event, plus every sighting whose
-raw_event was never grouped into a visit at all, so one real-world visit spanning several det_ids
-(re-track, label flicker) shows up once in the report instead of once per det_id. Unlike the
-`source` param on the AI-queue claim (which changes which rows are *eligible to claim*, i.e. a
-live queue-state decision), this is a pure read-time filter over already-`done` sightings -- it
-never touches `ai_status`, so `n8n/daily-report.json` (events, `source=events`, the default) and
-`n8n/alerts-report.json` (visits, `source=visits`) can both run on their own schedules without
-any conflict, unlike the two metadata-processor workflows below.
+`only_visit_representative` does (see above: one sighting per distinct object type a visit
+grouped, partitioned by `(visit_id, objects)`, plus every sighting whose raw_event was never
+grouped into a visit at all), so one real-world visit spanning several det_ids of the *same*
+object (re-track, label flicker) shows up once per object type in the report instead of once per
+det_id. Unlike the `source` param on the AI-queue claim (which changes which rows are *eligible to
+claim*, i.e. a live queue-state decision), this is a pure read-time filter over already-`done`
+sightings -- it never touches `ai_status`, so `n8n/daily-report.json` (events, `source=events`,
+the default) and `n8n/alerts-report.json` (visits, `source=visits`) can both run on their own
+schedules without any conflict.
 
-### AI-stage n8n workflows are mutually exclusive, not parallel
+`source=visits`'s HTML also renders differently from `source=events`'s, not just differently
+dedup'd: `report.py`'s `_group_by_visit` groups a visit's vehicle and person sightings into one
+combined alert row (image, time, camera, a Vehicle summary column, a Person summary column)
+instead of two disjoint Vehicles/Persons tables -- a visit's car and person sightings (e.g. someone
+getting out of their car) are the same real-world activity, so the alerts report shows them
+together rather than as two separately-scrolled, unrelated-looking rows a reader has to manually
+reassociate by timestamp. Grouping key is `visit_id` (added to `get_report_data`'s SELECT for
+exactly this), falling back to the raw_event's own id for a sighting that was never grouped into a
+visit at all (a group of one, same as today). The earliest sighting in a group represents its
+time/camera/image (`crop_image_base64` is already consistently the visit's own thumb-crop across
+every sighting in the group once `VISIT_THUMB_CROP_ENABLED` and done -- see the `COALESCE` above --
+so this only matters for picking which event's own crop to show when it isn't). `_vehicle_summary`/
+`_person_summary` flatten each sighting's structured fields (color/body/make/model/notable_features
+/plate, or description) into one short line per sighting, joined with `; ` if a visit somehow has
+more than one of the same type. `source=events` (the default, `n8n/daily-report.json`) keeps the
+original separate-tables rendering -- there's no visit grouping concept to apply there, every
+sighting already stands alone.
 
-`n8n/metadata-processor.json` ("Events") and `n8n/metadata-processor-alerts.json` ("Alerts/
-Visits") are identical except for `source=events` vs `source=visits` on their `Claim Next Batch
-(API)` node. Both claim from the same `ai_status` column on `raw_events` -- `source` only changes
-which rows are *eligible* to claim (see `claim_ai_batch`'s `only_visit_representative` above), not
-a separate queue or state machine, unlike the genuinely independent `STORE_VIDEO`/
-`STORE_VIDEO_ALERTS` and `TELEGRAM_EVENTS_ENABLED`/`TELEGRAM_ALERTS_ENABLED` pairs. Only one of the two
-should ever be active in n8n at a time -- running both concurrently doesn't give you two
-independent datasets, it just means whichever workflow's poll tick fires first wins a given row
-FOR UPDATE SKIP LOCKED, and the loser's claim call simply returns fewer or no rows that tick. A/B
-which is more suitable for your traffic by toggling which workflow is active, not by running both.
+### One AI-stage n8n processing workflow, not two
+
+`n8n/metadata-processor.json` used to have a sibling, `n8n/metadata-processor-alerts.json`,
+identical except for `source=events` vs `source=visits`+`visits_only=true` on their `Claim Next
+Batch (API)` node -- kept as two workflows specifically because, at the time, `source=visits`
+alone couldn't safely replace `source=events`: the dedup partitioned by `visit_id` alone, so a
+visit grouping genuinely distinct object types (a car and a person) collapsed down to analyzing
+only one of them, silently dropping the other. Since `only_visit_representative` now partitions by
+`(visit_id, objects)` instead (see above), plain `source=visits` (no `visits_only`) is a strict
+superset of the old `source=events` mode -- every ungrouped raw_event still gets analyzed
+one-to-one via the fallback, every visit-grouped one gets analyzed once per distinct object type,
+and same-type re-tracked duplicates still collapse to one. There's no longer a reason to run two
+workflows or ever pick plain `source=events` -- `n8n/metadata-processor.json` is now the only
+processing workflow, using `source=visits` unconditionally; `metadata-processor-alerts.json` was
+removed.
 
 ### Video storage, Telegram notifications, and the web report UI
 

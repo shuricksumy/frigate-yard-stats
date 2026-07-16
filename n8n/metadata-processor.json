@@ -1,5 +1,5 @@
 {
-  "name": "Yard Stats: Metadata Processor (Events)",
+  "name": "Yard Stats: Metadata Processor",
   "nodes": [
     {
       "id": "1",
@@ -19,7 +19,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [400, 300],
-      "notes": "Replaces the old Reap Stale Processing Items / Count In-Progress Items / Check Capacity / Claim Next Batch Postgres+Code+If nodes -- ingest-worker's /ai-queue/claim now does all four steps in one call (reap stale, count in-progress, compute capacity, atomically claim up to parallel_limit crop_status='done' rows FOR UPDATE SKIP LOCKED). Tune throughput by editing the query params below. One shared queue across all object_types (not claimed separately per type), newest event first -- older backlog only gets swept up once capacity isn't all consumed by newer rows. Returns {events: [...]} -- empty if no capacity or no work. max_age_hours (set to 6 below) means rows older than 6h are never claimed at all -- a safety valve so a stale backlog can't eat capacity that could go to fresher events. Delete the param (or raise the value) if you'd rather eventually process everything regardless of age. source=events (explicit here, also the default) claims every eligible raw_event independently, including every duplicate det_id a visit later groups together. IMPORTANT: this workflow and its sibling 'Yard Stats: Metadata Processor (Alerts/Visits)' both claim from the SAME ai_status queue on raw_events -- source only changes which rows are eligible, not a separate queue. Only ever activate one of the two at a time; running both means whichever polls first wins a given row, not two independent datasets.",
+      "notes": "Replaces the old Reap Stale Processing Items / Count In-Progress Items / Check Capacity / Claim Next Batch Postgres+Code+If nodes -- ingest-worker's /ai-queue/claim now does all four steps in one call (reap stale, count in-progress, compute capacity, atomically claim up to parallel_limit crop_status='done' rows FOR UPDATE SKIP LOCKED). One shared queue across all object_types (not claimed separately per type), newest event first -- older backlog only gets swept up once capacity isn't all consumed by newer rows. Returns {events: [...]} -- empty if no capacity or no work. max_age_hours (set to 6 below) means rows older than 6h are never claimed at all -- a safety valve so a stale backlog can't eat capacity that could go to fresher events. source=visits (this workflow's only mode -- there used to be a separate source=events sibling workflow, removed as redundant): claims one representative raw_event per distinct object type a Frigate review grouped into a visit (so a car and a person in the same visit both get analyzed, but re-tracked duplicates of the same object -- tracker re-ID, label flicker -- still collapse to just one), PLUS every raw_event that was never grouped into a visit at all (visit_id IS NULL), analyzed one-to-one exactly as a plain ungrouped claim would. This is why one workflow is now enough: it's a strict superset of the old events-only mode, not a narrower alerts-only one -- nothing is skipped, duplicate analysis is what's avoided. (visits_only=true is still available as a query param here if you ever want to go back to strictly alert-scoped analysis -- i.e. never claim an ungrouped raw_event at all -- but that's opt-in, not this workflow's default.) require_thumb_crop=true is also available if you want to GUARANTEE the visit's own high-res thumb_time re-crop always feeds the VLM (VISIT_THUMB_CROP_ENABLED) instead of just opportunistically preferring it when already done by claim time (the default, at no extra latency cost) -- the trade-off is real latency, since claims then wait for the review's re-crop to finish, which only starts once the review closes.",
       "notesInFlow": true,
       "parameters": {
         "method": "POST",
@@ -31,7 +31,7 @@
             { "name": "parallel_limit", "value": "3" },
             { "name": "stale_minutes", "value": "5" },
             { "name": "max_age_hours", "value": "6" },
-            { "name": "source", "value": "events" }
+            { "name": "source", "value": "visits" }
           ]
         },
         "authentication": "genericCredentialType",
@@ -298,9 +298,6 @@
       "main": [[{ "node": "Insert Vehicle Sighting (API)", "type": "main", "index": 0 }]]
     },
     "Insert Vehicle Sighting (API)": {
-      "main": [[{ "node": "Loop Over Claimed Events", "type": "main", "index": 0 }]]
-    },
-    "Send Vehicle Photo (Telegram)": {
       "main": [[{ "node": "Loop Over Claimed Events", "type": "main", "index": 0 }]]
     },
     "Handle Failure (API)": {

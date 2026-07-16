@@ -218,6 +218,36 @@ def test_source_events_never_overridden_by_visit_thumb_crop(conn_ok):
         _cleanup(raw_id, visit_id=visit_id)
 
 
+def test_only_visit_representative_claims_one_representative_per_distinct_object_type(conn_ok):
+    # Regression test: the dedup used to partition by visit_id alone, so a visit grouping a car
+    # det_id and a person det_id together (a real, confirmed-in-production case -- e.g. someone
+    # getting out of their car) only ever got the earlier of the two analyzed, silently dropping
+    # the other object type's sighting entirely. Partitioning by (visit_id, objects) instead keeps
+    # same-type dedup (still just one analyzed event per repeated re-track of the same object) but
+    # gives each distinct object type in the visit its own representative.
+    car_id, car_det = _insert("now() - interval '10 seconds'", objects="car")
+    person_id, person_det = _insert("now()", objects="person")
+    # A second car det_id (re-track) should still collapse to just the one car representative.
+    car_dup_id, car_dup_det = _insert("now() - interval '5 seconds'", objects="car")
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car,person",
+        "start_time": 1784198451.0, "end_time": 1784198470.0,
+        "det_ids": [car_det, person_det, car_dup_det],
+    })
+    try:
+        claimed_ids = {
+            r["id"] for r in db.claim_ai_batch(
+                ["car", "person"], parallel_limit=10, stale_minutes=5,
+                only_visit_representative=True,
+            )
+        }
+        assert car_id in claimed_ids
+        assert person_id in claimed_ids
+        assert car_dup_id not in claimed_ids
+    finally:
+        _cleanup(car_id, person_id, car_dup_id, visit_id=visit_id)
+
+
 def test_default_source_events_claims_every_grouped_event(conn_ok):
     older_id, older_det = _insert("now() - interval '10 seconds'")
     newer_id, newer_det = _insert("now()")

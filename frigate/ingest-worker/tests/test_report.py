@@ -49,9 +49,25 @@ def _insert_vehicle_sighting(raw_event_id: int) -> int:
     return rows[0]["id"]
 
 
+def _insert_person_sighting(raw_event_id: int) -> int:
+    rows = db._execute(
+        """
+        INSERT INTO yard_stats.person_sightings (raw_event_id, description)
+        VALUES (%s, 'dark jacket')
+        RETURNING id
+        """,
+        (raw_event_id,), fetch=True,
+    )
+    return rows[0]["id"]
+
+
 def _cleanup(*raw_event_ids, visit_id=None):
     db._execute(
         "DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id = ANY(%s)",
+        (list(raw_event_ids),),
+    )
+    db._execute(
+        "DELETE FROM yard_stats.person_sightings WHERE raw_event_id = ANY(%s)",
         (list(raw_event_ids),),
     )
     db._execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", (list(raw_event_ids),))
@@ -157,6 +173,34 @@ def test_source_visits_falls_back_to_representative_crop_when_thumb_crop_not_don
         assert match["crop_image_base64"] == "representative-crop"
     finally:
         _cleanup(raw_id, visit_id=visit_id)
+
+
+def test_source_visits_includes_sighting_per_distinct_object_type(conn_ok):
+    # Regression test: the dedup used to partition by visit_id alone, so a visit grouping a car
+    # and a person together only ever surfaced one of the two sightings in the report -- the other
+    # object type's already-analyzed sighting silently never showed up anywhere. Partitioning by
+    # (visit_id, objects) keeps same-type dedup (a re-tracked duplicate of the same object still
+    # collapses to one) while surfacing one sighting per distinct object type.
+    car_id, car_det = _insert_raw_event("now() - interval '10 seconds'", objects="car")
+    person_id, person_det = _insert_raw_event("now()", objects="person")
+    car_dup_id, car_dup_det = _insert_raw_event("now() - interval '5 seconds'", objects="car")
+    _insert_vehicle_sighting(car_id)
+    _insert_person_sighting(person_id)
+    _insert_vehicle_sighting(car_dup_id)
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car,person",
+        "start_time": 1784198451.0, "end_time": 1784198470.0,
+        "det_ids": [car_det, person_det, car_dup_det],
+    })
+    try:
+        start, end = _window()
+        data = db.get_report_data(start, end, source="visits")
+        vehicle_ids = {v["raw_event_id"] for v in data["vehicles"]}
+        person_ids = {p["raw_event_id"] for p in data["persons"]}
+        assert vehicle_ids == {car_id}
+        assert person_ids == {person_id}
+    finally:
+        _cleanup(car_id, person_id, car_dup_id, visit_id=visit_id)
 
 
 def test_source_events_never_uses_visit_thumb_crop(conn_ok):

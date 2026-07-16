@@ -103,6 +103,39 @@ def get_person_sighting_for_event(raw_event_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
+def get_sightings_for_visit(visit_id: int) -> dict:
+    # Every sighting linked to this visit, not just the representative event's -- claim_ai_batch's
+    # only_visit_representative now partitions by (visit_id, objects) rather than visit_id alone
+    # (see there for why), so a visit can have more than one analyzed event: one representative per
+    # distinct object type (a car and a person in the same visit each get their own sighting), not
+    # just one per visit. Used by the web UI's visit lightbox to show all of them together instead
+    # of only the single representative event's AI result GET /events/{id} would return.
+    vehicles = _execute(
+        """
+        SELECT vs.id, vs.raw_event_id, re.camera, re.zone, re.start_ts,
+               vs.color, vs.body_type, vs.make_guess, vs.make_confidence,
+               vs.model_guess, vs.model_confidence, vs.notable_features,
+               vs.plate_text_llm, vs.plate_text_frigate, vs.plate_confidence, vs.notes
+        FROM yard_stats.vehicle_sightings vs
+        JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
+        WHERE re.visit_id = %s
+        ORDER BY re.start_ts ASC
+        """,
+        (visit_id,), fetch=True,
+    )
+    persons = _execute(
+        """
+        SELECT ps.id, ps.raw_event_id, re.camera, re.zone, re.start_ts, ps.description, ps.notes
+        FROM yard_stats.person_sightings ps
+        JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
+        WHERE re.visit_id = %s
+        ORDER BY re.start_ts ASC
+        """,
+        (visit_id,), fetch=True,
+    )
+    return {"vehicles": vehicles, "persons": persons}
+
+
 def insert_raw_event(event: dict) -> None:
     # video_status starts 'skipped' (not 'new') when STORE_VIDEO is off -- a cheap flag set once
     # at ingest, so the video queue's WHERE video_status IN ('new','retry') never even considers
@@ -1070,13 +1103,22 @@ def claim_ai_batch(
     # setup analyzes video directly -- this only changes which rows are eligible to claim.
     video_clause = "AND video_status = 'done'" if require_video else ""
     # only_visit_representative=true ("source=visits" on POST /ai-queue/claim) skips analyzing
-    # every duplicate det_id a visit grouped together -- only the visit's earliest-linked raw_event
-    # (same "representative" definition list_visits uses) is eligible, plus every raw_event that
-    # was never grouped into a visit at all (visit_id IS NULL), so events Frigate's review never
-    # bundled still get analyzed one-to-one same as today. Deliberately doesn't touch ai_status
-    # semantics or completion at all -- POST /sightings/vehicles|persons still mark the exact same
-    # raw_event's ai_status='done' regardless of source, so this is purely a claim-time filter, not
-    # a schema/queue change (no ai_status column added to visits).
+    # every duplicate det_id a visit grouped together -- only one representative raw_event per
+    # distinct object type within a visit is eligible (partitioned by (visit_id, objects), not
+    # visit_id alone), plus every raw_event that was never grouped into a visit at all (visit_id IS
+    # NULL), so events Frigate's review never bundled still get analyzed one-to-one same as today.
+    # Partitioning by object type too (not just visit_id) is deliberate: a visit's det_ids can be
+    # several re-tracks of the *same* real object (tracker re-ID, label flicker -- the case this
+    # dedup was originally built for) or genuinely distinct simultaneous objects (a car and a
+    # person in the same visit). Partitioning by visit_id alone collapsed both cases down to a
+    # single analyzed event, silently dropping a whole object type whenever a visit happened to
+    # group more than one -- confirmed live: a visit with a car det_id and a person det_id only
+    # ever got the earlier of the two analyzed, never both. Partitioning by (visit_id, objects)
+    # keeps the original behavior for same-type duplicates (still just one analyzed event) while
+    # giving each distinct object type in a visit its own representative. Deliberately doesn't
+    # touch ai_status semantics or completion at all -- POST /sightings/vehicles|persons still mark
+    # the exact same raw_event's ai_status='done' regardless of source, so this is purely a
+    # claim-time filter, not a schema/queue change (no ai_status column added to visits).
     #
     # visits_only=true ("source=visits" + visits_only=true on POST /ai-queue/claim) narrows
     # further: drops the "OR visit_id IS NULL" fallback above entirely, so a raw_event Frigate's
@@ -1091,6 +1133,7 @@ def claim_ai_batch(
             id = (
                 SELECT re2.id FROM yard_stats.raw_events re2
                 WHERE re2.visit_id = raw_events.visit_id
+                  AND re2.objects = raw_events.objects
                 ORDER BY re2.start_ts ASC, re2.id ASC
                 LIMIT 1
             )
@@ -1265,10 +1308,12 @@ def get_report_data(start: datetime, end: datetime, source: str = "events") -> d
     # Same joins daily-report.json's two query nodes used to run directly -- filtered by
     # created_at (when the AI stage produced the sighting), not start_ts, matching that behavior.
     # source="visits" (the alerts-report workflow) applies the same dedup claim_ai_batch's
-    # only_visit_representative does -- only the visit's earliest-linked raw_event's sighting, plus
-    # every sighting whose raw_event was never grouped into a visit at all -- so one real-world
-    # activity a visit grouped across several det_ids (re-track, label flicker) shows up once in
-    # the report instead of once per det_id.
+    # only_visit_representative does -- one representative raw_event's sighting per distinct
+    # object type within a visit (partitioned by (visit_id, objects), not visit_id alone -- see
+    # claim_ai_batch's comment), plus every sighting whose raw_event was never grouped into a
+    # visit at all -- so re-tracked duplicates of the same real object (re-track, label flicker)
+    # still collapse to one row, but a visit grouping genuinely distinct objects (e.g. a car and a
+    # person) shows both instead of silently dropping one.
     visit_clause = ""
     visit_join = ""
     crop_image_expr = "re.crop_image_base64"
@@ -1279,6 +1324,7 @@ def get_report_data(start: datetime, end: datetime, source: str = "events") -> d
             OR re.id = (
                 SELECT re2.id FROM yard_stats.raw_events re2
                 WHERE re2.visit_id = re.visit_id
+                  AND re2.objects = re.objects
                 ORDER BY re2.start_ts ASC, re2.id ASC
                 LIMIT 1
             )
@@ -1290,9 +1336,13 @@ def get_report_data(start: datetime, end: datetime, source: str = "events") -> d
         # there's no real latency cost to just always preferring it here.
         visit_join = "LEFT JOIN yard_stats.visits v ON v.id = re.visit_id AND v.thumb_crop_status = 'done'"
         crop_image_expr = "COALESCE(v.crop_image_base64, re.crop_image_base64)"
+    # visit_id is included so report.py can group a visit's vehicle + person sightings into one
+    # combined alert entry (source="visits" only -- always NULL under source="events", where
+    # there's no grouping concept and every sighting is its own entry).
     vehicles = _execute(
         f"""
-        SELECT re.id AS raw_event_id, re.camera, re.zone, re.start_ts, {crop_image_expr} AS crop_image_base64,
+        SELECT re.id AS raw_event_id, re.visit_id, re.camera, re.zone, re.start_ts,
+               {crop_image_expr} AS crop_image_base64,
                vs.color, vs.body_type, vs.make_guess, vs.make_confidence,
                vs.model_guess, vs.model_confidence, vs.notable_features,
                vs.plate_text_llm, vs.plate_text_frigate, vs.notes
@@ -1307,7 +1357,8 @@ def get_report_data(start: datetime, end: datetime, source: str = "events") -> d
     )
     persons = _execute(
         f"""
-        SELECT re.id AS raw_event_id, re.camera, re.zone, re.start_ts, {crop_image_expr} AS crop_image_base64,
+        SELECT re.id AS raw_event_id, re.visit_id, re.camera, re.zone, re.start_ts,
+               {crop_image_expr} AS crop_image_base64,
                ps.description, ps.notes
         FROM yard_stats.person_sightings ps
         JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id

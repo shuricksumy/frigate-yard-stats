@@ -49,7 +49,11 @@ function eventsApp() {
 
     lightboxEvent: null,
     lightboxMode: "video",
-    lightboxDetail: null,
+    // Array of {title, fields}, one entry per sighting -- a plain event has at most one (vehicle
+    // or person), but a visit can have several: one representative per distinct object type the
+    // visit grouped together (see claim_ai_batch's only_visit_representative comment in db.py),
+    // e.g. a car and a person in the same visit each get their own entry here.
+    lightboxGroups: [],
     lightboxLoading: false,
 
     init() {
@@ -342,14 +346,34 @@ function eventsApp() {
       // Default to video when both exist -- richer than a still frame -- but the toggle buttons
       // (shown only when both are present) let you switch to the image side and back.
       this.lightboxMode = event.has_video ? "video" : "image";
-      this.lightboxDetail = null;
-      if (event.ai_status !== "done") return;
+      this.lightboxGroups = [];
+      // A visit's own ai_status (event.ai_status) only reflects its single earliest-linked
+      // event -- a second, different-object-type event in the same visit can still be
+      // analyzed (or still pending) independently of that one, so the visit branch always
+      // fetches rather than gating on it. A plain event has exactly one status, so that gate
+      // still applies there.
+      if (!event.visitId && event.ai_status !== "done") return;
       // The AI analysis result (plate, color, description) isn't in the list response -- keeps
-      // GET /events light -- so fetch it only when actually opening an analyzed event.
+      // GET /events / GET /visits light -- so fetch it only when actually opening an item.
       this.lightboxLoading = true;
       try {
-        const resp = await fetch(`/events/${event.id}`, { headers: { "X-API-Key": this.apiKey } });
-        if (resp.ok) this.lightboxDetail = await resp.json();
+        if (event.visitId) {
+          const resp = await fetch(`/visits/${event.visitId}/sightings`, { headers: { "X-API-Key": this.apiKey } });
+          if (resp.ok) {
+            const data = await resp.json();
+            this.lightboxGroups = [
+              ...data.vehicles.map((vs) => ({ title: "Vehicle", fields: this.vehicleFields(vs) })),
+              ...data.persons.map((ps) => ({ title: "Person", fields: this.personFields(ps) })),
+            ];
+          }
+        } else {
+          const resp = await fetch(`/events/${event.id}`, { headers: { "X-API-Key": this.apiKey } });
+          if (resp.ok) {
+            const d = await resp.json();
+            if (d.vehicle_sighting) this.lightboxGroups.push({ title: "Vehicle", fields: this.vehicleFields(d.vehicle_sighting) });
+            if (d.person_sighting) this.lightboxGroups.push({ title: "Person", fields: this.personFields(d.person_sighting) });
+          }
+        }
       } catch (err) {
         console.error(err);
       } finally {
@@ -359,26 +383,20 @@ function eventsApp() {
 
     closeLightbox() {
       this.lightboxEvent = null;
-      this.lightboxDetail = null;
+      this.lightboxGroups = [];
     },
 
-    sightingFields() {
-      const d = this.lightboxDetail;
-      if (!d) return [];
-      if (d.vehicle_sighting) {
-        const vs = d.vehicle_sighting;
-        return [
-          ["Color", vs.color], ["Body type", vs.body_type],
-          ["Make", vs.make_guess], ["Model", vs.model_guess],
-          ["Plate (LLM)", vs.plate_text_llm], ["Plate (Frigate)", vs.plate_text_frigate],
-          ["Notable features", vs.notable_features], ["Notes", vs.notes],
-        ].filter(([, value]) => value);
-      }
-      if (d.person_sighting) {
-        const ps = d.person_sighting;
-        return [["Description", ps.description], ["Notes", ps.notes]].filter(([, value]) => value);
-      }
-      return [];
+    vehicleFields(vs) {
+      return [
+        ["Color", vs.color], ["Body type", vs.body_type],
+        ["Make", vs.make_guess], ["Model", vs.model_guess],
+        ["Plate (LLM)", vs.plate_text_llm], ["Plate (Frigate)", vs.plate_text_frigate],
+        ["Notable features", vs.notable_features], ["Notes", vs.notes],
+      ].filter(([, value]) => value);
+    },
+
+    personFields(ps) {
+      return [["Description", ps.description], ["Notes", ps.notes]].filter(([, value]) => value);
     },
 
     formatTs(iso) {
