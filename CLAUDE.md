@@ -350,6 +350,23 @@ affect `GET /events`, the AI queue, or Telegram notifications; exists so `visits
 judged visually against real traffic before deciding whether to build the actual dedup behavior
 described above.
 
+`has_video`/`video_status` on `GET /visits` describe the *visit's own* video
+(`STORE_VIDEO_ALERTS`/`alert_video_worker.py`), not the representative raw_event's -- those are
+two entirely separate video flows/storage locations (`VIDEO_STORAGE_PATH_ALERTS` vs.
+`VIDEO_STORAGE_PATH`). Bug fixed in production: `list_visits`' original `WITH linked AS (...)` CTE
+selected `re.video_status`/`(re.video_path IS NOT NULL)` from the representative raw_event instead
+of `v.video_status`/`v.video_path` from the visit itself -- confirmed live (7 visits with genuine,
+correctly-downloaded clips on disk, `video_status='done'`, but every one reported `has_video:
+false` via the API, since `STORE_VIDEO` was off so the representative event's own video_path was
+always NULL). `GET /media/video/{event_id}` also only ever served a raw_event's video_path, with
+no route at all for a visit's -- so even a correctly-reported `has_video` couldn't have been
+played. Fixed with a parallel `GET /media/video/visit/{visit_id}` (`db.get_visit`, same
+range-request `FileResponse` pattern) and the web UI's `openVisitLightbox` now carries the
+visit's own id (`visitId`) alongside `representative_event_id` so `lightboxVideoUrl()` can pick
+the right endpoint -- the image/AI-analysis side of the lightbox still always comes from the
+representative event (that's the only place crop images and sightings exist), only video
+playback branches on which id space it's in.
+
 The web report UI (`/ui`, static files baked into the image, Alpine.js vendored locally -- no CDN
 requests) reads the same API everything else does. An Events/Visits toggle switches the whole page
 between `GET /events` and `GET /visits` (`viewMode`, drives `fetchEvents`/`fetchVisits` via a

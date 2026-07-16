@@ -129,6 +129,16 @@ def insert_raw_event(event: dict) -> None:
     )
 
 
+def get_visit(visit_id: int) -> dict | None:
+    # Mirrors get_raw_event -- used by GET /media/video/visit/{id} to serve a visit's own stored
+    # clip (STORE_VIDEO_ALERTS), a completely separate video/storage location from any raw_event's.
+    rows = _execute(
+        "SELECT *, (video_path IS NOT NULL) AS has_video FROM yard_stats.visits WHERE id = %s",
+        (visit_id,), fetch=True,
+    )
+    return rows[0] if rows else None
+
+
 def record_visit(review: dict) -> int | None:
     # Populates the previously-unwired visits table / raw_events.visit_id+reconciled from
     # Frigate's own review/alert grouping (frigate/reviews MQTT topic) -- one review segment
@@ -726,6 +736,11 @@ def list_visits(
     # pass, not a "best crop" heuristic (that's a separate, later decision if this view leads to
     # actually deduping AI-queue/Telegram work). event_count via a window COUNT(*) OVER (PARTITION
     # BY v.id), same partition as the row_number, so both come from a single pass over `linked`.
+    # video_status/has_video describe the VISIT's own video (STORE_VIDEO_ALERTS/
+    # alert_video_worker.py), not the representative raw_event's -- those are two entirely
+    # separate video flows/storage locations; get_event_video only ever serves a raw_event's
+    # video_path, never a visit's, so the web UI needs a different endpoint for visit playback
+    # (see GET /media/video/visit/{visit_id}).
     clauses = []
     params: list = []
     if object_type:
@@ -755,9 +770,10 @@ def list_visits(
             SELECT
                 v.id AS visit_id, v.zone, v.objects, v.cameras, v.camera_count,
                 v.start_ts AS visit_start_ts, v.end_ts AS visit_end_ts,
-                re.id AS event_id, re.ai_status, re.crop_status, re.video_status,
+                v.video_status AS visit_video_status,
+                (v.video_path IS NOT NULL) AS visit_has_video,
+                re.id AS event_id, re.ai_status, re.crop_status,
                 (re.crop_image_base64 IS NOT NULL) AS has_image,
-                (re.video_path IS NOT NULL) AS has_video,
                 row_number() OVER (PARTITION BY v.id ORDER BY re.start_ts ASC, re.id ASC) AS rn,
                 count(*) OVER (PARTITION BY v.id) AS event_count
             FROM yard_stats.visits v
@@ -766,8 +782,8 @@ def list_visits(
         )
         SELECT visit_id AS id, zone, objects, cameras, camera_count,
                visit_start_ts AS start_ts, visit_end_ts AS end_ts, event_count,
-               event_id AS representative_event_id, ai_status, crop_status, video_status,
-               has_image, has_video
+               event_id AS representative_event_id, ai_status, crop_status,
+               visit_video_status AS video_status, has_image, visit_has_video AS has_video
         FROM linked
         WHERE rn = 1
         ORDER BY visit_start_ts DESC

@@ -207,6 +207,21 @@ def get_event_video(event_id: int):
     return FileResponse(video_path, media_type="video/mp4", filename=os.path.basename(video_path))
 
 
+@app.get("/media/video/visit/{visit_id}", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
+def get_visit_video(visit_id: int):
+    """Alerts-flow counterpart to GET /media/video/{event_id} -- a visit's own clip
+    (STORE_VIDEO_ALERTS/alert_video_worker.py) lives under VIDEO_STORAGE_PATH_ALERTS, a completely
+    separate storage location from any raw_event's video_path, so it needs its own endpoint rather
+    than overloading the event one with two different id spaces."""
+    row = db.get_visit(visit_id)
+    if row is None or not row.get("video_path"):
+        raise HTTPException(status_code=404, detail=f"No video for visit {visit_id}")
+    video_path = row["video_path"]
+    if not os.path.isfile(video_path):
+        raise HTTPException(status_code=404, detail=f"Video file missing on disk for visit {visit_id}")
+    return FileResponse(video_path, media_type="video/mp4", filename=os.path.basename(video_path))
+
+
 @app.get("/sightings/vehicles", response_model=list[schemas.VehicleSighting], tags=["sightings"], dependencies=[Depends(require_api_key)])
 def get_vehicle_sightings(
     camera: str | None = None,

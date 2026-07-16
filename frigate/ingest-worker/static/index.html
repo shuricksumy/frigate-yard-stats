@@ -156,7 +156,7 @@
         <button :class="{ active: lightboxMode === 'image' }" @click="lightboxMode = 'image'">Image</button>
       </div>
       <template x-if="lightboxEvent && lightboxEvent.has_video && lightboxMode === 'video'">
-        <video controls autoplay :src="videoUrl(lightboxEvent.id)"></video>
+        <video controls autoplay :src="lightboxVideoUrl()"></video>
       </template>
       <template x-if="lightboxEvent && (lightboxMode === 'image' || !lightboxEvent.has_video)">
         <img :src="thumbnailUrl(lightboxEvent.id, true)" alt="event full image">

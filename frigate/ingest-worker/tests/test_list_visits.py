@@ -93,3 +93,49 @@ def test_list_visits_excludes_unlinked_raw_events(conn_ok):
         assert not any(r["representative_event_id"] == raw_id for r in rows)
     finally:
         _cleanup(raw_id)
+
+
+def test_get_visit_includes_has_video(conn_ok):
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0,
+        "det_ids": [],
+    })
+    try:
+        assert db.get_visit(visit_id)["has_video"] is False
+        db.mark_visit_video_done(visit_id, "/data/video-alerts/2026/07/16/visit-car-1-x.mp4")
+        row = db.get_visit(visit_id)
+        assert row["has_video"] is True
+        assert row["video_path"] == "/data/video-alerts/2026/07/16/visit-car-1-x.mp4"
+    finally:
+        _cleanup(visit_id=visit_id)
+
+
+def test_get_visit_returns_none_for_unknown_id(conn_ok):
+    assert db.get_visit(999999999) is None
+
+
+def test_list_visits_has_video_reflects_the_visit_not_the_representative_event(conn_ok):
+    # Regression test: has_video/video_status must describe the VISIT's own video
+    # (STORE_VIDEO_ALERTS/alert_video_worker.py), not the representative raw_event's -- those are
+    # two entirely separate video flows/storage locations. Confirmed live in production this was
+    # backwards: every visit had video_status='done' (a real downloaded clip) but list_visits
+    # reported has_video=false because it was reading the representative event's video_path
+    # (always NULL, since STORE_VIDEO was off) instead of the visit's own.
+    det_id = f"pytest-{uuid.uuid4()}"
+    raw_id = _insert_raw_event(det_id)
+    # The representative raw_event has no video of its own (video_status default 'new', no path).
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0,
+        "det_ids": [det_id],
+    })
+    # Simulate alert_video_worker having successfully stored the visit's own clip.
+    db.mark_visit_video_done(visit_id, "/data/video-alerts/2026/07/16/visit-car-1-x.mp4")
+    try:
+        rows = db.list_visits(start=None, end=None, limit=50, offset=0)
+        match = next(r for r in rows if r["id"] == visit_id)
+        assert match["has_video"] is True
+        assert match["video_status"] == "done"
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)

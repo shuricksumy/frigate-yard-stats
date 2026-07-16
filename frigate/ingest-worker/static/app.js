@@ -288,9 +288,12 @@ function eventsApp() {
 
     openVisitLightbox(visit) {
       // Reuses the existing per-event lightbox on the visit's representative (earliest-linked)
-      // raw_event -- no separate visit-detail view needed for this first comparison pass.
+      // raw_event for the image/AI-analysis side -- but a visit's own video (STORE_VIDEO_ALERTS)
+      // is a completely separate file from anything on that raw_event, so visitId is carried
+      // alongside id and lightboxVideoUrl() picks the right endpoint based on which is set.
       this.openLightbox({
         id: visit.representative_event_id,
+        visitId: visit.id,
         has_video: visit.has_video,
         has_image: visit.has_image,
         ai_status: visit.ai_status,
@@ -304,6 +307,19 @@ function eventsApp() {
 
     videoUrl(eventId) {
       return `/media/video/${eventId}?api_key=${encodeURIComponent(this.apiKey)}`;
+    },
+
+    visitVideoUrl(visitId) {
+      return `/media/video/visit/${visitId}?api_key=${encodeURIComponent(this.apiKey)}`;
+    },
+
+    // The lightbox is shared between the Events and Visits views -- lightboxEvent.visitId is
+    // only set when opened from a visit card, in which case its video (if any) lives under a
+    // completely separate visit-video endpoint, not the per-event one.
+    lightboxVideoUrl() {
+      const e = this.lightboxEvent;
+      if (!e) return "";
+      return e.visitId ? this.visitVideoUrl(e.visitId) : this.videoUrl(e.id);
     },
 
     async openLightbox(event) {
