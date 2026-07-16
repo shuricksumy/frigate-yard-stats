@@ -9,6 +9,7 @@ import crop_worker
 import db
 import mqtt_ingest
 import video_worker
+import visit_thumb_worker
 from api import app
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -28,6 +29,9 @@ def main():
     # STORE_VIDEO, so the two flows can be A/B'd separately.
     if config.STORE_VIDEO_ALERTS:
         threading.Thread(target=alert_video_worker.run_forever, name="alert_video_worker", daemon=True).start()
+    # Independent switch, independent thread -- same reasoning as STORE_VIDEO_ALERTS above.
+    if config.VISIT_THUMB_CROP_ENABLED:
+        threading.Thread(target=visit_thumb_worker.run_forever, name="visit_thumb_worker", daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=config.API_PORT)
 
 

@@ -117,6 +117,21 @@ CREATE INDEX IF NOT EXISTS idx_visits_video_status ON yard_stats.visits (video_s
 -- earlier visit-summary photo/text message once the visit's clip is stored.
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS telegram_photo_message_id BIGINT;
 
+-- Fifth queue stage, same shape again but for a per-visit re-crop using Frigate's own review
+-- "best frame" choice (data.thumb_time on frigate/reviews -- confirmed live via MQTT to be
+-- present on every review message and content/score-dependent, the same class of judgment
+-- CROP_FRAME_OFFSET_PCT can only approximate with a fixed percentage). Only known once the
+-- review closes -- well after the representative event's own crop_status='done' crop already ran
+-- -- so this produces a SEPARATE artifact (crop_image_base64 below), not a replacement for the
+-- events-flow crop. See visit_thumb_worker.py / crop.crop_visit_thumbnail.
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_time DOUBLE PRECISION;
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS crop_image_base64 TEXT;
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_crop_status TEXT NOT NULL DEFAULT 'new'
+  CHECK (thumb_crop_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_crop_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_crop_attempt_count INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_visits_thumb_crop_status ON yard_stats.visits (thumb_crop_status);
+
 CREATE TABLE IF NOT EXISTS yard_stats.vehicle_sightings (
   id SERIAL PRIMARY KEY,
   raw_event_id INTEGER REFERENCES yard_stats.raw_events(id),

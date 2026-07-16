@@ -130,6 +130,22 @@ STORE_VIDEO_ALERTS = _env("STORE_VIDEO_ALERTS", "false").lower() == "true"
 VIDEO_STORAGE_PATH_ALERTS = _env("VIDEO_STORAGE_PATH_ALERTS", "/data/video-alerts")
 
 # -------------------------------------------------
+# Visit thumbnail re-crop (fifth queue stage: visits.thumb_crop_status) -- see
+# visit_thumb_worker.py / crop.crop_visit_thumbnail. Uses Frigate's own review "best frame"
+# choice (data.thumb_time on frigate/reviews, confirmed live via MQTT) instead of guessing via
+# CROP_FRAME_OFFSET_PCT -- but thumb_time is only known once the review closes, well after the
+# representative event's own crop already ran, so this is a separate poll-loop stage producing a
+# separate artifact (visits.crop_image_base64), not a replacement for the events-flow crop.
+# -------------------------------------------------
+VISIT_THUMB_CROP_ENABLED = _env("VISIT_THUMB_CROP_ENABLED", "false").lower() == "true"
+VISIT_THUMB_CROP_PARALLEL_LIMIT = int(_env("VISIT_THUMB_CROP_PARALLEL_LIMIT", "1"))
+# Same head-start reasoning as CROP_INITIAL_WAIT_SECONDS/VIDEO_INITIAL_WAIT_SECONDS -- Frigate may
+# still be finalizing the continuous-recording segment right after the review closes.
+VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS = float(_env("VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS", "5"))
+VISIT_THUMB_CROP_MAX_ATTEMPTS = int(_env("VISIT_THUMB_CROP_MAX_ATTEMPTS", "3"))
+VISIT_THUMB_CROP_RETRY_WAIT_SECONDS = float(_env("VISIT_THUMB_CROP_RETRY_WAIT_SECONDS", "5"))
+
+# -------------------------------------------------
 # Telegram notifications -- see telegram.py. Disabled (no-op) unless explicitly turned on.
 # -------------------------------------------------
 TELEGRAM_ENABLED = _env("TELEGRAM_ENABLED", "false").lower() == "true"

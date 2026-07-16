@@ -192,6 +192,50 @@ def get_event_image(event_id: int):
     raise HTTPException(status_code=404, detail=f"No crop image or video for raw_event {event_id}")
 
 
+@app.get("/visits/{visit_id}/thumbnail", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
+def get_visit_thumbnail(visit_id: int):
+    """A small on-the-fly JPEG for the Visits view grid -- prefers the visit's own re-crop at
+    Frigate's thumb_time (VISIT_THUMB_CROP_ENABLED, crop.crop_visit_thumbnail), which isn't ready
+    until some time after the review closes; falls back to the representative event's own crop
+    (available almost immediately), then a frame from the visit's own stored video, same
+    belt-and-suspenders reasoning as GET /events/{id}/thumbnail. Accepts X-API-Key header or
+    ?api_key= query param since this is loaded directly by an <img> tag."""
+    visit = db.get_visit(visit_id)
+    if visit is None:
+        raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
+    image_base64 = visit.get("crop_image_base64")
+    if not image_base64:
+        representative = db.get_representative_event_for_visit(visit_id)
+        image_base64 = representative.get("crop_image_base64") if representative else None
+    if image_base64:
+        thumbnail_base64 = crop.scale_image_base64(image_base64, config.THUMBNAIL_MAX_DIMENSION)
+        return Response(content=base64.b64decode(thumbnail_base64), media_type="image/jpeg")
+    if visit.get("video_path") and os.path.isfile(visit["video_path"]):
+        return Response(content=video.extract_frame_jpeg(visit["video_path"], config.THUMBNAIL_MAX_DIMENSION), media_type="image/jpeg")
+    raise HTTPException(status_code=404, detail=f"No crop image or video for visit {visit_id}")
+
+
+@app.get("/visits/{visit_id}/image", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
+def get_visit_image(visit_id: int):
+    """Full-size image as raw JPEG bytes -- same source preference as GET /visits/{id}/thumbnail
+    (visit's own thumb_time re-crop, then the representative event's crop, then a frame from the
+    visit's stored video), used by the web report's lightbox when viewing a Visits-view card.
+    Accepts X-API-Key header or ?api_key= query param since this is loaded directly by an <img>
+    tag."""
+    visit = db.get_visit(visit_id)
+    if visit is None:
+        raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
+    image_base64 = visit.get("crop_image_base64")
+    if not image_base64:
+        representative = db.get_representative_event_for_visit(visit_id)
+        image_base64 = representative.get("crop_image_base64") if representative else None
+    if image_base64:
+        return Response(content=base64.b64decode(image_base64), media_type="image/jpeg")
+    if visit.get("video_path") and os.path.isfile(visit["video_path"]):
+        return Response(content=video.extract_frame_jpeg(visit["video_path"]), media_type="image/jpeg")
+    raise HTTPException(status_code=404, detail=f"No crop image or video for visit {visit_id}")
+
+
 @app.get("/media/video/{event_id}", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
 def get_event_video(event_id: int):
     """Streams the stored clip off disk (range requests supported via Starlette's FileResponse,

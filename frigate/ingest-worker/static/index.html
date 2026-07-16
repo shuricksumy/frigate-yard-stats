@@ -123,7 +123,7 @@
       <div class="grid" x-show="!loading">
         <template x-for="visit in visits" :key="visit.id">
           <div class="card" :class="{ clickable: visit.has_image || visit.has_video }" @click="(visit.has_image || visit.has_video) && openVisitLightbox(visit)">
-            <img x-show="visit.has_image || visit.has_video" :src="thumbnailUrl(visit.representative_event_id)" loading="lazy" alt="visit thumbnail">
+            <img x-show="visit.has_image || visit.has_video" :src="visitThumbnailUrl(visit.id)" loading="lazy" alt="visit thumbnail">
             <div class="no-image" x-show="!visit.has_image && !visit.has_video">no media (<span x-text="visit.crop_status"></span>)</div>
             <div class="meta">
               <div><strong x-text="visit.objects || 'visit'"></strong> — <span x-text="visit.cameras"></span></div>
@@ -159,7 +159,7 @@
         <video controls autoplay :src="lightboxVideoUrl()"></video>
       </template>
       <template x-if="lightboxEvent && (lightboxMode === 'image' || !lightboxEvent.has_video)">
-        <img :src="thumbnailUrl(lightboxEvent.id, true)" alt="event full image">
+        <img :src="lightboxImageUrl()" alt="event full image">
       </template>
       <div class="lightbox-info" x-show="lightboxEvent && lightboxEvent.ai_status === 'done'" style="display:none">
         <p class="lightbox-info-loading" x-show="lightboxLoading">Loading AI analysis…</p>

@@ -44,6 +44,11 @@ def parse_review_payload(raw_payload: bytes) -> dict:
         "start_time": after.get("start_time"),
         "end_time": after.get("end_time"),
         "det_ids": data.get("detections") or [],
+        # Frigate's own per-review "best frame" choice -- confirmed live via MQTT to be present on
+        # every review message (even type="new"), and distinct from start_time (which is just the
+        # review's id/thumb_path filename). Content/score-dependent, not a fixed offset -- see
+        # visit_thumb_worker.py.
+        "thumb_time": data.get("thumb_time"),
     }
 
 

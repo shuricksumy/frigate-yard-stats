@@ -13,6 +13,7 @@ os.environ.setdefault("API_KEY", "test-key")
 
 import pytest  # noqa: E402
 
+import config  # noqa: E402
 import db  # noqa: E402
 
 
@@ -29,7 +30,7 @@ def _insert_raw_event(det_id: str) -> int:
     return rows[0]["id"]
 
 
-def _review(det_ids: list[str]) -> dict:
+def _review(det_ids: list[str], thumb_time: float | None = None) -> dict:
     return {
         "camera": "pytest-cam",
         "zone": "yard,yard_car_zone",
@@ -37,6 +38,7 @@ def _review(det_ids: list[str]) -> dict:
         "start_time": 1784198451.155298,
         "end_time": 1784198470.65966,
         "det_ids": det_ids,
+        "thumb_time": thumb_time,
     }
 
 
@@ -85,6 +87,49 @@ def test_record_visit_links_matching_raw_events(conn_ok):
         assert all(r["reconciled"] for r in rows)
     finally:
         _cleanup_raw_events(raw_id_a, raw_id_b)
+        _cleanup_visit(visit_id)
+
+
+def test_record_visit_stores_thumb_time_and_starts_new_when_enabled(conn_ok, monkeypatch):
+    monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", True)
+    visit_id = db.record_visit(_review(det_ids=[], thumb_time=1784198455.5))
+    try:
+        row = db._execute(
+            "SELECT thumb_time, thumb_crop_status FROM yard_stats.visits WHERE id = %s",
+            (visit_id,), fetch=True,
+        )[0]
+        assert row["thumb_time"] == 1784198455.5
+        assert row["thumb_crop_status"] == "new"
+    finally:
+        _cleanup_visit(visit_id)
+
+
+def test_record_visit_skips_thumb_crop_when_disabled(conn_ok, monkeypatch):
+    monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", False)
+    visit_id = db.record_visit(_review(det_ids=[], thumb_time=1784198455.5))
+    try:
+        row = db._execute(
+            "SELECT thumb_time, thumb_crop_status FROM yard_stats.visits WHERE id = %s",
+            (visit_id,), fetch=True,
+        )[0]
+        assert row["thumb_crop_status"] == "skipped"
+    finally:
+        _cleanup_visit(visit_id)
+
+
+def test_record_visit_skips_thumb_crop_when_frigate_omits_thumb_time(conn_ok, monkeypatch):
+    # Confirmed live via MQTT that thumb_time is always present, but the re-crop can never
+    # succeed without it regardless of attempts if it's ever missing -- skip immediately rather
+    # than piling up as an eternally-unprocessed 'new' row.
+    monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", True)
+    visit_id = db.record_visit(_review(det_ids=[], thumb_time=None))
+    try:
+        row = db._execute(
+            "SELECT thumb_crop_status FROM yard_stats.visits WHERE id = %s",
+            (visit_id,), fetch=True,
+        )[0]
+        assert row["thumb_crop_status"] == "skipped"
+    finally:
         _cleanup_visit(visit_id)
 
 

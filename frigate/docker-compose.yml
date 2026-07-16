@@ -109,6 +109,15 @@ services:
       # flows' disk usage can be measured/managed independently.
       STORE_VIDEO_ALERTS: ${STORE_VIDEO_ALERTS:-false}
       VIDEO_STORAGE_PATH_ALERTS: /data/video-alerts
+      # Independent visit-level re-crop using Frigate's own review "best frame" choice
+      # (data.thumb_time) instead of guessing via CROP_FRAME_OFFSET_PCT -- only known once the
+      # review closes, so this is a separate poll-loop stage/artifact (visits.crop_image_base64),
+      # not a replacement for the events-flow crop. Off by default.
+      VISIT_THUMB_CROP_ENABLED: ${VISIT_THUMB_CROP_ENABLED:-false}
+      VISIT_THUMB_CROP_PARALLEL_LIMIT: ${VISIT_THUMB_CROP_PARALLEL_LIMIT:-1}
+      VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS: ${VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS:-5}
+      VISIT_THUMB_CROP_MAX_ATTEMPTS: ${VISIT_THUMB_CROP_MAX_ATTEMPTS:-3}
+      VISIT_THUMB_CROP_RETRY_WAIT_SECONDS: ${VISIT_THUMB_CROP_RETRY_WAIT_SECONDS:-5}
       # Telegram notifications (photo on crop, video reply once stored) -- see telegram.py.
       # Disabled by default; TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID only need to be set when on.
       TELEGRAM_ENABLED: ${TELEGRAM_ENABLED:-false}

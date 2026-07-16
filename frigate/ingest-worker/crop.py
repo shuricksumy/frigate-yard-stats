@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 import requests
 
 import config
+import video
 
 
 def fetch_frigate_event(det_id: str) -> dict:
@@ -117,6 +118,31 @@ def crop_and_scale(clip_url: str, timestamp_offset: float, box: list[float]) -> 
 
         with open(crop_path, "rb") as f:
             return base64.b64encode(f.read()).decode()
+
+
+def crop_visit_thumbnail(visit: dict, representative_event: dict) -> str:
+    # visit["thumb_time"] is Frigate's own per-review "best frame" choice (see
+    # mqtt_ingest.parse_review_payload) -- an absolute epoch timestamp, unlike
+    # CROP_FRAME_OFFSET_PCT which is a percentage of one raw_event's own start/end span. It can
+    # legitimately fall outside the representative event's own narrow window (Frigate picks it
+    # over the whole review, which can span multiple det_ids) -- so this fetches the same
+    # visit-scoped continuous-recording clip alert_video_worker.py downloads (video.build_clip_url,
+    # camera + start/end with the same -5s/+5s padding), not the representative event's own
+    # /api/events/{det_id}/clip.mp4 endpoint crop_event uses. The representative event's own
+    # region/box is still used for spatial framing -- Frigate's review payload has no box/region
+    # of its own, only individual tracked-object events do.
+    det_id = representative_event["det_id"]
+    event = fetch_frigate_event(det_id)
+    box = compute_full_res_box(event)
+
+    clip_row = {"start_ts": visit["start_ts"], "end_ts": visit["end_ts"], "camera": visit["cameras"]}
+    clip_url = video.build_clip_url(clip_row)
+    # Matches build_clip_url's own -5s pre-roll exactly, so this offset lands at the same instant
+    # within the fetched clip that thumb_time refers to in Frigate's own timeline.
+    clip_start_epoch = int(_as_datetime(visit["start_ts"]).timestamp()) - 5
+    offset = visit["thumb_time"] - clip_start_epoch
+
+    return crop_and_scale(clip_url, offset, box)
 
 
 def crop_event(raw_event: dict) -> dict:

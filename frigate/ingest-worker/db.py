@@ -153,18 +153,27 @@ def record_visit(review: dict) -> int | None:
     # as insert_raw_event's initial_video_status: a cheap flag set once at insert, so the visit
     # video queue's WHERE clause never even considers these rows while the feature is disabled.
     initial_video_status = "new" if config.STORE_VIDEO_ALERTS else "skipped"
+    # Same reasoning for thumb_crop_status -- also skipped if Frigate didn't actually provide a
+    # thumb_time on this review (shouldn't happen based on live testing, but the re-crop can never
+    # succeed without it regardless of attempts).
+    initial_thumb_crop_status = (
+        "new" if config.VISIT_THUMB_CROP_ENABLED and review.get("thumb_time") is not None else "skipped"
+    )
     conn = get_conn()
     conn.autocommit = False
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                INSERT INTO yard_stats.visits (zone, objects, start_ts, end_ts, cameras, camera_count, video_status)
-                VALUES (%s, %s, to_timestamp(%s), to_timestamp(%s), %s, 1, %s)
+                INSERT INTO yard_stats.visits
+                    (zone, objects, start_ts, end_ts, cameras, camera_count, video_status,
+                     thumb_time, thumb_crop_status)
+                VALUES (%s, %s, to_timestamp(%s), to_timestamp(%s), %s, 1, %s, %s, %s)
                 RETURNING id
                 """,
                 (review["zone"], review["objects"], review["start_time"], review["end_time"],
-                 review["camera"], initial_video_status),
+                 review["camera"], initial_video_status, review.get("thumb_time"),
+                 initial_thumb_crop_status),
             )
             visit_id = cur.fetchone()["id"]
             if review["det_ids"]:
@@ -189,10 +198,11 @@ def get_representative_event_for_visit(visit_id: int) -> dict | None:
     # The visit's earliest-linked raw_event (same "representative" definition as list_visits) --
     # used right after record_visit to grab a crop image for the Telegram visit-summary
     # notification, if one's already available (the crop stage may not have finished by the time
-    # the review closes -- see telegram.send_visit_summary).
+    # the review closes -- see telegram.send_visit_summary), and by visit_thumb_worker.py, which
+    # additionally needs det_id to look up that event's region/box for the re-crop.
     rows = _execute(
         """
-        SELECT id, camera, objects, crop_image_base64
+        SELECT id, camera, objects, crop_image_base64, det_id
         FROM yard_stats.raw_events
         WHERE visit_id = %s
         ORDER BY start_ts ASC, id ASC
@@ -288,6 +298,73 @@ def mark_visit_video_retry_or_failed(visit_id: int, max_attempts: int) -> None:
         SET video_attempt_count = video_attempt_count + 1,
             video_status = CASE WHEN video_attempt_count + 1 >= %s THEN 'failed' ELSE 'retry' END,
             video_status_changed_at = now()
+        WHERE id = %s
+        """,
+        (max_attempts, visit_id),
+    )
+
+
+def reap_stale_visit_thumb_crop_processing() -> None:
+    _execute(
+        """
+        UPDATE yard_stats.visits
+        SET thumb_crop_status = 'retry', thumb_crop_status_changed_at = now()
+        WHERE thumb_crop_status = 'processing'
+          AND thumb_crop_status_changed_at < now() - (%s * interval '1 minute')
+        """,
+        (config.STALE_MINUTES,),
+    )
+
+
+def count_visit_thumb_crop_in_progress() -> int:
+    rows = _execute(
+        "SELECT count(*)::int AS c FROM yard_stats.visits WHERE thumb_crop_status = 'processing'",
+        fetch=True,
+    )
+    return rows[0]["c"] if rows else 0
+
+
+def claim_visit_thumb_crop_batch(limit: int) -> list:
+    # Mirrors claim_visit_video_batch's CTE-claim shape (same FOR UPDATE SKIP LOCKED reason,
+    # newest-first) -- fifth queue stage, on visits.thumb_crop_status. See visit_thumb_worker.py.
+    return _execute(
+        """
+        WITH claimable AS (
+            SELECT id FROM yard_stats.visits
+            WHERE thumb_crop_status IN ('new', 'retry')
+            ORDER BY start_ts DESC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE yard_stats.visits
+        SET thumb_crop_status = 'processing', thumb_crop_status_changed_at = now()
+        FROM claimable
+        WHERE yard_stats.visits.id = claimable.id
+        RETURNING yard_stats.visits.*
+        """,
+        (limit,),
+        fetch=True,
+    )
+
+
+def mark_visit_thumb_crop_done(visit_id: int, crop_image_base64: str) -> None:
+    _execute(
+        """
+        UPDATE yard_stats.visits
+        SET thumb_crop_status = 'done', thumb_crop_status_changed_at = now(), crop_image_base64 = %s
+        WHERE id = %s
+        """,
+        (crop_image_base64, visit_id),
+    )
+
+
+def mark_visit_thumb_crop_retry_or_failed(visit_id: int, max_attempts: int) -> None:
+    _execute(
+        """
+        UPDATE yard_stats.visits
+        SET thumb_crop_attempt_count = thumb_crop_attempt_count + 1,
+            thumb_crop_status = CASE WHEN thumb_crop_attempt_count + 1 >= %s THEN 'failed' ELSE 'retry' END,
+            thumb_crop_status_changed_at = now()
         WHERE id = %s
         """,
         (max_attempts, visit_id),
@@ -772,8 +849,10 @@ def list_visits(
                 v.start_ts AS visit_start_ts, v.end_ts AS visit_end_ts,
                 v.video_status AS visit_video_status,
                 (v.video_path IS NOT NULL) AS visit_has_video,
+                v.thumb_crop_status,
+                (v.crop_image_base64 IS NOT NULL) AS has_thumb_crop,
                 re.id AS event_id, re.ai_status, re.crop_status,
-                (re.crop_image_base64 IS NOT NULL) AS has_image,
+                (re.crop_image_base64 IS NOT NULL) AS event_has_image,
                 row_number() OVER (PARTITION BY v.id ORDER BY re.start_ts ASC, re.id ASC) AS rn,
                 count(*) OVER (PARTITION BY v.id) AS event_count
             FROM yard_stats.visits v
@@ -783,7 +862,8 @@ def list_visits(
         SELECT visit_id AS id, zone, objects, cameras, camera_count,
                visit_start_ts AS start_ts, visit_end_ts AS end_ts, event_count,
                event_id AS representative_event_id, ai_status, crop_status,
-               visit_video_status AS video_status, has_image, visit_has_video AS has_video
+               visit_video_status AS video_status, thumb_crop_status, has_thumb_crop,
+               (has_thumb_crop OR event_has_image) AS has_image, visit_has_video AS has_video
         FROM linked
         WHERE rn = 1
         ORDER BY visit_start_ts DESC

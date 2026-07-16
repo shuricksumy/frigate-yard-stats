@@ -71,6 +71,8 @@ class VisitSummary(BaseModel):
     ai_status: str
     crop_status: str
     video_status: str
+    thumb_crop_status: str
+    has_thumb_crop: bool
     has_image: bool
     has_video: bool
 

@@ -79,3 +79,39 @@ def test_crop_and_scale_raises_on_invalid_box(monkeypatch):
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+def test_crop_visit_thumbnail_uses_visit_scoped_clip_and_thumb_time_offset(monkeypatch):
+    # thumb_time is an absolute epoch timestamp (unlike CROP_FRAME_OFFSET_PCT, a percentage of one
+    # raw_event's own span) and can fall outside the representative event's own window -- so this
+    # must fetch the same visit-scoped continuous-recording clip alert_video_worker.py downloads
+    # (video.build_clip_url, -5s/+5s padding), not the representative event's own
+    # /api/events/{det_id}/clip.mp4 endpoint crop_event uses.
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
+
+    captured = {}
+
+    def fake_crop_and_scale(clip_url, offset, box):
+        captured["clip_url"] = clip_url
+        captured["offset"] = offset
+        captured["box"] = box
+        return "base64result"
+
+    monkeypatch.setattr(crop, "crop_and_scale", fake_crop_and_scale)
+
+    visit = {
+        "start_ts": 1784219191.0,
+        "end_ts": 1784219201.0,
+        "cameras": "outside2",
+        "thumb_time": 1784219196.5,
+    }
+    representative_event = {"det_id": "1784219191.5-abc123"}
+
+    result = crop.crop_visit_thumbnail(visit, representative_event)
+
+    assert result == "base64result"
+    # clip fetched for the visit's own start/end window (-5s/+5s), not the event's own clip.mp4.
+    assert captured["clip_url"] == "http://frigate.test:5000/api/outside2/start/1784219186/end/1784219206/clip.mp4"
+    # offset relative to that clip's start (start_ts - 5), matching thumb_time in Frigate's own
+    # absolute timeline exactly.
+    assert captured["offset"] == 1784219196.5 - 1784219186

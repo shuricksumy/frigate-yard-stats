@@ -13,7 +13,7 @@ os.environ.setdefault("API_KEY", "test-key")
 import mqtt_ingest  # noqa: E402
 
 
-def _payload(msg_type="end", detections=None, objects=None, zones=None):
+def _payload(msg_type="end", detections=None, objects=None, zones=None, thumb_time=None):
     return json.dumps({
         "type": msg_type,
         "before": {},
@@ -28,6 +28,7 @@ def _payload(msg_type="end", detections=None, objects=None, zones=None):
                 ],
                 "objects": objects if objects is not None else ["truck", "car"],
                 "zones": zones if zones is not None else ["yard", "yard_car_zone"],
+                "thumb_time": thumb_time if thumb_time is not None else 1784198455.5,
             },
         },
     }).encode()
@@ -42,6 +43,7 @@ def test_parse_review_payload_extracts_fields():
     assert result["zone"] == "yard,yard_car_zone"
     assert result["objects"] == "truck,car"
     assert result["det_ids"] == ["1784198409.05586-34ion3", "1784198459.85577-dcle6n"]
+    assert result["thumb_time"] == 1784198455.5
 
 
 def test_parse_review_payload_handles_missing_data():
@@ -52,6 +54,7 @@ def test_parse_review_payload_handles_missing_data():
     assert result["zone"] == ""
     assert result["objects"] == ""
     assert result["det_ids"] == []
+    assert result["thumb_time"] is None
 
 
 def test_on_message_routes_reviews_topic_without_touching_events_handler(monkeypatch):

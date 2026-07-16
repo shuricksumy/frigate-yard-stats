@@ -305,6 +305,14 @@ function eventsApp() {
       return `${path}?api_key=${encodeURIComponent(this.apiKey)}`;
     },
 
+    // Visits get their own image endpoints -- prefers the visit's own thumb_time re-crop
+    // (VISIT_THUMB_CROP_ENABLED) over the representative event's crop, server-side (see
+    // GET /visits/{id}/thumbnail|image), not something the UI needs to branch on itself.
+    visitThumbnailUrl(visitId, full = false) {
+      const path = full ? `/visits/${visitId}/image` : `/visits/${visitId}/thumbnail`;
+      return `${path}?api_key=${encodeURIComponent(this.apiKey)}`;
+    },
+
     videoUrl(eventId) {
       return `/media/video/${eventId}?api_key=${encodeURIComponent(this.apiKey)}`;
     },
@@ -320,6 +328,13 @@ function eventsApp() {
       const e = this.lightboxEvent;
       if (!e) return "";
       return e.visitId ? this.visitVideoUrl(e.visitId) : this.videoUrl(e.id);
+    },
+
+    // Same visitId branch as lightboxVideoUrl, for the still-image side of the lightbox.
+    lightboxImageUrl() {
+      const e = this.lightboxEvent;
+      if (!e) return "";
+      return e.visitId ? this.visitThumbnailUrl(e.visitId, true) : this.thumbnailUrl(e.id, true);
     },
 
     async openLightbox(event) {

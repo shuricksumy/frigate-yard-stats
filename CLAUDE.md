@@ -498,6 +498,64 @@ a head start to finalize the event/clip before the *first* crop attempt on a fre
 immediately after the "end" MQTT message, not just long events tripping the clip-duration fallback
 above. Only applies once per row (`crop_attempt_count == 0`), not on every retry pass.
 
+### Visit thumbnail re-crop using Frigate's own `thumb_time` (fifth queue stage)
+
+The "Frigate doesn't expose its best-frame timestamp anywhere" finding above turned out to be
+*mostly* true, not entirely: it's absent from `/api/events`, but present on **`/api/review`** /
+the `frigate/reviews` MQTT payload, as `data.thumb_time` -- confirmed live both ways (REST
+`/api/review?limit=N` and by subscribing directly to `frigate/reviews` with `mosquitto`-equivalent
+Python MQTT client). It's distinct from `start_time` (a review's `id`/`thumb_path` filename is
+just `{start_time}-{suffix}` -- an identifier, not the frame timestamp) and, like the per-event
+snapshot timing finding above, clearly content/score-dependent, not a fixed offset -- across 8
+real reviews sampled live, `thumb_time - start_time` ranged from ~0.24s to ~38.5s. Frigate's own
+`thumb_path` webp (e.g. `/clips/review/thumb-{camera}-{start_time}-{suffix}.webp`, reachable
+directly off Frigate's webserver on port 5000, no auth) is unusably low-res for LPR/attribute work
+(318x180 in testing, well below even the detect-stream snapshot rejected earlier) -- but it *has*
+no bbox/label overlay, and confirming its framing against the full-res record stream at the same
+`thumb_time` is what makes this worth using: it's Frigate's own per-review "best frame" judgment,
+the same class of decision `CROP_FRAME_OFFSET_PCT` can only approximate with a fixed percentage.
+
+The catch: `thumb_time` is only known once the review closes (`type="end"`), by which point the
+representative event's own crop (`crop_status`, off `CROP_FRAME_OFFSET_PCT`) has typically already
+run -- the crop stage claims within seconds of the *event's* own "end", while a review can stay
+open for tens of seconds to minutes after its first detection. So this can't feed the existing
+crop pipeline's first attempt; it's a **separate, opt-in fifth queue stage**
+(`VISIT_THUMB_CROP_ENABLED`, `visit_thumb_worker.py`/`crop.crop_visit_thumbnail`), producing a
+**separate artifact** (`visits.crop_image_base64`, its own `thumb_crop_status` state machine --
+`new`/`processing`/`retry`/`failed`/`done`/`skipped`, same shape as every other queue in this
+project) -- not a replacement for the events-flow crop, mirroring how `STORE_VIDEO_ALERTS` sits
+alongside `STORE_VIDEO` rather than replacing it. `record_visit` stores `thumb_time` off the
+review payload and sets `thumb_crop_status='skipped'` immediately if the flag is off or Frigate
+ever omits `thumb_time` (confirmed always present in testing, but the re-crop can never succeed
+without it regardless of attempts).
+
+Because `thumb_time` is chosen over the *review's* whole span, it can legitimately fall outside
+the representative event's own narrow start/end window (e.g. a review grouping several det_ids
+across tens of seconds) -- so `crop_visit_thumbnail` fetches the same visit-scoped
+continuous-recording clip `alert_video_worker.py` already downloads (`video.build_clip_url`,
+camera + start/end with the same -5s/+5s padding), not the representative event's own
+`/api/events/{det_id}/clip.mp4` endpoint `crop_event` uses -- while still using that event's own
+`region`/`box` for spatial framing, since Frigate's review payload has no box/region of its own,
+only individual tracked-object events do. The seek offset is `thumb_time - (visit.start_ts - 5s)`,
+landing on the exact instant `thumb_time` refers to within that fetched clip.
+
+`GET /visits/{id}/thumbnail` and `GET /visits/{id}/image` prefer this new crop, falling back to
+the representative event's own crop (available almost immediately, long before the re-crop can
+be), then a frame pulled from the visit's own stored video -- same belt-and-suspenders chain as
+the existing per-event thumbnail/image endpoints. `GET /visits`' `has_image` reflects either
+source being available (`has_thumb_crop OR` the representative event's own image), so existing
+consumers of that field don't need to change; `has_thumb_crop`/`thumb_crop_status` are additive
+fields for observability. The web UI's Visits tab (`visitThumbnailUrl`/`lightboxImageUrl` in
+`app.js`) uses these visit-scoped endpoints instead of the representative event's directly, so the
+grid/lightbox picks up the better-timed image automatically once it's ready, with no client-side
+fallback logic of its own.
+
+Deliberately NOT wired into `TELEGRAM_ALERTS_ENABLED`'s visit-summary message in this pass -- that
+message fires immediately when the review closes (long before the re-crop can complete), and
+retrofitting it to edit/replace an already-sent Telegram photo once the better crop lands is a
+separate decision (Bot API `editMessageMedia`, a materially different and riskier operation than
+today's fire-and-forget `sendPhoto`/`sendVideo`) than the read-only API/UI wiring above.
+
 ### Camera allow-list
 
 `CAMERAS` (optional, comma-separated Frigate camera names, e.g. `outside,outside2`) gates both
@@ -558,7 +616,10 @@ everything in-zone comes back `alert`. Tightening `detections.required_zones` to
   a row to the `visits` segment Frigate's own review/alert stream grouped it into (see above).
 - `visits` — one row per Frigate review/alert segment (`frigate/reviews`), grouping the
   `raw_events` det_ids Frigate's own tracker considers the same real-world activity. Populated by
-  `db.record_visit`; cross-camera merging is not yet implemented (see above).
+  `db.record_visit`; cross-camera merging is not yet implemented (see above). Also carries
+  `thumb_time` (Frigate's own review "best frame" timestamp) and, when `VISIT_THUMB_CROP_ENABLED`,
+  its own re-cropped `crop_image_base64` plus `thumb_crop_status` state machine -- a separate
+  artifact from any linked raw_event's own crop (see "Visit thumbnail re-crop" above).
 - `vehicle_sightings` / `person_sightings` — one row per AI-analyzed event. `vehicle_sightings`
   keeps `plate_text_frigate` (from `raw_events.sub_label`) next to `plate_text_llm` (the OCR
   model's read) as a cross-check.

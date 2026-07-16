@@ -115,6 +115,38 @@ def test_get_visit_returns_none_for_unknown_id(conn_ok):
     assert db.get_visit(999999999) is None
 
 
+def test_list_visits_has_image_true_from_visit_thumb_crop_even_without_representative_crop(conn_ok):
+    # A visit's own thumb-crop (visit_thumb_worker.py) is a separate artifact from the
+    # representative event's crop_image_base64 -- has_image should reflect either source being
+    # available, not just the representative event's.
+    det_id = f"pytest-{uuid.uuid4()}"
+    rows = db._execute(
+        """
+        INSERT INTO yard_stats.raw_events
+            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot,
+             crop_status, ai_status, crop_image_base64)
+        VALUES ('pytest-cam', 'pytest-zone', 'car', now(), now(), %s, true, true, 'done', 'done', NULL)
+        RETURNING id
+        """,
+        (det_id,), fetch=True,
+    )
+    raw_id = rows[0]["id"]
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0,
+        "det_ids": [det_id],
+    })
+    db.mark_visit_thumb_crop_done(visit_id, "ZmFrZS1qcGVn")
+    try:
+        rows = db.list_visits(start=None, end=None, limit=50, offset=0)
+        match = next(r for r in rows if r["id"] == visit_id)
+        assert match["has_thumb_crop"] is True
+        assert match["thumb_crop_status"] == "done"
+        assert match["has_image"] is True
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
+
+
 def test_list_visits_has_video_reflects_the_visit_not_the_representative_event(conn_ok):
     # Regression test: has_video/video_status must describe the VISIT's own video
     # (STORE_VIDEO_ALERTS/alert_video_worker.py), not the representative raw_event's -- those are
