@@ -281,7 +281,8 @@ def claim_ai_batch(
     stale_minutes: int = Query(5, ge=1, description="Reap rows stuck 'processing' longer than this"),
     max_age_hours: float | None = Query(None, gt=0, description="If set, never claim rows older than this many hours -- lets a backlog age out instead of being processed once it's stale. Omit for no age limit (default)."),
     require_video: bool = Query(False, description="If true, only claim rows that also have a stored video ready (video_status='done'), not just a crop image. Default false -- an image is always guaranteed regardless (crop_status='done' is required either way); this only narrows further for a workflow that wants both artifacts before processing. The VLM call itself still only ever uses the image."),
-    source: str = Query("events", pattern="^(events|visits)$", description="'events' (default) analyzes every eligible raw_event independently -- today's exact behavior. 'visits' skips duplicate det_ids already grouped into a visit by Frigate's review/alert stream -- only the earliest (representative) raw_event per visit is claimed, plus every raw_event never grouped into a visit at all. Lets you A/B whether per-event or per-visit analysis produces better/less-redundant results; completion (POST /sightings/*) is identical either way, since this only changes which rows are eligible to claim, not ai_status semantics."),
+    source: str = Query("events", pattern="^(events|visits)$", description="'events' (default) analyzes every eligible raw_event independently -- today's exact behavior. 'visits' skips duplicate det_ids already grouped into a visit by Frigate's review/alert stream -- only the earliest (representative) raw_event per visit is claimed, plus every raw_event never grouped into a visit at all (unless visits_only is also set). Lets you A/B whether per-event or per-visit analysis produces better/less-redundant results; completion (POST /sightings/*) is identical either way, since this only changes which rows are eligible to claim, not ai_status semantics."),
+    visits_only: bool = Query(False, description="Only meaningful when source=visits. If true, never claim a raw_event that Frigate's review/alert stream never grouped into a visit at all (visit_id IS NULL) -- strictly limits this call to actual alert/visit activity. Default false keeps source=visits' existing fallback: ungrouped events are still claimed so they don't sit unanalyzed forever if only a visits-scoped workflow is active."),
 ):
     """Replaces n8n's old Reap Stale Processing Items / Count In-Progress Items / Check Capacity /
     Claim Next Batch nodes with one call: reaps stale rows, computes available capacity, and
@@ -294,6 +295,7 @@ def claim_ai_batch(
     events = db.claim_ai_batch(
         types, parallel_limit, stale_minutes, max_age_hours, require_video,
         only_visit_representative=(source == "visits"),
+        visits_only=visits_only,
     )
     return {"events": events}
 

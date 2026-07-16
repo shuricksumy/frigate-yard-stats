@@ -82,6 +82,44 @@ def test_only_visit_representative_still_claims_ungrouped_event(conn_ok):
         _cleanup(ungrouped_id)
 
 
+def test_visits_only_excludes_ungrouped_event(conn_ok):
+    # visits_only=true is the strict alerts-only mode -- confirmed needed in production: without
+    # it, source=visits' default fallback still claims plain ungrouped raw_events, which an
+    # alerts-scoped n8n workflow doesn't want at all.
+    ungrouped_id, _ = _insert()
+    try:
+        claimed_ids = {
+            r["id"] for r in db.claim_ai_batch(
+                ["car"], parallel_limit=10, stale_minutes=5,
+                only_visit_representative=True, visits_only=True,
+            )
+        }
+        assert ungrouped_id not in claimed_ids
+    finally:
+        _cleanup(ungrouped_id)
+
+
+def test_visits_only_still_claims_visit_representative(conn_ok):
+    older_id, older_det = _insert("now() - interval '10 seconds'")
+    newer_id, newer_det = _insert("now()")
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0,
+        "det_ids": [older_det, newer_det],
+    })
+    try:
+        claimed_ids = {
+            r["id"] for r in db.claim_ai_batch(
+                ["car"], parallel_limit=10, stale_minutes=5,
+                only_visit_representative=True, visits_only=True,
+            )
+        }
+        assert older_id in claimed_ids
+        assert newer_id not in claimed_ids
+    finally:
+        _cleanup(older_id, newer_id, visit_id=visit_id)
+
+
 def test_default_source_events_claims_every_grouped_event(conn_ok):
     older_id, older_det = _insert("now() - interval '10 seconds'")
     newer_id, newer_det = _insert("now()")

@@ -240,14 +240,27 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 .lightbox-info-row {
   display: flex;
-  gap: 8px;
+  flex-direction: column;
+  gap: 2px;
   padding: 5px 0;
   border-bottom: 1px solid var(--border);
   font-size: 0.85rem;
 }
 
-.lightbox-info-row dt { color: var(--muted); min-width: 130px; flex-shrink: 0; }
-.lightbox-info-row dd { margin: 0; color: var(--text); }
+.lightbox-info-row dt { color: var(--muted); }
+.lightbox-info-row dd {
+  margin: 0;
+  color: var(--text);
+  /* max-content text width ignores wrapping by definition (it's "the width with no line breaks
+     at all"), so overflow-wrap alone never stops a long sentence from blowing out an ancestor's
+     shrink-to-fit width -- confirmed live: a normal-length AI description forced .lightbox-info's
+     auto width up to its 95vw cap, which then also stretched the image/video sibling (flex column
+     default align-items: stretch) to nearly full viewport width, far past its own natural size.
+     A real (non-viewport, non-content-driven) cap here is what actually breaks that chain --
+     60ch is a standard readable line length and, unlike vw, doesn't grow with a longer sentence. */
+  max-width: 60ch;
+  overflow-wrap: anywhere;
+}
 .lightbox-info-loading { color: var(--muted); margin: 0; padding: 8px 0; font-size: 0.85rem; }
 
 .lightbox-toggle {

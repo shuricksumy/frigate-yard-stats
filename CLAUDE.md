@@ -201,6 +201,20 @@ visit's earliest-linked raw_event is eligible, computed via a correlated subquer
 plus every raw_event that was never grouped into a visit at all (`visit_id IS NULL`), so events
 Frigate's review never bundled still get analyzed one-to-one exactly as `source=events` would.
 
+The optional `visits_only` param (default `false`, only meaningful alongside `source=visits`)
+drops that ungrouped-event fallback entirely -- with it set, a raw_event Frigate's review never
+grouped into a visit is never claimed by this call at all, however long it waits. Confirmed
+necessary in production: `n8n/metadata-processor-alerts.json` running with plain `source=visits`
+was still marking ordinary, non-alert raw_events `ai_status='done'` (visible as unexpected "done"
+rows under the web UI's Events tab, not the Visits tab) -- in one production window, 201 of 215
+raw_events had no `visit_id` at all, so the fallback branch, not actual visit representatives, was
+most of what that workflow claimed. `visits_only=true` (`n8n/metadata-processor-alerts.json`'s
+current config) makes the alerts flow strictly visit-scoped: `AND visit_id IS NOT NULL AND id =
+(...representative subquery...)` instead of `AND (visit_id IS NULL OR id = (...))`. Ungrouped
+events then only ever get analyzed by the events-flow sibling (`source=events`, the default) --
+another reason the two metadata-processor workflows are meant to be mutually exclusive, not both
+active at once (see below).
+
 (Bug fixed in passing while building `source`: `claim_ai_batch`'s `RETURNING yard_stats.raw_events.*`
 never included the computed `has_video`/`has_image` fields `EventDetail` requires -- every call
 that actually claimed rows was crashing at FastAPI's response-serialization step with a 500,

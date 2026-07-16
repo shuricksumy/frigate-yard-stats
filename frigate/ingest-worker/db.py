@@ -936,6 +936,7 @@ def claim_ai_batch(
     max_age_hours: float | None = None,
     require_video: bool = False,
     only_visit_representative: bool = False,
+    visits_only: bool = False,
 ) -> list:
     # Replaces what used to be four separate n8n nodes (Reap Stale Processing Items, Count
     # In-Progress Items, Check Capacity, Claim Next Batch) with one call. Same FOR UPDATE SKIP
@@ -982,19 +983,28 @@ def claim_ai_batch(
     # semantics or completion at all -- POST /sightings/vehicles|persons still mark the exact same
     # raw_event's ai_status='done' regardless of source, so this is purely a claim-time filter, not
     # a schema/queue change (no ai_status column added to visits).
+    #
+    # visits_only=true ("source=visits" + visits_only=true on POST /ai-queue/claim) narrows
+    # further: drops the "OR visit_id IS NULL" fallback above entirely, so a raw_event Frigate's
+    # review never grouped into a visit is never claimed by this call at all -- confirmed needed
+    # in production: with the fallback on, an alerts-only n8n workflow still ends up analyzing
+    # plain ungrouped events (in one real window, 201 of 215 raw_events had no visit_id at all,
+    # so most of what little the alerts flow claimed was the fallback branch, not actual visits).
+    # Only meaningful together with only_visit_representative -- ignored otherwise.
     visit_clause = ""
     if only_visit_representative:
-        visit_clause = """
-        AND (
-            visit_id IS NULL
-            OR id = (
+        representative_subquery = """
+            id = (
                 SELECT re2.id FROM yard_stats.raw_events re2
                 WHERE re2.visit_id = raw_events.visit_id
                 ORDER BY re2.start_ts ASC, re2.id ASC
                 LIMIT 1
             )
-        )
         """
+        if visits_only:
+            visit_clause = f"AND visit_id IS NOT NULL AND {representative_subquery}"
+        else:
+            visit_clause = f"AND (visit_id IS NULL OR {representative_subquery})"
     age_clause = ""
     params: list = [object_types]
     if max_age_hours is not None:
