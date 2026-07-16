@@ -112,6 +112,10 @@ button:disabled { opacity: 0.4; cursor: default; }
   background: #16181c;
 }
 
+.advanced-filters {
+  display: contents;
+}
+
 .checkbox-label {
   display: flex;
   flex-direction: row !important;

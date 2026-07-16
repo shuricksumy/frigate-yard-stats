@@ -1,0 +1,105 @@
+"""Integration tests for db.record_visit -- populates visits + links raw_events.visit_id/
+reconciled from a parsed frigate/reviews payload (see test_mqtt_ingest_review.py for the parsing
+side). Requires a reachable Postgres with schema.sql applied -- see test_db_video_queue.py's
+module docstring for setup notes. Only run against a local/throwaway Postgres.
+"""
+import os
+import uuid
+
+os.environ.setdefault("MQTT_HOST", "localhost")
+os.environ.setdefault("POSTGRES_PASSWORD", "test")
+os.environ.setdefault("FRIGATE_API_BASE", "http://frigate.test:5000")
+os.environ.setdefault("API_KEY", "test-key")
+
+import pytest  # noqa: E402
+
+import db  # noqa: E402
+
+
+def _insert_raw_event(det_id: str) -> int:
+    rows = db._execute(
+        """
+        INSERT INTO yard_stats.raw_events
+            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot)
+        VALUES ('pytest-cam', 'pytest-zone', 'car', now(), now(), %s, true, true)
+        RETURNING id
+        """,
+        (det_id,), fetch=True,
+    )
+    return rows[0]["id"]
+
+
+def _review(det_ids: list[str]) -> dict:
+    return {
+        "camera": "pytest-cam",
+        "zone": "yard,yard_car_zone",
+        "objects": "car,truck",
+        "start_time": 1784198451.155298,
+        "end_time": 1784198470.65966,
+        "det_ids": det_ids,
+    }
+
+
+def _cleanup_raw_events(*ids):
+    db._execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", (list(ids),))
+
+
+def _cleanup_visit(visit_id):
+    if visit_id is not None:
+        db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
+
+
+@pytest.fixture
+def conn_ok():
+    try:
+        db.get_conn()
+    except Exception as exc:
+        pytest.skip(f"Postgres not reachable for integration test: {exc}")
+
+
+def test_record_visit_inserts_visit_row(conn_ok):
+    visit_id = db.record_visit(_review(det_ids=[]))
+    try:
+        rows = db._execute("SELECT * FROM yard_stats.visits WHERE id = %s", (visit_id,), fetch=True)
+        assert rows[0]["zone"] == "yard,yard_car_zone"
+        assert rows[0]["objects"] == "car,truck"
+        assert rows[0]["cameras"] == "pytest-cam"
+        assert rows[0]["camera_count"] == 1
+    finally:
+        _cleanup_visit(visit_id)
+
+
+def test_record_visit_links_matching_raw_events(conn_ok):
+    det_id_a = f"pytest-{uuid.uuid4()}"
+    det_id_b = f"pytest-{uuid.uuid4()}"
+    raw_id_a = _insert_raw_event(det_id_a)
+    raw_id_b = _insert_raw_event(det_id_b)
+    visit_id = None
+    try:
+        visit_id = db.record_visit(_review(det_ids=[det_id_a, det_id_b]))
+        rows = db._execute(
+            "SELECT id, visit_id, reconciled FROM yard_stats.raw_events WHERE id = ANY(%s) ORDER BY id",
+            ([raw_id_a, raw_id_b],), fetch=True,
+        )
+        assert {r["visit_id"] for r in rows} == {visit_id}
+        assert all(r["reconciled"] for r in rows)
+    finally:
+        _cleanup_raw_events(raw_id_a, raw_id_b)
+        _cleanup_visit(visit_id)
+
+
+def test_record_visit_does_not_touch_unrelated_raw_events(conn_ok):
+    unrelated_det_id = f"pytest-{uuid.uuid4()}"
+    unrelated_id = _insert_raw_event(unrelated_det_id)
+    visit_id = None
+    try:
+        visit_id = db.record_visit(_review(det_ids=[f"pytest-{uuid.uuid4()}"]))
+        row = db._execute(
+            "SELECT visit_id, reconciled FROM yard_stats.raw_events WHERE id = %s",
+            (unrelated_id,), fetch=True,
+        )[0]
+        assert row["visit_id"] is None
+        assert row["reconciled"] is False
+    finally:
+        _cleanup_raw_events(unrelated_id)
+        _cleanup_visit(visit_id)

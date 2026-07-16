@@ -129,6 +129,47 @@ def insert_raw_event(event: dict) -> None:
     )
 
 
+def record_visit(review: dict) -> int | None:
+    # Populates the previously-unwired visits table / raw_events.visit_id+reconciled from
+    # Frigate's own review/alert grouping (frigate/reviews MQTT topic) -- one review segment
+    # already bundles the det_ids Frigate's tracker considers the same real-world activity
+    # (occlusion/re-ID, label flicker e.g. car -> truck mid-track), so this reuses that grouping
+    # instead of reimplementing a merge heuristic ourselves. Grouping is per-camera only --
+    # confirmed live against production Frigate that a review's "camera" is a single value, never
+    # a list -- so cameras/camera_count are set for just that one camera; a cross-camera merge on
+    # top of this (same zone, overlapping time window, different camera) is a separate, not-yet-
+    # built layer. Insert + link in one transaction, same pattern as complete_vehicle_sighting.
+    conn = get_conn()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO yard_stats.visits (zone, objects, start_ts, end_ts, cameras, camera_count)
+                VALUES (%s, %s, to_timestamp(%s), to_timestamp(%s), %s, 1)
+                RETURNING id
+                """,
+                (review["zone"], review["objects"], review["start_time"], review["end_time"], review["camera"]),
+            )
+            visit_id = cur.fetchone()["id"]
+            if review["det_ids"]:
+                cur.execute(
+                    """
+                    UPDATE yard_stats.raw_events
+                    SET visit_id = %s, reconciled = true
+                    WHERE det_id = ANY(%s)
+                    """,
+                    (visit_id, review["det_ids"]),
+                )
+        conn.commit()
+        return visit_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit = True
+
+
 def reap_stale_processing() -> None:
     # Mirrors the n8n processors' "Reap Stale Processing Items" node, scoped to crop_status
     # instead of the (now n8n-only) ai_status.

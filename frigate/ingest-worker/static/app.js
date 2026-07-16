@@ -42,6 +42,7 @@ function eventsApp() {
     limit: 24,
     offset: 0,
     objectTypes: [],
+    advancedSearch: false,
 
     filters: { objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "", ...defaultWindow() },
 

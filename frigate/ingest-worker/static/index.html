@@ -29,45 +29,51 @@
 
     <form class="filters" @submit.prevent="applyFilters()">
       <label>
-        Event ID
-        <input type="number" x-model="filters.eventId" placeholder="e.g. 1234">
-      </label>
-      <label>
         Search AI analysis
-        <input type="text" x-model="filters.q" placeholder="e.g. red toyota, plate ABC123" :disabled="filters.eventId">
+        <input type="text" x-model="filters.q" placeholder="e.g. red toyota, plate ABC123" :disabled="!!filters.eventId">
       </label>
       <label>
         From
-        <input type="datetime-local" x-model="filters.start" :disabled="filters.eventId || filters.q">
+        <input type="datetime-local" x-model="filters.start" :disabled="!!(filters.eventId || filters.q)">
       </label>
       <label>
         To
-        <input type="datetime-local" x-model="filters.end" :disabled="filters.eventId || filters.q">
+        <input type="datetime-local" x-model="filters.end" :disabled="!!(filters.eventId || filters.q)">
       </label>
-      <label>
-        Type
-        <select x-model="filters.objectType" :disabled="filters.eventId">
-          <option value="all">All</option>
-          <template x-for="type in objectTypes" :key="type">
-            <option :value="type" x-text="type.charAt(0).toUpperCase() + type.slice(1)"></option>
-          </template>
-        </select>
-      </label>
-      <label>
-        AI status
-        <select x-model="filters.aiStatus" :disabled="filters.eventId">
-          <option value="all">All</option>
-          <option value="new">New</option>
-          <option value="processing">Processing</option>
-          <option value="retry">Retry</option>
-          <option value="failed">Failed</option>
-          <option value="done">Done</option>
-        </select>
-      </label>
-      <label class="checkbox-label">
-        <input type="checkbox" x-model="filters.onlyWithMedia" :disabled="filters.eventId">
-        Only with media
-      </label>
+
+      <button type="button" class="link-button" @click="advancedSearch = !advancedSearch" x-text="advancedSearch ? 'Hide advanced filters' : 'Advanced filters'"></button>
+
+      <div class="advanced-filters" x-show="advancedSearch" style="display:none">
+        <label>
+          Event ID
+          <input type="number" x-model="filters.eventId" placeholder="e.g. 1234">
+        </label>
+        <label>
+          Type
+          <select x-model="filters.objectType" :disabled="!!filters.eventId">
+            <option value="all">All</option>
+            <template x-for="type in objectTypes" :key="type">
+              <option :value="type" x-text="type.charAt(0).toUpperCase() + type.slice(1)"></option>
+            </template>
+          </select>
+        </label>
+        <label>
+          AI status
+          <select x-model="filters.aiStatus" :disabled="!!filters.eventId">
+            <option value="all">All</option>
+            <option value="new">New</option>
+            <option value="processing">Processing</option>
+            <option value="retry">Retry</option>
+            <option value="failed">Failed</option>
+            <option value="done">Done</option>
+          </select>
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" x-model="filters.onlyWithMedia" :disabled="!!filters.eventId">
+          Only with media
+        </label>
+      </div>
+
       <button type="submit">Apply</button>
     </form>
 

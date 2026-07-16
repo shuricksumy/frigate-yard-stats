@@ -44,11 +44,13 @@ runs on the Frigate host.
 ## Architecture
 
 ```
-Frigate (MQTT frigate/events, every object label: car/truck/person/dog/...)
+Frigate (MQTT frigate/events, every object label: car/truck/person/dog/...
+         + frigate/reviews, Frigate's own review/alert grouping)
    │
    ▼
 ingest-worker/  (Python, one container, no LLM calls)
    - MQTT subscriber -> INSERT raw_events, unfiltered by label
+   - Second MQTT subscriber (frigate/reviews) -> INSERT visits, link raw_events.visit_id
    - Crop-stage poll loop, every POLL_INTERVAL_SECONDS:
        reap stale crop_status='processing' -> count in-progress -> claim batch (FOR UPDATE SKIP LOCKED)
        -> GET Frigate event (region/sub_label/score) -> crop via built-in ffmpeg, size-capped
@@ -322,14 +324,50 @@ a head start to finalize the event/clip before the *first* crop attempt on a fre
 immediately after the "end" MQTT message, not just long events tripping the clip-duration fallback
 above. Only applies once per row (`crop_attempt_count == 0`), not on every retry pass.
 
+### Visit grouping via Frigate's review/alert stream
+
+`frigate/reviews` (MQTT, same `{type, before, after}` envelope as `frigate/events`) is Frigate's
+own review/alert system -- it already groups multiple tracked-object det_ids into one segment
+representing a single real-world activity, using Frigate's own tracker (occlusion handling,
+re-ID, label flicker -- confirmed live against production: one review spanned 4 det_ids over
+~19 seconds with `data.objects` showing both `car` and `truck`, clearly the same vehicle mid-track
+rather than two separate ones). `mqtt_ingest.py` subscribes to this as a second topic alongside
+`frigate/events` (`config.MQTT_REVIEWS_TOPIC`, default `frigate/reviews`) and, on each `end`
+message, calls `db.record_visit` to INSERT into `visits` and link every `raw_events` row whose
+`det_id` appears in that review's `data.detections` (`visit_id` + `reconciled`, both columns that
+already existed on `raw_events` but were previously never populated by any code). This is purely
+additive -- it doesn't touch `crop_status`/`video_status`/`ai_status` or any of the three queue
+poll loops/claim functions at all; a raw_event still moves through crop/video/AI exactly as before
+regardless of whether or when it later gets linked to a visit.
+
+Grouping is per-camera only -- confirmed live that a review's `camera` field is a single value,
+never a list, so `visits.cameras`/`camera_count` are currently always one camera / `1`. Frigate
+does *not* merge the same real-world vehicle seen by both `outside` and `outside2` into one
+review, even though both cameras share zone names specifically so a cross-camera merge could work
+(see Prerequisites below) -- that merge (same zone, overlapping time window, different camera) is
+a separate, not-yet-built layer on top of this, not something `frigate/reviews` gives you for
+free. Also not yet built: using `visit_id` to actually reduce work (e.g. skipping AI-queue/
+Telegram-notification duplication for other rows in an already-processed visit) -- this first pass
+only populates the grouping data so it can be observed against real traffic before any pipeline
+behavior is changed based on it.
+
+`review.alerts`/`review.detections` in `frigate.conf` currently share identical `required_zones`
+per camera, so `severity` (`alert` vs `detection`) isn't a useful noise filter today -- nearly
+everything in-zone comes back `alert`. Tightening `detections.required_zones` to be narrower than
+`alerts.required_zones` would change that, but that's a Frigate config decision, not something
+`ingest-worker` can affect.
+
 ### Schema (`yard_stats`)
 
 - `raw_events` — one row per Frigate `end` event, any label. Carries all three queue state machines
   plus `crop_image_base64`, `sub_label` (Frigate's own LPR read), `score` — all captured by
   `ingest-worker` from one Frigate API fetch, so n8n never needs to call Frigate itself — and,
   when video storage is on, `video_path` (filesystem path only, never the file itself) and
-  `telegram_photo_message_id` (for threading the later video reply).
-- `visits` — deduplicated, cross-camera-merged events (not yet wired into the current pipeline).
+  `telegram_photo_message_id` (for threading the later video reply). `visit_id`/`reconciled` link
+  a row to the `visits` segment Frigate's own review/alert stream grouped it into (see above).
+- `visits` — one row per Frigate review/alert segment (`frigate/reviews`), grouping the
+  `raw_events` det_ids Frigate's own tracker considers the same real-world activity. Populated by
+  `db.record_visit`; cross-camera merging is not yet implemented (see above).
 - `vehicle_sightings` / `person_sightings` — one row per AI-analyzed event. `vehicle_sightings`
   keeps `plate_text_frigate` (from `raw_events.sub_label`) next to `plate_text_llm` (the OCR
   model's read) as a cross-check.

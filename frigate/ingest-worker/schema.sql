@@ -90,6 +90,18 @@ CREATE TABLE IF NOT EXISTS yard_stats.visits (
 );
 CREATE INDEX IF NOT EXISTS idx_visits_zone_ts ON yard_stats.visits (zone, start_ts);
 
+-- raw_events.visit_id/reconciled (columns already existed, previously never populated by any
+-- code) now get set by db.record_visit -- one row per Frigate review/alert segment (frigate/
+-- reviews MQTT topic), which already groups multiple det_ids together as the same real-world
+-- activity (tracker re-ID/occlusion, label flicker e.g. car -> truck mid-track). DROP+ADD rather
+-- than a plain ADD CONSTRAINT, same idempotent-rerun idiom as raw_events_crop_status_check above
+-- (existing deployments already have the column with no FK, so this is safe to add after the
+-- fact -- every existing value is NULL).
+CREATE INDEX IF NOT EXISTS idx_raw_events_visit_id ON yard_stats.raw_events (visit_id);
+ALTER TABLE yard_stats.raw_events DROP CONSTRAINT IF EXISTS raw_events_visit_id_fkey;
+ALTER TABLE yard_stats.raw_events ADD CONSTRAINT raw_events_visit_id_fkey
+  FOREIGN KEY (visit_id) REFERENCES yard_stats.visits(id);
+
 CREATE TABLE IF NOT EXISTS yard_stats.vehicle_sightings (
   id SERIAL PRIMARY KEY,
   raw_event_id INTEGER REFERENCES yard_stats.raw_events(id),

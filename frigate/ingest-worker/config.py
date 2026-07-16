@@ -13,6 +13,12 @@ MQTT_PORT = int(_env("MQTT_PORT", "1883"))
 MQTT_USERNAME = os.environ.get("MQTT_USERNAME")
 MQTT_PASSWORD = os.environ.get("MQTT_PASSWORD")
 MQTT_TOPIC = _env("MQTT_TOPIC", "frigate/events")
+# Frigate's review/alert stream -- separate from frigate/events, already groups multiple det_ids
+# into one segment (Frigate's own tracker re-ID/occlusion handling) via a severity classification
+# driven by frigate.conf's review.alerts/detections config. Used to populate the (previously
+# unpopulated) visits table / raw_events.visit_id, not to filter or replace anything in the
+# crop/video/ai queue pipeline -- see mqtt_ingest.py's review handler / db.record_visit.
+MQTT_REVIEWS_TOPIC = _env("MQTT_REVIEWS_TOPIC", "frigate/reviews")
 
 POSTGRES_HOST = _env("POSTGRES_HOST", "postgres-projects")
 POSTGRES_PORT = int(_env("POSTGRES_PORT", "5432"))
