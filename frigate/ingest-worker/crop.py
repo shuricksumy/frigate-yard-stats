@@ -37,10 +37,13 @@ def compute_full_res_box(event: dict) -> list[float]:
     ]
 
 
-def compute_midpoint_offset_seconds(start_ts, end_ts) -> float:
+def compute_frame_offset_seconds(start_ts, end_ts, offset_pct: float = 0.5) -> float:
+    # offset_pct=0.5 (config.CROP_FRAME_OFFSET_PCT's default) is the midpoint -- this project's
+    # original fixed behavior, kept as the default since there's no universal offset that matches
+    # Frigate's own per-event best-score frame choice (see config.py's comment).
     start = _as_datetime(start_ts)
     end = _as_datetime(end_ts)
-    return (end - start).total_seconds() / 2
+    return (end - start).total_seconds() * offset_pct
 
 
 def scale_image_base64(image_base64: str, max_dimension: int) -> str:
@@ -73,7 +76,7 @@ def _grab_frame(clip_url: str, timestamp_offset: float, frame_path: str) -> None
     )
 
 
-# Fallback offset when the midpoint lands past the end of Frigate's saved clip -- always safely
+# Fallback offset when the computed offset lands past the end of Frigate's saved clip -- always safely
 # within any real clip, however short.
 _FALLBACK_FRAME_OFFSET_SECONDS = 1.0
 
@@ -125,7 +128,9 @@ def crop_event(raw_event: dict) -> dict:
     event = fetch_frigate_event(det_id)
     data = event.get("data") or {}
     box = compute_full_res_box(event)
-    offset = compute_midpoint_offset_seconds(raw_event["start_ts"], raw_event["end_ts"])
+    offset = compute_frame_offset_seconds(
+        raw_event["start_ts"], raw_event["end_ts"], config.CROP_FRAME_OFFSET_PCT,
+    )
     clip_url = f"{config.FRIGATE_API_BASE}/api/events/{det_id}/clip.mp4"
     crop_image_base64 = crop_and_scale(clip_url, offset, box)
     return {

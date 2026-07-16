@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Yard Stats — Events</title>
+<title>Yard Stats</title>
 <link rel="stylesheet" href="style.css">
 <!-- Vendored locally -- no CDN/outside requests. -->
 <script defer src="vendor/alpine.min.js"></script>
@@ -23,17 +23,17 @@
 
   <div x-show="hasApiKey" style="display:none">
     <header>
-      <h1>Yard Stats — Events</h1>
+      <h1>Yard Stats</h1>
       <button class="link-button" @click="logout()">Change API key</button>
     </header>
 
     <div class="view-toggle">
-      <button type="button" :class="{ active: viewMode === 'events' }" @click="switchView('events')">Events</button>
       <button type="button" :class="{ active: viewMode === 'visits' }" @click="switchView('visits')">Visits</button>
+      <button type="button" :class="{ active: viewMode === 'events' }" @click="switchView('events')">Events</button>
     </div>
 
     <form class="filters" @submit.prevent="applyFilters()">
-      <label>
+      <label class="search-field">
         Search AI analysis
         <input type="text" x-model="filters.q" placeholder="e.g. red toyota, plate ABC123" :disabled="!!filters.eventId || viewMode === 'visits'">
       </label>
@@ -47,6 +47,11 @@
       </label>
 
       <button type="button" class="link-button" @click="advancedSearch = !advancedSearch" x-text="advancedSearch ? 'Hide advanced filters' : 'Advanced filters'"></button>
+      <button type="button" class="link-button" @click="resetFilters()">Reset</button>
+      <label class="checkbox-label">
+        <input type="checkbox" x-model="autoRefreshEnabled" @change="toggleAutoRefresh()">
+        Auto-refresh
+      </label>
 
       <div class="advanced-filters" x-show="advancedSearch" style="display:none">
         <label>
@@ -87,8 +92,10 @@
         </label>
       </div>
 
-      <button type="submit">Apply</button>
+      <button type="submit">Search</button>
     </form>
+
+    <p class="status-line" x-show="lastUpdated" style="display:none" x-text="'Updated ' + (lastUpdated ? lastUpdated.toLocaleTimeString() : '')"></p>
 
     <div class="spinner" x-show="loading" style="display:none">Loading…</div>
     <p class="empty" x-show="!loading && currentList().length === 0" style="display:none" x-text="viewMode === 'visits' ? 'No visits in this window.' : 'No events in this window.'"></p>
@@ -96,8 +103,8 @@
     <template x-if="viewMode === 'events'">
       <div class="grid" x-show="!loading">
         <template x-for="event in events" :key="event.id">
-          <div class="card">
-            <img x-show="event.has_image || event.has_video" :src="thumbnailUrl(event.id)" loading="lazy" @click="openLightbox(event)" alt="event thumbnail">
+          <div class="card" :class="{ clickable: event.has_image || event.has_video }" @click="(event.has_image || event.has_video) && openLightbox(event)">
+            <img x-show="event.has_image || event.has_video" :src="thumbnailUrl(event.id)" loading="lazy" alt="event thumbnail">
             <div class="no-image" x-show="!event.has_image && !event.has_video">no media (<span x-text="event.crop_status"></span>)</div>
             <div class="meta">
               <div><strong x-text="event.objects || 'event'"></strong> — <span x-text="event.camera"></span></div>
@@ -115,8 +122,8 @@
     <template x-if="viewMode === 'visits'">
       <div class="grid" x-show="!loading">
         <template x-for="visit in visits" :key="visit.id">
-          <div class="card">
-            <img x-show="visit.has_image || visit.has_video" :src="thumbnailUrl(visit.representative_event_id)" loading="lazy" @click="openVisitLightbox(visit)" alt="visit thumbnail">
+          <div class="card" :class="{ clickable: visit.has_image || visit.has_video }" @click="(visit.has_image || visit.has_video) && openVisitLightbox(visit)">
+            <img x-show="visit.has_image || visit.has_video" :src="thumbnailUrl(visit.representative_event_id)" loading="lazy" alt="visit thumbnail">
             <div class="no-image" x-show="!visit.has_image && !visit.has_video">no media (<span x-text="visit.crop_status"></span>)</div>
             <div class="meta">
               <div><strong x-text="visit.objects || 'visit'"></strong> — <span x-text="visit.cameras"></span></div>

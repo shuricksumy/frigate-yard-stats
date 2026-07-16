@@ -4,6 +4,7 @@
 
 const API_KEY_COOKIE = "api_key";
 const COOKIE_MAX_AGE_SECONDS = 10 * 365 * 24 * 60 * 60; // ~10 years -- "never" isn't representable
+const AUTO_REFRESH_SECONDS = 15;
 
 function getCookie(name) {
   const match = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
@@ -27,7 +28,7 @@ function eventsApp() {
 
     events: [],
     visits: [],
-    viewMode: "events",
+    viewMode: "visits",
     loading: false,
     limit: 24,
     offset: 0,
@@ -36,6 +37,10 @@ function eventsApp() {
     // Quick time-range presets for the default view's "Time range" selector -- the advanced
     // panel's From/To date pickers override this when set (see fetchEvents/fetchVisits).
     hoursOptions: [1, 3, 6, 12, 24],
+
+    autoRefreshEnabled: true,
+    lastUpdated: null,
+    _autoRefreshTimer: null,
 
     filters: {
       objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
@@ -54,7 +59,43 @@ function eventsApp() {
         this.hasApiKey = true;
         this.fetchObjectTypes();
         this.refresh();
+        this.startAutoRefresh();
       }
+    },
+
+    // Polls the currently active view (Events or Visits) on a timer so new items show up without
+    // a manual reload or clicking Search. Deliberately conservative about when it actually fires
+    // (see autoRefreshTick) so it can't clobber an in-progress pagination or filter edit.
+    startAutoRefresh() {
+      this.stopAutoRefresh();
+      if (!this.autoRefreshEnabled) return;
+      this._autoRefreshTimer = setInterval(() => this.autoRefreshTick(), AUTO_REFRESH_SECONDS * 1000);
+    },
+
+    stopAutoRefresh() {
+      if (this._autoRefreshTimer) {
+        clearInterval(this._autoRefreshTimer);
+        this._autoRefreshTimer = null;
+      }
+    },
+
+    toggleAutoRefresh() {
+      if (this.autoRefreshEnabled) {
+        this.startAutoRefresh();
+      } else {
+        this.stopAutoRefresh();
+      }
+    },
+
+    autoRefreshTick() {
+      if (document.hidden) return; // tab not visible -- nothing to update on screen right now
+      // Only the first/most-recent page -- refetching a later page could silently shift which
+      // rows are shown as newer items arrive ahead of it.
+      if (this.offset !== 0) return;
+      // Don't clobber an in-progress filter edit (e.g. mid-typing in the search box).
+      const active = document.activeElement;
+      if (active && ["INPUT", "SELECT", "TEXTAREA"].includes(active.tagName)) return;
+      this.refresh();
     },
 
     // Dispatches to whichever list is active -- lets applyFilters/prevPage/nextPage stay
@@ -108,6 +149,7 @@ function eventsApp() {
       this.apiKeyInput = "";
       this.fetchObjectTypes();
       this.refresh();
+      this.startAutoRefresh();
     },
 
     logout() {
@@ -115,6 +157,7 @@ function eventsApp() {
       this.apiKey = null;
       this.hasApiKey = false;
       this.events = [];
+      this.stopAutoRefresh();
     },
 
     async testApiKey(key) {
@@ -129,6 +172,15 @@ function eventsApp() {
     applyFilters() {
       this.offset = 0;
       this.refresh();
+    },
+
+    resetFilters() {
+      this.filters = {
+        objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
+        hours: 1, start: "", end: "",
+      };
+      this.advancedSearch = false;
+      this.applyFilters();
     },
 
     prevPage() {
@@ -184,6 +236,7 @@ function eventsApp() {
         }
         if (!resp.ok) throw new Error(`GET /events failed: ${resp.status}`);
         this.events = await resp.json();
+        this.lastUpdated = new Date();
       } catch (err) {
         console.error(err);
         this.events = [];
@@ -224,6 +277,7 @@ function eventsApp() {
         }
         if (!resp.ok) throw new Error(`GET /visits failed: ${resp.status}`);
         this.visits = await resp.json();
+        this.lastUpdated = new Date();
       } catch (err) {
         console.error(err);
         this.visits = [];

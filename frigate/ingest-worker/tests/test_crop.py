@@ -15,6 +15,19 @@ os.environ.setdefault("API_KEY", "test-key")
 import crop  # noqa: E402
 
 
+def test_compute_frame_offset_seconds_defaults_to_midpoint():
+    # offset_pct=0.5 (config.CROP_FRAME_OFFSET_PCT's default) is this project's original fixed
+    # behavior -- exact midpoint of the event's start_ts->end_ts span.
+    offset = crop.compute_frame_offset_seconds(0, 100)
+    assert offset == 50.0
+
+
+def test_compute_frame_offset_seconds_respects_custom_pct():
+    assert crop.compute_frame_offset_seconds(0, 100, offset_pct=0.0) == 0.0
+    assert crop.compute_frame_offset_seconds(0, 100, offset_pct=0.3) == 30.0
+    assert crop.compute_frame_offset_seconds(0, 100, offset_pct=1.0) == 100.0
+
+
 def _fake_run_factory(offsets_that_produce_no_output):
     calls = []
 

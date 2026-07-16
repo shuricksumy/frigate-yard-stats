@@ -65,9 +65,11 @@ services:
       RECORD_WIDTH: ${RECORD_WIDTH:-3840}
       RECORD_HEIGHT: ${RECORD_HEIGHT:-2160}
       # Crop tuning -- MAX_CROP_DIMENSION caps the cropped JPEG's long side (VLMs downsample
-      # beyond this anyway); CROP_PADDING_PCT is extra margin around Frigate's `region` box.
+      # beyond this anyway); CROP_PADDING_PCT is extra margin around Frigate's `region` box;
+      # CROP_FRAME_OFFSET_PCT is where in the event's span to seek (0.5 = midpoint, the default).
       MAX_CROP_DIMENSION: ${MAX_CROP_DIMENSION:-1280}
       CROP_PADDING_PCT: ${CROP_PADDING_PCT:-0.2}
+      CROP_FRAME_OFFSET_PCT: ${CROP_FRAME_OFFSET_PCT:-0.5}
       # Queue tuning -- how many events may be crop_status='processing' at once, how long
       # before a stuck one is reclaimed, how many crop failures before giving up on an event,
       # and how often the poll loop checks for new work.

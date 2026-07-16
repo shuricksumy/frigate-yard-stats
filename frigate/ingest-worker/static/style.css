@@ -70,6 +70,17 @@ h1 { font-size: 1.3rem; margin: 0; }
   gap: 4px;
 }
 
+.filters .search-field {
+  /* Grows to fill whatever space is left in the row -- large in simple mode (few other fields
+     competing for room), shrinks back on its own once advanced mode adds more fields, no
+     viewMode-conditional CSS needed. */
+  flex: 1 1 240px;
+}
+
+.filters .search-field input {
+  width: 100%;
+}
+
 input, select, button {
   background: #22262c;
   color: var(--text);
@@ -94,6 +105,12 @@ button:disabled { opacity: 0.4; cursor: default; }
   padding: 40px 0;
 }
 
+.status-line {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+
 .grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -107,11 +124,14 @@ button:disabled { opacity: 0.4; cursor: default; }
   overflow: hidden;
 }
 
+.card.clickable {
+  cursor: pointer;
+}
+
 .card img {
   width: 100%;
   aspect-ratio: 4 / 3;
   object-fit: cover;
-  cursor: pointer;
   display: block;
 }
 

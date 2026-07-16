@@ -410,14 +410,31 @@ Because `region` can be large, the cropped JPEG is downscaled to `MAX_CROP_DIMEN
 1280px, long side) before being base64-encoded — VLMs downsample beyond that internally anyway,
 so there's no analysis benefit to sending a bigger image, only more load on the vision encoder.
 
-`crop.py` grabs its frame from the *midpoint* of the event's own start/end span -- but for a
-long-lived tracked object (a car sitting in a zone for 20+ minutes, say), Frigate's saved event
-clip can be much shorter than that logical span (confirmed in production: a ~20-minute event's
-clip was only ~7 minutes long). Seeking `-ss <midpoint>` past the real end of that shorter file
-doesn't error -- ffmpeg exits 0 having written nothing, so it isn't caught via the subprocess's
-exit code, only surfaces later when the next ffmpeg call tries to read the (missing) frame file.
-`crop_and_scale` checks for that and retries once at a small fixed offset near the start of the
-clip, which is always within whatever got saved regardless of how much the tail was truncated.
+`crop.py` grabs its frame from a configurable offset into the event's own start/end span
+(`CROP_FRAME_OFFSET_PCT`, `crop.compute_frame_offset_seconds`, default `0.5` = midpoint, this
+project's original fixed behavior) -- but for a long-lived tracked object (a car sitting in a
+zone for 20+ minutes, say), Frigate's saved event clip can be much shorter than that logical span
+(confirmed in production: a ~20-minute event's clip was only ~7 minutes long). Seeking `-ss
+<offset>` past the real end of that shorter file doesn't error -- ffmpeg exits 0 having written
+nothing, so it isn't caught via the subprocess's exit code, only surfaces later when the next
+ffmpeg call tries to read the (missing) frame file. `crop_and_scale` checks for that and retries
+once at a small fixed offset near the start of the clip, which is always within whatever got
+saved regardless of how much the tail was truncated.
+
+Why this is a tunable rather than a fixed formula: Frigate's own alert thumbnail is taken at
+whatever frame scored highest during the event, which is content-dependent, not a fixed offset --
+confirmed live against production by comparing two real events' Frigate-side snapshot timestamps
+(read off the snapshot's own burned-in clock) against their start/end: one event's snapshot
+landed almost exactly at event *start*, another landed *past* the midpoint. Frigate doesn't expose
+this "best frame" timestamp anywhere in its API (checked both the events list and detail
+endpoints, including `data.path_data`), so there's no way to compute or sync to Frigate's exact
+choice programmatically. Switching to fetching Frigate's own snapshot directly (instead of
+seeking our own frame from the record-stream clip) was considered and rejected: it's from the
+lower-res detect stream (800x448 in testing, vs. this setup's 3840x2160 record stream) with a
+bounding-box/label/timestamp overlay baked in that this Frigate version's REST API doesn't expose
+a way to suppress -- a real regression for plate/attribute-reading quality, not a fix. `0.5`
+stays the default until real usage across your own cameras suggests a specific different value is
+consistently better -- there's no universally "more correct" number to guess at upfront.
 
 `CROP_INITIAL_WAIT_SECONDS` (default 5s, same idea as `VIDEO_INITIAL_WAIT_SECONDS`) gives Frigate
 a head start to finalize the event/clip before the *first* crop attempt on a freshly claimed row

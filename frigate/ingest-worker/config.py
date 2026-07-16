@@ -50,6 +50,13 @@ MAX_ATTEMPTS = int(_env("MAX_ATTEMPTS", "3"))
 CROP_INITIAL_WAIT_SECONDS = float(_env("CROP_INITIAL_WAIT_SECONDS", "5"))
 MAX_CROP_DIMENSION = int(_env("MAX_CROP_DIMENSION", "1280"))
 CROP_PADDING_PCT = float(_env("CROP_PADDING_PCT", "0.2"))
+# Where in the event's start_ts->end_ts span to seek for the crop frame (0.0=start, 0.5=midpoint,
+# 1.0=end). Frigate picks its own alert thumbnail at whatever frame scored highest during the
+# event, which isn't a fixed offset and isn't exposed via its API (confirmed live: one event's own
+# snapshot landed almost exactly at start, another well past the midpoint) -- there's no
+# universal value that matches Frigate's per-event choice, so this stays a tunable rather than a
+# guessed new default. 0.5 (today's exact behavior) until you have reason to change it.
+CROP_FRAME_OFFSET_PCT = float(_env("CROP_FRAME_OFFSET_PCT", "0.5"))
 # A second, much smaller copy of the same crop -- for report/preview UIs that would otherwise
 # embed the full MAX_CROP_DIMENSION image inline per row (multiplied across every sighting, that's
 # what blew up a 2-hour daily report to 42MB and pushed up n8n's memory while building/emailing
