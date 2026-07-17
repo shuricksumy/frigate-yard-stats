@@ -104,18 +104,6 @@ If you're actively developing changes to `ingest-worker` yourself, swap the comp
 `image:` line for `build: ./ingest-worker` and use `docker compose --profile pipeline build
 ingest-worker` instead — see [`configuration.md`](configuration.md) for more on that.
 
-The same workflow also prunes old GHCR package versions after each successful build/push
-(`prune-old-versions` job, `actions/delete-package-versions`), keeping only the single newest
-version — GHCR otherwise keeps every version you've ever pushed indefinitely. This requires a
-one-time setup step: create a classic PAT with the `delete:packages`/`read:packages` scopes at
-<https://github.com/settings/tokens> and add it as a repo secret named `GHCR_CLEANUP_TOKEN` — the
-built-in `GITHUB_TOKEN` can push/pull packages but GitHub's API rejects it for deletion regardless
-of workflow permissions. Until that secret exists, this job just fails harmlessly (the image
-build/push itself is a separate job and is unaffected). Trade-off worth knowing: this also deletes
-any older short-sha-tagged version you might have wanted to keep around for a manual rollback via
-`INGEST_WORKER_IMAGE_TAG` — if you rely on that, raise `min-versions-to-keep` in the workflow
-instead of leaving it at `1`.
-
 ## Basic troubleshooting
 
 - **A container keeps restarting / exits immediately** — `docker compose --profile pipeline logs
