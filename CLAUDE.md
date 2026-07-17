@@ -229,6 +229,13 @@ event -- a different, display-only "representative" used by `list_visits`, unrel
 events actually got analyzed) -- the visit branch always fetches, since one object type's sighting
 can be ready while another's is still pending.
 
+`vehicleFields` renders as one combined "Description" line (color + body type + make + model, then
+notable_features, then plate) instead of a Color/Body type/Make/Model/Plate table -- reads like the
+Person side's single Description line rather than a spreadsheet of individual fields a reader has
+to scan across. Same combination logic as `report.py`'s `_vehicle_summary`, kept in sync
+deliberately (both exist to answer the same "describe this sighting in one line" need, just for
+different surfaces -- the web UI lightbox vs. the alerts report).
+
 The optional `visits_only` param (default `false`, only meaningful alongside `source=visits`)
 drops that ungrouped-event fallback entirely -- with it set, a raw_event Frigate's review never
 grouped into a visit is never claimed by this call at all, however long it waits. This used to be
@@ -498,7 +505,12 @@ one; the lightbox also shows the AI analysis result (via `GET /events/{id}`) onc
 `ai_status='done'`. Those three endpoints alone also accept the API key as an `?api_key=` query
 param (in addition to the usual `X-API-Key` header) since `<img>`/`<video>` tags can't attach
 custom headers -- the UI itself just stores the key in a long-lived cookie after validating it
-against the API once.
+against the API once. A download button (`lightboxDownloadUrl`/`lightboxDownloadFilename`) sits
+next to the close button, pointing at whichever of video/image is currently on screen (same
+`has_video`/`lightboxMode` check the toggle buttons use) -- a plain `<a download>` works here since
+every one of these media endpoints already accepts the API key via `?api_key=`, no extra plumbing
+needed. The suggested filename is `event-{id}` or `visit-{id}` (whichever id space the open
+lightbox is in) with a `.mp4`/`.jpg` extension matching what's actually being downloaded.
 
 
 An optional `mosquitto` Compose profile (`--profile mqtt`) provides a local/dev MQTT broker for

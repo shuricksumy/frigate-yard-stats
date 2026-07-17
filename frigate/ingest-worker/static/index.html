@@ -158,6 +158,7 @@
   <div class="modal-backdrop" x-show="lightboxEvent" @click.self="closeLightbox()" style="display:none">
     <div class="modal lightbox">
       <button class="close" @click="closeLightbox()">&times;</button>
+      <a class="download" x-show="lightboxEvent" style="display:none" :href="lightboxDownloadUrl()" :download="lightboxDownloadFilename()" title="Download">&#8681;</a>
       <div class="lightbox-toggle" x-show="lightboxEvent && lightboxEvent.has_video && lightboxEvent.has_image" style="display:none">
         <button :class="{ active: lightboxMode === 'video' }" @click="lightboxMode = 'video'">Video</button>
         <button :class="{ active: lightboxMode === 'image' }" @click="lightboxMode = 'image'">Image</button>

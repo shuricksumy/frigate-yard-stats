@@ -355,6 +355,24 @@ function eventsApp() {
       return e.visitId ? this.visitThumbnailUrl(e.visitId, true) : this.thumbnailUrl(e.id, true);
     },
 
+    // Points at whichever of video/image is actually being shown right now (same has_video/
+    // lightboxMode logic as the toggle buttons) -- the download button always saves what's on
+    // screen, not a fixed choice between the two.
+    lightboxDownloadUrl() {
+      const e = this.lightboxEvent;
+      if (!e) return "";
+      const showingVideo = e.has_video && this.lightboxMode === "video";
+      return showingVideo ? this.lightboxVideoUrl() : this.lightboxImageUrl();
+    },
+
+    lightboxDownloadFilename() {
+      const e = this.lightboxEvent;
+      if (!e) return "";
+      const showingVideo = e.has_video && this.lightboxMode === "video";
+      const label = e.visitId ? `visit-${e.visitId}` : `event-${e.id}`;
+      return `${label}.${showingVideo ? "mp4" : "jpg"}`;
+    },
+
     async openLightbox(event) {
       this.lightboxEvent = event;
       // Default to video when both exist -- richer than a still frame -- but the toggle buttons
@@ -400,13 +418,17 @@ function eventsApp() {
       this.lightboxGroups = [];
     },
 
+    // One combined descriptive line instead of a Color/Body type/Make/Model/... table -- reads
+    // like the Person side's Description rather than a spreadsheet of individual fields. Same
+    // combination logic as report.py's _vehicle_summary, kept in sync deliberately.
     vehicleFields(vs) {
-      return [
-        ["Color", vs.color], ["Body type", vs.body_type],
-        ["Make", vs.make_guess], ["Model", vs.model_guess],
-        ["Plate (LLM)", vs.plate_text_llm], ["Plate (Frigate)", vs.plate_text_frigate],
-        ["Notable features", vs.notable_features], ["Notes", vs.notes],
-      ].filter(([, value]) => value);
+      const bits = [vs.color, vs.body_type, vs.make_guess, vs.model_guess].filter(Boolean);
+      const summary = bits.length ? bits.join(" ") : null;
+      const plate = vs.plate_text_llm || vs.plate_text_frigate;
+      const parts = [summary, vs.notable_features].filter(Boolean);
+      if (plate) parts.push(`plate ${plate}`);
+      const description = parts.length ? parts.join(" -- ") : null;
+      return [["Description", description], ["Notes", vs.notes]].filter(([, value]) => value);
     },
 
     personFields(ps) {

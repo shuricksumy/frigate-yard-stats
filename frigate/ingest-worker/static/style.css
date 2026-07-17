@@ -339,3 +339,21 @@ input:disabled, select:disabled {
   cursor: pointer;
   z-index: 1;
 }
+
+.modal .download {
+  position: absolute;
+  top: 8px;
+  right: 48px;
+  background: rgba(0, 0, 0, 0.6);
+  border: none;
+  color: white;
+  border-radius: 50%;
+  width: 32px;
+  height: 32px;
+  font-size: 1.2rem;
+  line-height: 32px;
+  text-align: center;
+  text-decoration: none;
+  cursor: pointer;
+  z-index: 1;
+}
