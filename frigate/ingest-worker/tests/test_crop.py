@@ -5,6 +5,7 @@ start/end span had a saved Frigate clip only ~7 minutes long -- ffmpeg's `-ss <m
 landed past the real end of the file and exited 0 with no output (not a raised error), so the
 first ffmpeg call succeeding-but-empty can't be caught via subprocess exit code alone.
 """
+import base64
 import os
 
 os.environ.setdefault("MQTT_HOST", "localhost")
@@ -121,188 +122,147 @@ def test_crop_and_scale_disabled_ignores_an_invalid_box(monkeypatch):
     assert result
 
 
-def test_crop_visit_thumbnail_uses_visit_scoped_clip_and_thumb_time_offset(monkeypatch):
-    # thumb_time is an absolute epoch timestamp (unlike CROP_FRAME_OFFSET_PCT, a percentage of one
-    # raw_event's own span) and can fall outside the representative event's own window -- so this
-    # must fetch the same visit-scoped continuous-recording clip alert_video_worker.py downloads
-    # (video.build_clip_url, -5s/+5s padding), not the representative event's own
-    # /api/events/{det_id}/clip.mp4 endpoint crop_event uses.
+def _fake_run_factory_for_preview(offsets_that_produce_no_output=frozenset()):
+    # Distinguishes the three kinds of ffmpeg calls build_visit_preview makes by their distinctive
+    # flags: "-ss" for a raw frame grab (may produce no output, same truncated-clip behavior
+    # crop_and_scale guards against), "-framerate" for the final GIF assembly, and anything else
+    # (per-panel crop/scale, or the grid xstack assembly) just writes fake bytes to its own output
+    # path (always the last argv element for an ffmpeg invocation).
+    calls = []
+
+    def fake_run(cmd, check, capture_output):
+        calls.append(list(cmd))
+        if "-ss" in cmd:
+            offset = cmd[cmd.index("-ss") + 1]
+            out_path = cmd[-1]
+            if offset in offsets_that_produce_no_output:
+                return  # ffmpeg's real behavior here: exit 0, no file written
+            with open(out_path, "wb") as f:
+                f.write(b"fake-frame-bytes")
+        elif "-framerate" in cmd:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"fake-gif-bytes")
+        else:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"fake-image-bytes")
+
+    return fake_run, calls
+
+
+def test_build_visit_preview_uses_visit_scoped_clip_and_samples_actual_duration(monkeypatch):
+    # Frigate's continuous-recording clip endpoint pads an unpredictable amount of extra footage
+    # onto EITHER edge of the requested window, inconsistently request to request (confirmed live
+    # in production both ways -- see CLAUDE.md) -- so instead of seeking to one precise "best
+    # moment" relative to an assumed clip boundary, this samples
+    # config.VISIT_PREVIEW_FRAME_PERCENTAGES proportionally across the clip's own measured
+    # duration, sidestepping that whole problem.
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
+    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 20.6)
+    fake_run, calls = _fake_run_factory_for_preview()
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
+
+    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
+    representative_event = {"det_id": "1784219191.5-abc123"}
+
+    grid_b64, gif_b64 = crop.build_visit_preview(visit, representative_event)
+
+    assert grid_b64 and gif_b64
+    grab_calls = [c for c in calls if "-ss" in c]
+    assert len(grab_calls) == 4
+    # Same visit-scoped continuous-recording clip alert_video_worker.py downloads (-5s/+5s
+    # padding), not the representative event's own /api/events/{det_id}/clip.mp4 endpoint.
+    assert {c[c.index("-i") + 1] for c in grab_calls} == {
+        "http://frigate.test:5000/api/outside2/start/1784219186/end/1784219206/clip.mp4"
+    }
+    # margin=0.3s, usable=20.6-0.6=20.0 -> 0.3 + pct/100*20.0 for pct in (0,25,50,100).
+    offsets = sorted(float(c[c.index("-ss") + 1]) for c in grab_calls)
+    assert offsets == [0.3, 5.3, 10.3, 20.3]
+
+
+def test_build_visit_preview_respects_configured_frame_percentages(monkeypatch):
+    # VISIT_PREVIEW_FRAME_PERCENTAGES is deployment-tunable (e.g. "5,35,65,90" to stay a bit clear
+    # of both edges instead of landing exactly on them) -- confirms changing it actually changes
+    # which offsets get sampled, not just the default (0,25,50,100).
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
+    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 20.6)
+    monkeypatch.setattr(config, "VISIT_PREVIEW_FRAME_PERCENTAGES", [5, 35, 65, 90])
+    fake_run, calls = _fake_run_factory_for_preview()
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
+
+    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
+    representative_event = {"det_id": "1784219191.5-abc123"}
+
+    crop.build_visit_preview(visit, representative_event)
+
+    # margin=0.3s, usable=20.6-0.6=20.0 -> 0.3 + pct/100*20.0 for pct in (5,35,65,90).
+    grab_calls = [c for c in calls if "-ss" in c]
+    offsets = sorted(float(c[c.index("-ss") + 1]) for c in grab_calls)
+    assert offsets == [1.3, 7.3, 13.3, 18.3]
+
+
+def test_build_visit_preview_returns_distinct_grid_and_gif_images(monkeypatch):
     monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
     monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 20.0)
+    fake_run, _ = _fake_run_factory_for_preview()
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
 
-    captured = {}
-
-    def fake_crop_and_scale(clip_url, offset, box):
-        captured["clip_url"] = clip_url
-        captured["offset"] = offset
-        captured["box"] = box
-        return "base64result"
-
-    monkeypatch.setattr(crop, "crop_and_scale", fake_crop_and_scale)
-
-    visit = {
-        "start_ts": 1784219191.0,
-        "end_ts": 1784219201.0,
-        "cameras": "outside2",
-        "thumb_time": 1784219196.5,
-    }
+    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
     representative_event = {"det_id": "1784219191.5-abc123"}
 
-    result = crop.crop_visit_thumbnail(visit, representative_event)
+    grid_b64, gif_b64 = crop.build_visit_preview(visit, representative_event)
 
-    assert result == "base64result"
-    # clip fetched for the visit's own start/end window (-5s/+5s), not the event's own clip.mp4.
-    assert captured["clip_url"] == "http://frigate.test:5000/api/outside2/start/1784219186/end/1784219206/clip.mp4"
-    # offset is anchored from the clip's END (end_ts+5 minus thumb_time, subtracted from the
-    # measured duration) -- here the mocked duration (20.0) exactly matches the nominal padded
-    # window length (end_ts+5 - (start_ts-5) == 20.0), so this lands on the same instant
-    # thumb_time refers to in Frigate's own absolute timeline, same as a naive start-anchored
-    # calculation would give when there's no drift.
-    assert captured["offset"] == 20.0 - (1784219206.0 - 1784219196.5)
+    assert base64.b64decode(grid_b64) == b"fake-image-bytes"
+    assert base64.b64decode(gif_b64) == b"fake-gif-bytes"
 
 
-def test_crop_visit_thumbnail_raises_when_offset_exceeds_actual_clip_duration(monkeypatch):
-    # Regression test: confirmed in production that Frigate's continuous-recording clip endpoint
-    # can silently return far less footage than requested (a 13s request came back only ~4.06s
-    # long, likely a motion-based recording gap) -- the computed thumb_time offset (~6.1s) was past
-    # that real duration, and without this check ffmpeg just clamped to a frame near the tail
-    # instead of erroring, silently returning a wrong-moment crop. This must raise instead, so
-    # visit_thumb_worker's normal retry-then-fallback path takes over.
+def test_build_visit_preview_respects_crop_disabled_for_every_panel(monkeypatch):
+    monkeypatch.setattr(config, "CROP_DISABLED", True)
     monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 4.06)
-    monkeypatch.setattr(crop, "crop_and_scale", lambda *a, **k: (_ for _ in ()).throw(AssertionError("should not be called")))
+    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 20.0)
+    fake_run, calls = _fake_run_factory_for_preview()
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
 
-    visit = {
-        "start_ts": 1784226538.0 + 5,  # visit.start_ts, matching build_clip_url's own -5s math
-        "end_ts": 1784226551.0 - 5,
-        "cameras": "outside2",
-        "thumb_time": 1784226544.126003,
-    }
-    representative_event = {"det_id": "1784226543.203275-s0hvuw"}
+    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
+    representative_event = {"det_id": "1784219191.5-abc123"}
+
+    crop.build_visit_preview(visit, representative_event)
+
+    panel_calls = [c for c in calls if "-vf" in c and "-ss" not in c and "-framerate" not in c]
+    assert len(panel_calls) == 4
+    for c in panel_calls:
+        assert "crop=" not in c[c.index("-vf") + 1]
+        assert "scale=" in c[c.index("-vf") + 1]
+
+
+def test_build_visit_preview_falls_back_when_a_frame_grab_produces_no_output(monkeypatch):
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
+    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 20.6)
+    # The 0% sample (offset 0.3) produces no output, same ffmpeg-exits-0-with-no-file behavior
+    # crop_and_scale's own fallback guards against.
+    fake_run, calls = _fake_run_factory_for_preview(offsets_that_produce_no_output={"0.3"})
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
+
+    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
+    representative_event = {"det_id": "1784219191.5-abc123"}
+
+    grid_b64, gif_b64 = crop.build_visit_preview(visit, representative_event)
+
+    assert grid_b64 and gif_b64
+    grab_offsets = [c[c.index("-ss") + 1] for c in calls if "-ss" in c]
+    assert grab_offsets.count(str(crop._FALLBACK_FRAME_OFFSET_SECONDS)) == 1
+
+
+def test_build_visit_preview_raises_on_invalid_box_when_crop_enabled(monkeypatch):
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0, 0, 0, 0.2]}})
+    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 20.0)
+    fake_run, _ = _fake_run_factory_for_preview()
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
+
+    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
+    representative_event = {"det_id": "1784219191.5-abc123"}
 
     try:
-        crop.crop_visit_thumbnail(visit, representative_event)
-        assert False, "expected ValueError"
-    except ValueError as exc:
-        assert "clip's bounds" in str(exc)
-
-
-def test_crop_visit_thumbnail_succeeds_when_offset_is_within_actual_duration(monkeypatch):
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 12.0)
-    monkeypatch.setattr(crop, "crop_and_scale", lambda clip_url, offset, box: "base64result")
-
-    visit = {
-        "start_ts": 1784219191.0,
-        "end_ts": 1784219201.0,
-        "cameras": "outside2",
-        "thumb_time": 1784219196.5,
-    }
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    assert crop.crop_visit_thumbnail(visit, representative_event) == "base64result"
-
-
-def test_crop_visit_thumbnail_duration_safety_margin_is_a_fixed_internal_constant(monkeypatch):
-    # _DURATION_SAFETY_MARGIN_SECONDS is intentionally NOT a deployment setting (it only guards
-    # encoder/keyframe edge cases right at a clip's tail, not real recording gaps -- no env var
-    # controls it) -- confirms it's still applied, and that changing the internal constant
-    # directly changes the behavior (proving it's actually used, not dead code).
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 11.0)
-    monkeypatch.setattr(crop, "crop_and_scale", lambda clip_url, offset, box: "base64result")
-
-    visit = {
-        "start_ts": 1784219191.0,
-        "end_ts": 1784219201.0,
-        "cameras": "outside2",
-        # end_padding_epoch (end_ts+5) = 1784219206.0; thumb_time 0.5s before that puts
-        # offset_from_end at 0.5s -> offset = duration(11.0) - 0.5 = 10.5s; duration = 11.0s ->
-        # 0.5s of headroom.
-        "thumb_time": 1784219205.5,
-    }
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    # Default margin (0.5s) leaves exactly zero headroom (10.5 >= 11.0 - 0.5) -- must raise.
-    monkeypatch.setattr(crop, "_DURATION_SAFETY_MARGIN_SECONDS", 0.5)
-    try:
-        crop.crop_visit_thumbnail(visit, representative_event)
+        crop.build_visit_preview(visit, representative_event)
         assert False, "expected ValueError"
     except ValueError:
         pass
-
-    # A smaller margin (0.1s) leaves enough headroom -- must succeed.
-    monkeypatch.setattr(crop, "_DURATION_SAFETY_MARGIN_SECONDS", 0.1)
-    assert crop.crop_visit_thumbnail(visit, representative_event) == "base64result"
-
-
-def test_crop_visit_thumbnail_end_anchored_offset_survives_extra_lead_in(monkeypatch):
-    # Regression test for a real production visit: requested window was start_ts-5 to end_ts+5
-    # (~15.2s), but Frigate's continuous-recording endpoint returned a 21.3s clip -- ~6.1s of
-    # extra footage prepended before the requested start (confirmed live: Frigate's own review
-    # thumbnail showed a person near a van; a start-anchored offset (thumb_time - (start_ts-5),
-    # ~5.2s into the file) landed on an empty frame, while the person was actually visible
-    # ~11-13s in -- matching this end-anchored formula almost exactly). Likely Frigate snapping
-    # the clip start backward to a fixed-length recording-segment boundary while the end lines up
-    # with what was actually requested.
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 21.335022)
-    monkeypatch.setattr(config, "VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS", 0.0)
-
-    captured = {}
-
-    def fake_crop_and_scale(clip_url, offset, box):
-        captured["offset"] = offset
-        return "base64result"
-
-    monkeypatch.setattr(crop, "crop_and_scale", fake_crop_and_scale)
-
-    visit = {
-        "start_ts": 1784240053.11415,
-        "end_ts": 1784240058.310633,
-        "cameras": "outside2",
-        "thumb_time": 1784240053.286873,
-    }
-    representative_event = {"det_id": "1784240051.947106-1ou5oc"}
-
-    assert crop.crop_visit_thumbnail(visit, representative_event) == "base64result"
-    # end_padding_epoch = int(1784240058.310633) + 5 = 1784240063
-    expected_offset = 21.335022 - (1784240063 - 1784240053.286873)
-    assert captured["offset"] == expected_offset
-    assert 11 < captured["offset"] < 13  # matches the person's confirmed on-screen position
-
-
-def test_crop_visit_thumbnail_offset_adjust_shifts_the_seek_target(monkeypatch):
-    # VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS is the real, deployment-tunable knob for "my crops
-    # consistently land a bit off from thumb_time" -- positive shifts later/forward, negative
-    # shifts earlier/backward. Default (0) must leave the offset exactly at thumb_time.
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 20.0)
-
-    captured = {}
-
-    def fake_crop_and_scale(clip_url, offset, box):
-        captured["offset"] = offset
-        return "base64result"
-
-    monkeypatch.setattr(crop, "crop_and_scale", fake_crop_and_scale)
-
-    visit = {
-        "start_ts": 1784219191.0,
-        "end_ts": 1784219201.0,
-        "cameras": "outside2",
-        "thumb_time": 1784219196.5,  # base offset = 10.5s
-    }
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    monkeypatch.setattr(config, "VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS", 0.0)
-    crop.crop_visit_thumbnail(visit, representative_event)
-    assert captured["offset"] == 10.5
-
-    monkeypatch.setattr(config, "VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS", 1.2)
-    crop.crop_visit_thumbnail(visit, representative_event)
-    assert captured["offset"] == 10.5 + 1.2
-
-    monkeypatch.setattr(config, "VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS", -1.2)
-    crop.crop_visit_thumbnail(visit, representative_event)
-    assert captured["offset"] == 10.5 - 1.2

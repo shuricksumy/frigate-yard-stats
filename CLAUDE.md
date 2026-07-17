@@ -610,191 +610,127 @@ a head start to finalize the event/clip before the *first* crop attempt on a fre
 immediately after the "end" MQTT message, not just long events tripping the clip-duration fallback
 above. Only applies once per row (`crop_attempt_count == 0`), not on every retry pass.
 
-### Visit thumbnail re-crop using Frigate's own `thumb_time` (fifth queue stage)
+### Visit preview -- a composite grid + animated GIF sampled across the visit's own clip (fifth queue stage)
 
-The "Frigate doesn't expose its best-frame timestamp anywhere" finding above turned out to be
-*mostly* true, not entirely: it's absent from `/api/events`, but present on **`/api/review`** /
-the `frigate/reviews` MQTT payload, as `data.thumb_time` -- confirmed live both ways (REST
-`/api/review?limit=N` and by subscribing directly to `frigate/reviews` with `mosquitto`-equivalent
-Python MQTT client). It's distinct from `start_time` (a review's `id`/`thumb_path` filename is
-just `{start_time}-{suffix}` -- an identifier, not the frame timestamp) and, like the per-event
-snapshot timing finding above, clearly content/score-dependent, not a fixed offset -- across 8
-real reviews sampled live, `thumb_time - start_time` ranged from ~0.24s to ~38.5s. Frigate's own
-`thumb_path` webp (e.g. `/clips/review/thumb-{camera}-{start_time}-{suffix}.webp`, reachable
-directly off Frigate's webserver on port 5000, no auth) is unusably low-res for LPR/attribute work
-(318x180 in testing, well below even the detect-stream snapshot rejected earlier) -- but it *has*
-no bbox/label overlay, and confirming its framing against the full-res record stream at the same
-`thumb_time` is what makes this worth using: it's Frigate's own per-review "best frame" judgment,
-the same class of decision `CROP_FRAME_OFFSET_PCT` can only approximate with a fixed percentage.
+Frigate exposes a per-review "best frame" judgment as `data.thumb_time` on `/api/review` /
+`frigate/reviews` (confirmed live both ways) -- distinct from `start_time` (a review's `thumb_path`
+filename is just `{start_time}-{suffix}`, an identifier, not the frame timestamp), and clearly
+content/score-dependent rather than a fixed offset: across 8 real reviews sampled live, `thumb_time
+- start_time` ranged from ~0.24s to ~38.5s. Frigate's own `thumb_path` webp (e.g.
+`/clips/review/thumb-{camera}-{start_time}-{suffix}.webp`, reachable directly off Frigate's
+webserver, no auth) is unusably low-res for LPR/attribute work (318x180 in testing) but has no
+bbox/label overlay -- reproducing its framing against the full-res record stream at the same
+`thumb_time` was the original goal of this whole feature.
 
-The catch: `thumb_time` is only known once the review closes (`type="end"`), by which point the
-representative event's own crop (`crop_status`, off `CROP_FRAME_OFFSET_PCT`) has typically already
-run -- the crop stage claims within seconds of the *event's* own "end", while a review can stay
-open for tens of seconds to minutes after its first detection. So this can't feed the existing
-crop pipeline's first attempt; it's a **separate, opt-in fifth queue stage**
-(`VISIT_THUMB_CROP_ENABLED`, `visit_thumb_worker.py`/`crop.crop_visit_thumbnail`), producing a
-**separate artifact** (`visits.crop_image_base64`, its own `thumb_crop_status` state machine --
-`new`/`processing`/`retry`/`failed`/`done`/`skipped`, same shape as every other queue in this
-project) -- not a replacement for the events-flow crop, mirroring how `STORE_VIDEO_ALERTS` sits
-alongside `STORE_VIDEO` rather than replacing it. `record_visit` stores `thumb_time` off the
-review payload and sets `thumb_crop_status='skipped'` immediately if the flag is off or Frigate
-ever omits `thumb_time` (confirmed always present in testing, but the re-crop can never succeed
-without it regardless of attempts).
+**This was tried and abandoned.** `crop_visit_thumbnail` (the original implementation) seeked to a
+single offset computed from `thumb_time` within a freshly-downloaded visit-scoped continuous-
+recording clip (`video.build_clip_url`, -5s/+5s padding around the visit's own span) -- but
+confirmed live in production, Frigate's continuous-recording clip endpoint pads an *unpredictable*
+amount of extra footage onto **either** edge of the requested window, inconsistently request to
+request:
+- One visit's clip came back *shorter* than requested (a 13s request returned only ~4.06s,
+  confirmed by `ffprobe` -- a genuine motion-based recording gap, likely caused by that camera's
+  `frigate.conf` having `record.continuous.days: 0` at the time). Fixed by probing actual duration
+  and raising if the offset landed within a small safety margin of it.
+- A *different* visit's clip came back *longer* than requested, with the extra ~6.1s **prepended
+  before the start** rather than appended after -- confirmed by pulling Frigate's own review
+  thumbnail (which did show the right moment) and sweeping frames across the actual downloaded
+  clip: the real moment was ~11-13s in, not ~5s. Fixed by anchoring the seek offset from the clip's
+  measured *end* instead of its assumed start.
+- A **third** visit then broke the *end*-anchor fix the same way: its clip had ~4.1s of extra
+  footage appended **after** the requested end instead of before it -- the end-anchored formula
+  computed 10.96s into the clip, but the real moment (confirmed the same way: pulling Frigate's own
+  thumb, sweeping frames) was at 5.26s, almost exactly what the original *start*-anchored formula
+  would have given.
 
-Because `thumb_time` is chosen over the *review's* whole span, it can legitimately fall outside
-the representative event's own narrow start/end window (e.g. a review grouping several det_ids
-across tens of seconds) -- so `crop_visit_thumbnail` fetches the same visit-scoped
-continuous-recording clip `alert_video_worker.py` already downloads (`video.build_clip_url`,
-camera + start/end with the same -5s/+5s padding), not the representative event's own
-`/api/events/{det_id}/clip.mp4` endpoint `crop_event` uses -- while still using that event's own
-`region`/`box` for spatial framing, since Frigate's review payload has no box/region of its own,
-only individual tracked-object events do. The seek offset is `thumb_time - (visit.start_ts - 5s)`,
-landing on the exact instant `thumb_time` refers to within that fetched clip.
+Conclusion: **neither a start- nor an end-anchor is reliable** -- Frigate pads whichever edge it
+feels like, request to request, and no fixed manual correction (`VISIT_THUMB_CROP_OFFSET_ADJUST_
+SECONDS`, since removed) can compensate, since the error's size *and direction* varies per visit.
 
-`GET /visits/{id}/thumbnail` and `GET /visits/{id}/image` prefer this new crop, falling back to
-the representative event's own crop (available almost immediately, long before the re-crop can
-be), then a frame pulled from the visit's own stored video -- same belt-and-suspenders chain as
-the existing per-event thumbnail/image endpoints. `GET /visits`' `has_image` reflects either
-source being available (`has_thumb_crop OR` the representative event's own image), so existing
-consumers of that field don't need to change; `has_thumb_crop`/`thumb_crop_status` are additive
-fields for observability. The web UI's Visits tab (`visitThumbnailUrl`/`lightboxImageUrl` in
-`app.js`) uses these visit-scoped endpoints instead of the representative event's directly, so the
-grid/lightbox picks up the better-timed image automatically once it's ready, with no client-side
-fallback logic of its own.
+**Current approach**: stop chasing one precise "best moment" against a moving target. `crop.
+build_visit_preview` instead samples **`VISIT_PREVIEW_FRAME_PERCENTAGES`** (default `0,25,50,100`,
+deployment-tunable -- e.g. `5,35,65,90` to stay a bit clear of both edges instead of landing
+exactly on them; must be exactly 4 comma-separated values, since the grid assembly below is a
+fixed 2x2 layout) proportionally across the clip's own **measured** duration
+(`_probe_duration_seconds`) -- covering the visit's whole span regardless of where the real
+footage boundaries land, which sidesteps the edge-padding problem entirely rather than needing yet
+another anchor/correction scheme. The four sampled frames (each cropped to the representative
+event's own `region`/box, or left uncropped under `CROP_DISABLED` -- same `_build_vf_filter`
+helper `crop_and_scale` uses) are combined into:
+- **`visits.crop_image_base64`** -- one composite 2x2 grid image (`ffmpeg` `hstack`/`vstack`), the
+  artifact actually used for AI analysis, the thumbnail, Telegram, and the report. Deliberately a
+  single flat image, not several separate images sent in one VLM prompt -- a chat-completion vision
+  API decodes each `image_url` as an independent input, and whether a given self-hosted backend
+  (this project's `llama_slot_proxy` + Qwen + mmproj included) actually reasons sensibly across
+  multiple images in one prompt depends on that backend's specific chat-template/mmproj support,
+  not just the API shape -- a single composite image sidesteps that uncertainty completely, since
+  every VLM handles exactly one image per input by definition.
+- **`visits.preview_gif_base64`** -- a separate animated GIF (`ffmpeg` image2 sequence input +
+  palette generation) of the same four frames playing as a slideshow, for the web UI lightbox only.
+  Never sent to the VLM -- for the same reason multiple separate images weren't used for AI
+  analysis, an animated GIF's `image_url` would just be decoded as its first frame by a standard
+  vision pipeline, conveying no temporal information to a model at all. Served via
+  `GET /visits/{id}/preview.gif`; the web UI's lightbox gets a third toggle button ("Preview",
+  alongside Video/Image) shown whenever `has_preview_gif` is true.
 
-(Bug fixed in production right after first deploying this: `ALTER TABLE ... ADD COLUMN
-thumb_crop_status ... DEFAULT 'new'` backfills that default onto every *pre-existing* visit row,
-but those rows' `thumb_time` is also `NULL` -- `record_visit` is the only thing that ever sets it,
-and only at INSERT time, never retroactively. `visit_thumb_worker` claimed one such row and
-crashed on `thumb_time - clip_start_epoch` against `None`, repeating on every retry until it hit
-`VISIT_THUMB_CROP_MAX_ATTEMPTS` and went `'failed'` -- confirmed live from production logs (a
-pre-existing visit crashing this exact way three times in a row right after the upgrade).
-`schema.sql` now includes an idempotent `UPDATE ... SET thumb_crop_status = 'skipped' WHERE
-thumb_time IS NULL AND thumb_crop_status IN ('new', 'retry', 'failed')`, re-run on every startup --
-correct to run unconditionally, since a row with no `thumb_time` can never succeed regardless of
-when it was created, not just as a one-time migration repair.)
+`thumb_time` is still stored on the visit row (`record_visit`, informational -- Frigate's own
+opinion of the best moment) but no longer read by `build_visit_preview` at all, and no longer gates
+whether a preview will be attempted (`db.visit_thumb_crop_will_be_attempted` used to also require
+`thumb_time is not None`; now it's purely `VISIT_THUMB_CROP_ENABLED`, since the new approach only
+needs `start_ts`/`end_ts`/`cameras`). A schema-migration cleanup that used to force-skip pre-
+existing rows with `thumb_time IS NULL` (correct under the old thumb_time-dependent approach) was
+removed from `schema.sql` accordingly -- such a row can now succeed like any other.
+
+`GET /visits/{id}/thumbnail` and `GET /visits/{id}/image` prefer this composite grid, falling back
+to the representative event's own crop (available almost immediately, long before the preview can
+be), then a frame pulled from the visit's own stored video -- same belt-and-suspenders chain as the
+existing per-event thumbnail/image endpoints. `GET /visits`' `has_image` reflects either source
+being available (`has_thumb_crop OR` the representative event's own image); `has_thumb_crop`/
+`has_preview_gif`/`thumb_crop_status` are additive fields for observability. The web UI's Visits
+tab uses these visit-scoped endpoints instead of the representative event's directly, so the
+grid/lightbox picks up the better artifact automatically once ready, with no client-side fallback
+logic of its own.
 
 #### Wired into the AI queue, the alerts report, and Telegram
 
-All three remaining consumers now use the thumb-crop, each with a different cost/latency
-trade-off appropriate to how that consumer works:
+All three remaining consumers use `crop_image_base64` (the composite grid, once built) exactly as
+they did the old single-frame thumb-crop -- none of them needed to change for the pivot, since
+they only ever cared about "is there a better image than the representative event's own crop
+available yet," not what that image's internal structure is:
 
 - **`POST /ai-queue/claim`** (`db.claim_ai_batch`): whenever a `source=visits` claim's row is a
   visit's representative event, the response's `crop_image_base64` opportunistically prefers the
-  visit's own thumb-crop over the representative event's own crop *whenever it's already done by
-  claim time* -- zero latency cost, since this never changes which rows are eligible or when, only
-  which image comes back. The optional `require_thumb_crop` param goes further: it makes the claim
-  itself wait (`AND visit_id IS NOT NULL AND EXISTS (... v.thumb_crop_status = 'done')`) so the
-  crop is *guaranteed* to be the well-timed one, never the representative's -- a real trade-off
-  (alerts-flow analysis is delayed until the review closes and the re-crop finishes) that's opt-in,
-  not the default, since the right answer depends on your traffic. Deliberately scoped to
-  `source=visits` only -- under plain `source=events` (no dedup), several distinct raw_events can
-  share one visit, and overriding all of them with the identical thumb-crop image would mean
-  redundant VLM calls analyzing the same picture, not an improvement.
+  visit's own composite grid over the representative event's own crop *whenever it's already done
+  by claim time* -- zero latency cost, since this never changes which rows are eligible or when,
+  only which image comes back. The optional `require_thumb_crop` param goes further: it makes the
+  claim itself wait (`AND visit_id IS NOT NULL AND EXISTS (... v.thumb_crop_status = 'done')`) so
+  the grid is *guaranteed* to be the one analyzed, never the representative's own single crop -- a
+  real trade-off (alerts-flow analysis is delayed until the review closes and the preview build
+  finishes) that's opt-in, not the default, since the right answer depends on your traffic.
+  Deliberately scoped to `source=visits` only -- under plain `source=events` (no dedup), several
+  distinct raw_events can share one visit, and overriding all of them with the identical grid image
+  would mean redundant VLM calls analyzing the same picture, not an improvement.
 - **`/reports/generate?source=visits`** (`db.get_report_data`): always prefers the visit's own
-  thumb-crop via `COALESCE(v.crop_image_base64, re.crop_image_base64)` (`LEFT JOIN
+  composite grid via `COALESCE(v.crop_image_base64, re.crop_image_base64)` (`LEFT JOIN
   yard_stats.visits v ON v.id = re.visit_id AND v.thumb_crop_status = 'done'`) -- unconditional,
   not opt-in, since a report runs well after the fact on a schedule, so unlike the AI queue there's
   no real latency cost to just always taking the better image when it exists. `source=events`
   reports never apply this (matches the AI queue's own scoping decision).
 - **`TELEGRAM_ALERTS_ENABLED`'s visit-summary message**: deferred, not edited after the fact.
   `mqtt_ingest._handle_review_message` only sends the summary immediately when
-  `db.visit_thumb_crop_will_be_attempted(review)` is false (i.e. the flag is off, or Frigate ever
-  omits `thumb_time`) -- otherwise it skips the immediate send entirely, and
-  `visit_thumb_worker.process_claimed_visit` sends it once `thumb_crop_status` reaches a terminal
-  state: `done` -> the fresh high-res crop; `failed` (attempts exhausted) -> falls back to the
-  representative event's own crop (or text-only), so a visit is never left without its
-  notification just because the re-crop never panned out. `mark_visit_thumb_crop_retry_or_failed`
-  returns the resulting status specifically so the worker can tell "still retrying, don't send
-  yet" apart from "just went terminal, send now" without re-deriving that from the attempt-count
-  arithmetic itself. This is a genuine behavior change from before -- the notification now arrives
-  however long the review takes to close plus however long the re-crop takes, not near-instantly --
-  a deliberate trade (quality over speed) rather than the alternative of editing an already-sent
+  `db.visit_thumb_crop_will_be_attempted(review)` is false (i.e. `VISIT_THUMB_CROP_ENABLED` is off)
+  -- otherwise it skips the immediate send entirely, and `visit_thumb_worker.process_claimed_visit`
+  sends it once `thumb_crop_status` reaches a terminal state: `done` -> the fresh composite grid;
+  `failed` (attempts exhausted) -> falls back to the representative event's own crop (or text-only),
+  so a visit is never left without its notification just because the preview build never panned
+  out. `mark_visit_thumb_crop_retry_or_failed` returns the resulting status specifically so the
+  worker can tell "still retrying, don't send yet" apart from "just went terminal, send now"
+  without re-deriving that from the attempt-count arithmetic itself. This is a genuine behavior
+  change from the original per-event notifications -- the notification now arrives however long
+  the review takes to close plus however long the preview build takes, not near-instantly -- a
+  deliberate trade (quality over speed) rather than the alternative of editing an already-sent
   photo in place (`editMessageMedia`), which was considered and rejected as more moving parts for
   the same result.
-
-#### Bug: a truncated continuous-recording clip could silently produce a wrong-moment crop
-
-`crop_visit_thumbnail`'s offset math (`thumb_time - (visit.start_ts - 5s)`) assumes
-`video.build_clip_url`'s requested window (`start_ts-5s` to `end_ts+5s`) comes back in full. It
-doesn't always: confirmed live in production that Frigate's continuous-recording clip endpoint can
-silently return far less footage than requested -- a genuine case had a 13-second request
-(`start_ts-5` to `end_ts+5`) come back only ~4.06 seconds long (`ffprobe`-confirmed), almost
-certainly a motion-based recording gap rather than a "not ready yet" condition
-`VIDEO_MIN_VALID_BYTES` would catch (the response wasn't too *small*, just shorter in *duration*
-than the window asked for). The computed `thumb_time` offset (~6.1s) was past that real 4.06s of
-footage -- ffmpeg doesn't error when `-ss` seeks past the actual end of an HTTP-streamed input, it
-silently clamps to whatever frame is near the tail instead, so the resulting crop looked plausible
-but was quietly from the wrong moment, with nothing in logs or `thumb_crop_status='done'` to
-signal it. This was diagnosed by cross-referencing three things against the same visit: (1) the
-crop's own burned-in camera-OSD-clock timestamp reading ~5s earlier than `thumb_time`/`start_ts`
-predicted, (2) `ffprobe`'s reported clip duration (4.06s) vs. the requested window (13s), and (3) a
-sweep of frames grabbed at 0.1s/1.0s/2.0s/3.0s/3.9s offsets showing perfectly linear 1:1 playback
-within the clip -- ruling out a decode/seek-precision issue and pointing squarely at "the clip is
-shorter than we assumed" as the root cause (a *separate*, purely cosmetic ~5s drift between the
-camera's own onboard OSD clock and Frigate/NTP time is real too, but isn't what was causing the
-wrong-frame problem; separately, this camera's `frigate.conf` had `record.continuous.days: 0`,
-meaning nothing outside actual detected motion was ever retained -- the real, permanent fix for
-the recording-gap side of this is raising that in `frigate.conf`, not anything in `ingest-worker`).
-Fixed by probing the actual clip duration (`crop._probe_duration_seconds`, `ffprobe -show_format`)
-before seeking and raising if the offset would land within `crop._DURATION_SAFETY_MARGIN_SECONDS`
-(a fixed `0.5`, intentionally **not** an env-configurable setting -- see below) of it, so this now
-fails cleanly into the existing retry-then-fallback path
-(`visit_thumb_worker.mark_visit_thumb_crop_retry_or_failed` -> eventually the representative
-event's own crop) instead of silently returning a mistimed image.
-
-This margin is a buffer against landing right at the very tail of whatever duration Frigate *did*
-return (encoder/keyframe rounding: e.g. offset=6.05s vs. an actual duration of 6.1s is technically
-before the end, but close enough that ffmpeg can still grab a garbled/black tail frame) -- it does
-nothing for `thumb_time` landing far later than what actually got recorded (the recording-gap case
-above had a ~1.8s deficit; no margin value papers over a gap that size). Originally shipped as
-`VISIT_THUMB_CROP_DURATION_SAFETY_MARGIN_SECONDS`, an env var -- removed after review because it
-doesn't address the problem operators actually hit (a real time-shift, not an edge-of-clip
-rounding case) and just added a confusing knob that looked like it should help but couldn't.
-Demoted to a fixed internal constant, same treatment as `crop._FALLBACK_FRAME_OFFSET_SECONDS`.
-
-**`VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS`** (default `0`) is the actual tunable for "my crops
-consistently land a bit off from `thumb_time`" -- a plain manual shift of the seek target applied
-before the duration check (positive = later/forward, negative = earlier/backward). Unlike the
-margin above, this directly addresses a real, observed symptom (a camera's crops consistently
-looking ~1s off from the expected moment, most likely keyframe spacing during the seek) --
-tune it by comparing a handful of real crops against what `thumb_time` should show.
-
-#### Bug: the opposite case -- a clip with extra, unrequested lead-in also produced a wrong-moment crop
-
-The bug above was Frigate's clip coming back *shorter* than requested. Confirmed separately in
-production that the same endpoint can also come back *longer* than requested, with the extra
-footage prepended *before* the requested start rather than appended after it -- silently breaking
-the (until then reasonable-looking) assumption that byte offset 0 of the returned clip lines up
-with `start_ts - 5s`. A real visit asked for the usual `start_ts-5s`/`end_ts+5s` window (~15.2s)
-and Frigate returned a 21.3s clip, ~6.1s longer. The old start-anchored offset
-(`thumb_time - (start_ts - 5s)`, ~5.2s into the file) landed on an empty stretch of parking lot;
-cross-referencing Frigate's own `thumb-*.webp` review thumbnail (which *does* show the moment --
-a person standing near a van) against a sweep of frames from the actual downloaded clip found that
-person ~11-13s in, not ~5s. The old duration-safety check never caught this because it only guards
-against the offset landing too *close to* or *past* the duration -- an offset of ~5.2s in a 21.3s
-clip looks completely unremarkable to that check; the crop still completed, `thumb_crop_status`
-still went `done`, and nothing signaled the frame was wrong.
-
-Likely explanation: Frigate stores continuous recording in fixed-length segments and builds an
-arbitrary clip by concatenating whichever whole segments cover the requested range -- rounding the
-*start* backward to the nearest segment boundary (adding a variable amount of lead-in, bounded by
-one segment length) while the *end* lines up with what was actually asked for (confirmed: the
-measured duration in that case was within ~0.1s of the requested `end_ts+5`).
-
-Fixed by anchoring the offset from the clip's measured *end* instead of its assumed start --
-`crop_visit_thumbnail` now computes `duration - ((end_ts+5) - thumb_time)` (`duration` from the
-same `_probe_duration_seconds` call the safety-margin check already needed), so a variable amount
-of extra lead-in at the front no longer shifts the target frame at all. The safety-margin check
-now also rejects a negative offset (thumb_time computed as landing *before* the clip's actual
-start), not just one too close to its end, so a genuine recording gap -- which can still push the
-computed offset outside the clip's real bounds in either direction -- still fails cleanly into the
-same retry-then-fallback path rather than silently returning a wrong-moment crop either way.
-
-Practical implication: since the previous drift this setup was compensating for is now handled by
-the anchor change itself, an existing `VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS` override tuned
-against the old (start-anchored) behavior should be reset to `0` and re-tuned from scratch against
-real crops if still needed -- it no longer means the same thing as before.
 
 ### Camera allow-list
 
@@ -857,9 +793,11 @@ everything in-zone comes back `alert`. Tightening `detections.required_zones` to
 - `visits` — one row per Frigate review/alert segment (`frigate/reviews`), grouping the
   `raw_events` det_ids Frigate's own tracker considers the same real-world activity. Populated by
   `db.record_visit`; cross-camera merging is not yet implemented (see above). Also carries
-  `thumb_time` (Frigate's own review "best frame" timestamp) and, when `VISIT_THUMB_CROP_ENABLED`,
-  its own re-cropped `crop_image_base64` plus `thumb_crop_status` state machine -- a separate
-  artifact from any linked raw_event's own crop (see "Visit thumbnail re-crop" above).
+  `thumb_time` (Frigate's own review "best frame" timestamp, stored but no longer used for
+  cropping -- see below) and, when `VISIT_THUMB_CROP_ENABLED`, its own `crop_image_base64`
+  (composite grid image) plus `preview_gif_base64` (animated GIF, human preview only) and
+  `thumb_crop_status` state machine -- separate artifacts from any linked raw_event's own crop
+  (see "Visit preview" above).
 - `vehicle_sightings` / `person_sightings` — one row per AI-analyzed event. `vehicle_sightings`
   keeps `plate_text_frigate` (from `raw_events.sub_label`) next to `plate_text_llm` (the OCR
   model's read) as a cross-check.

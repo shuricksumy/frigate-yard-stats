@@ -154,19 +154,24 @@
   </div>
 
   <!-- Lightbox: video by default when available, image otherwise -- toggle buttons let you
-       switch between the two when an event has both. -->
+       switch between video/image/preview (a visit's animated GIF, VISIT_THUMB_CROP_ENABLED)
+       whenever more than one is available. -->
   <div class="modal-backdrop" x-show="lightboxEvent" @click.self="closeLightbox()" style="display:none">
     <div class="modal lightbox">
       <button class="close" @click="closeLightbox()">&times;</button>
       <a class="download" x-show="lightboxEvent" style="display:none" :href="lightboxDownloadUrl()" :download="lightboxDownloadFilename()" title="Download">&#8681;</a>
-      <div class="lightbox-toggle" x-show="lightboxEvent && lightboxEvent.has_video && lightboxEvent.has_image" style="display:none">
-        <button :class="{ active: lightboxMode === 'video' }" @click="lightboxMode = 'video'">Video</button>
-        <button :class="{ active: lightboxMode === 'image' }" @click="lightboxMode = 'image'">Image</button>
+      <div class="lightbox-toggle" x-show="lightboxEvent && ((lightboxEvent.has_video && lightboxEvent.has_image) || lightboxEvent.has_preview_gif)" style="display:none">
+        <button x-show="lightboxEvent && lightboxEvent.has_video" :class="{ active: lightboxMode === 'video' }" @click="lightboxMode = 'video'">Video</button>
+        <button x-show="lightboxEvent && lightboxEvent.has_image" :class="{ active: lightboxMode === 'image' }" @click="lightboxMode = 'image'">Image</button>
+        <button x-show="lightboxEvent && lightboxEvent.has_preview_gif" :class="{ active: lightboxMode === 'preview' }" @click="lightboxMode = 'preview'">Preview</button>
       </div>
       <template x-if="lightboxEvent && lightboxEvent.has_video && lightboxMode === 'video'">
         <video controls autoplay :src="lightboxVideoUrl()"></video>
       </template>
-      <template x-if="lightboxEvent && (lightboxMode === 'image' || !lightboxEvent.has_video)">
+      <template x-if="lightboxEvent && lightboxEvent.has_preview_gif && lightboxMode === 'preview'">
+        <img :src="visitPreviewGifUrl(lightboxEvent.visitId)" alt="visit preview animation">
+      </template>
+      <template x-if="lightboxEvent && (lightboxMode === 'image' || (!lightboxEvent.has_video && lightboxMode !== 'preview'))">
         <img :src="lightboxImageUrl()" alt="event full image">
       </template>
       <div class="lightbox-info" x-show="lightboxEvent && (lightboxEvent.visitId || lightboxEvent.ai_status === 'done')" style="display:none">

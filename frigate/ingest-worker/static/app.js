@@ -337,6 +337,7 @@ function eventsApp() {
         visitId: visit.id,
         has_video: visit.has_video,
         has_image: visit.has_image,
+        has_preview_gif: visit.has_preview_gif,
         ai_status: visit.ai_status,
       });
     },
@@ -362,6 +363,13 @@ function eventsApp() {
       return `/media/video/visit/${visitId}?api_key=${encodeURIComponent(this.apiKey)}`;
     },
 
+    // A visit's animated preview GIF (crop.build_visit_preview's slideshow of frames sampled
+    // proportionally across the visit's own clip) -- human preview only, a separate artifact from
+    // the composite grid image used for the thumbnail/lightbox still and AI analysis.
+    visitPreviewGifUrl(visitId) {
+      return `/visits/${visitId}/preview.gif?api_key=${encodeURIComponent(this.apiKey)}`;
+    },
+
     // The lightbox is shared between the Events and Visits views -- lightboxEvent.visitId is
     // only set when opened from a visit card, in which case its video (if any) lives under a
     // completely separate visit-video endpoint, not the per-event one.
@@ -378,12 +386,13 @@ function eventsApp() {
       return e.visitId ? this.visitThumbnailUrl(e.visitId, true) : this.thumbnailUrl(e.id, true);
     },
 
-    // Points at whichever of video/image is actually being shown right now (same has_video/
+    // Points at whichever of video/image/preview-gif is actually being shown right now (same
     // lightboxMode logic as the toggle buttons) -- the download button always saves what's on
-    // screen, not a fixed choice between the two.
+    // screen, not a fixed choice between them.
     lightboxDownloadUrl() {
       const e = this.lightboxEvent;
       if (!e) return "";
+      if (this.lightboxMode === "preview" && e.has_preview_gif) return this.visitPreviewGifUrl(e.visitId);
       const showingVideo = e.has_video && this.lightboxMode === "video";
       return showingVideo ? this.lightboxVideoUrl() : this.lightboxImageUrl();
     },
@@ -391,8 +400,9 @@ function eventsApp() {
     lightboxDownloadFilename() {
       const e = this.lightboxEvent;
       if (!e) return "";
-      const showingVideo = e.has_video && this.lightboxMode === "video";
       const label = e.visitId ? `visit-${e.visitId}` : `event-${e.id}`;
+      if (this.lightboxMode === "preview" && e.has_preview_gif) return `${label}.gif`;
+      const showingVideo = e.has_video && this.lightboxMode === "video";
       return `${label}.${showingVideo ? "mp4" : "jpg"}`;
     },
 

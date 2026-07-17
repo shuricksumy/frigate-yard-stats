@@ -211,12 +211,12 @@ def get_event_image(event_id: int):
 
 @app.get("/visits/{visit_id}/thumbnail", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
 def get_visit_thumbnail(visit_id: int):
-    """A small on-the-fly JPEG for the Visits view grid -- prefers the visit's own re-crop at
-    Frigate's thumb_time (VISIT_THUMB_CROP_ENABLED, crop.crop_visit_thumbnail), which isn't ready
-    until some time after the review closes; falls back to the representative event's own crop
-    (available almost immediately), then a frame from the visit's own stored video, same
-    belt-and-suspenders reasoning as GET /events/{id}/thumbnail. Accepts X-API-Key header or
-    ?api_key= query param since this is loaded directly by an <img> tag."""
+    """A small on-the-fly JPEG for the Visits view grid -- prefers the visit's own composite
+    preview grid (VISIT_THUMB_CROP_ENABLED, crop.build_visit_preview), which isn't ready until some
+    time after the review closes; falls back to the representative event's own crop (available
+    almost immediately), then a frame from the visit's own stored video, same belt-and-suspenders
+    reasoning as GET /events/{id}/thumbnail. Accepts X-API-Key header or ?api_key= query param
+    since this is loaded directly by an <img> tag."""
     visit = db.get_visit(visit_id)
     if visit is None:
         raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
@@ -235,8 +235,8 @@ def get_visit_thumbnail(visit_id: int):
 @app.get("/visits/{visit_id}/image", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
 def get_visit_image(visit_id: int):
     """Full-size image as raw JPEG bytes -- same source preference as GET /visits/{id}/thumbnail
-    (visit's own thumb_time re-crop, then the representative event's crop, then a frame from the
-    visit's stored video), used by the web report's lightbox when viewing a Visits-view card.
+    (visit's own composite preview grid, then the representative event's crop, then a frame from
+    the visit's stored video), used by the web report's lightbox when viewing a Visits-view card.
     Accepts X-API-Key header or ?api_key= query param since this is loaded directly by an <img>
     tag."""
     visit = db.get_visit(visit_id)
@@ -251,6 +251,21 @@ def get_visit_image(visit_id: int):
     if visit.get("video_path") and os.path.isfile(visit["video_path"]):
         return Response(content=video.extract_frame_jpeg(visit["video_path"]), media_type="image/jpeg")
     raise HTTPException(status_code=404, detail=f"No crop image or video for visit {visit_id}")
+
+
+@app.get("/visits/{visit_id}/preview.gif", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
+def get_visit_preview_gif(visit_id: int):
+    """The visit's animated preview GIF (crop.build_visit_preview's slideshow of frames sampled
+    proportionally across the visit's own clip) -- human preview only, a separate artifact from
+    crop_image_base64 (the single composite grid image used for AI analysis/thumbnails/reports).
+    404s until VISIT_THUMB_CROP_ENABLED and thumb_crop_status='done'. Accepts X-API-Key header or
+    ?api_key= query param since this would be loaded directly by an <img> tag."""
+    visit = db.get_visit(visit_id)
+    if visit is None:
+        raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
+    if not visit.get("preview_gif_base64"):
+        raise HTTPException(status_code=404, detail=f"No preview GIF for visit {visit_id}")
+    return Response(content=base64.b64decode(visit["preview_gif_base64"]), media_type="image/gif")
 
 
 @app.get("/media/video/{event_id}", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])

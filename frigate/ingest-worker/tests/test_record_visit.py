@@ -117,10 +117,11 @@ def test_record_visit_skips_thumb_crop_when_disabled(conn_ok, monkeypatch):
         _cleanup_visit(visit_id)
 
 
-def test_record_visit_skips_thumb_crop_when_frigate_omits_thumb_time(conn_ok, monkeypatch):
-    # Confirmed live via MQTT that thumb_time is always present, but the re-crop can never
-    # succeed without it regardless of attempts if it's ever missing -- skip immediately rather
-    # than piling up as an eternally-unprocessed 'new' row.
+def test_record_visit_still_starts_new_when_frigate_omits_thumb_time(conn_ok, monkeypatch):
+    # crop.build_visit_preview samples frames proportionally across the visit's own clip duration
+    # (start_ts/end_ts/cameras only) -- unlike its predecessor (crop_visit_thumbnail, which seeked
+    # to thumb_time specifically and could never succeed without it), a missing thumb_time no
+    # longer means the re-crop can't happen, so this must still start 'new', not 'skipped'.
     monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", True)
     visit_id = db.record_visit(_review(det_ids=[], thumb_time=None))
     try:
@@ -128,7 +129,7 @@ def test_record_visit_skips_thumb_crop_when_frigate_omits_thumb_time(conn_ok, mo
             "SELECT thumb_crop_status FROM yard_stats.visits WHERE id = %s",
             (visit_id,), fetch=True,
         )[0]
-        assert row["thumb_crop_status"] == "skipped"
+        assert row["thumb_crop_status"] == "new"
     finally:
         _cleanup_visit(visit_id)
 

@@ -83,27 +83,30 @@ def _grab_frame(clip_url: str, timestamp_offset: float, frame_path: str) -> None
 _FALLBACK_FRAME_OFFSET_SECONDS = 1.0
 
 
-def crop_and_scale(clip_url: str, timestamp_offset: float, box: list[float]) -> str:
+def _build_vf_filter(box: list[float], max_dimension: int) -> str:
     scale_filter = (
-        f"scale='min({config.MAX_CROP_DIMENSION},iw)':'min({config.MAX_CROP_DIMENSION},ih)':"
+        f"scale='min({max_dimension},iw)':'min({max_dimension},ih)':"
         "force_original_aspect_ratio=decrease"
     )
     if config.CROP_DISABLED:
         # box is unused in this mode -- no validation needed, since it never affects the result
-        # (crop_image_base64 becomes the full original frame, just scaled down).
-        vf = scale_filter
-    else:
-        x1, y1, x2, y2 = box
-        w, h = x2 - x1, y2 - y1
-        if w <= 0 or h <= 0:
-            raise ValueError(f"Invalid box {box}: width={w}, height={h} must both be positive")
-        pad_x, pad_y = w * config.CROP_PADDING_PCT, h * config.CROP_PADDING_PCT
-        crop_x1 = max(0, x1 - pad_x)
-        crop_y1 = max(0, y1 - pad_y)
-        crop_x2 = min(config.RECORD_WIDTH, x2 + pad_x)
-        crop_y2 = min(config.RECORD_HEIGHT, y2 + pad_y)
-        crop_filter = f"crop={crop_x2 - crop_x1}:{crop_y2 - crop_y1}:{crop_x1}:{crop_y1}"
-        vf = f"{crop_filter},{scale_filter}"
+        # (the frame is scaled down but never cropped to a region).
+        return scale_filter
+    x1, y1, x2, y2 = box
+    w, h = x2 - x1, y2 - y1
+    if w <= 0 or h <= 0:
+        raise ValueError(f"Invalid box {box}: width={w}, height={h} must both be positive")
+    pad_x, pad_y = w * config.CROP_PADDING_PCT, h * config.CROP_PADDING_PCT
+    crop_x1 = max(0, x1 - pad_x)
+    crop_y1 = max(0, y1 - pad_y)
+    crop_x2 = min(config.RECORD_WIDTH, x2 + pad_x)
+    crop_y2 = min(config.RECORD_HEIGHT, y2 + pad_y)
+    crop_filter = f"crop={crop_x2 - crop_x1}:{crop_y2 - crop_y1}:{crop_x1}:{crop_y1}"
+    return f"{crop_filter},{scale_filter}"
+
+
+def crop_and_scale(clip_url: str, timestamp_offset: float, box: list[float]) -> str:
+    vf = _build_vf_filter(box, config.MAX_CROP_DIMENSION)
 
     with tempfile.TemporaryDirectory() as tmp:
         frame_path = os.path.join(tmp, "frame.jpg")
@@ -135,70 +138,88 @@ def _probe_duration_seconds(clip_url: str) -> float:
     return float(json.loads(result.stdout)["format"]["duration"])
 
 
-# Internal buffer against landing right at the very tail of whatever clip Frigate actually
-# returned -- not deployment-tunable (see crop_visit_thumbnail below for why), same idea as
-# _FALLBACK_FRAME_OFFSET_SECONDS above.
-_DURATION_SAFETY_MARGIN_SECONDS = 0.5
+# Small buffer off both ends of the clip so a percentage-boundary offset (e.g. the default 0%/100%)
+# doesn't land on a garbled encoder edge frame (same idea as _DURATION_SAFETY_MARGIN_SECONDS used
+# to be). Applied on top of whatever VISIT_PREVIEW_FRAME_PERCENTAGES is configured to -- harmless
+# even if that's already tuned to avoid the exact edges (e.g. "5,35,65,90").
+_VISIT_PREVIEW_EDGE_MARGIN_SECONDS = 0.3
 
 
-def crop_visit_thumbnail(visit: dict, representative_event: dict) -> str:
-    # visit["thumb_time"] is Frigate's own per-review "best frame" choice (see
-    # mqtt_ingest.parse_review_payload) -- an absolute epoch timestamp, unlike
-    # CROP_FRAME_OFFSET_PCT which is a percentage of one raw_event's own start/end span. It can
-    # legitimately fall outside the representative event's own narrow window (Frigate picks it
-    # over the whole review, which can span multiple det_ids) -- so this fetches the same
-    # visit-scoped continuous-recording clip alert_video_worker.py downloads (video.build_clip_url,
-    # camera + start/end with the same -5s/+5s padding), not the representative event's own
-    # /api/events/{det_id}/clip.mp4 endpoint crop_event uses. The representative event's own
-    # region/box is still used for spatial framing -- Frigate's review payload has no box/region
-    # of its own, only individual tracked-object events do.
+def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, str]:
+    # Returns (grid_image_base64, preview_gif_base64). Frigate's own thumb_time turned out
+    # unreliable as a seek target -- its continuous-recording clip endpoint pads an unpredictable
+    # amount of extra footage onto EITHER edge of the requested window, not consistently the same
+    # one request to request (confirmed live: one visit had extra footage prepended before the
+    # start, another had it appended after the end -- no single fixed anchor point is correct for
+    # both). Rather than chasing one precise "best moment" against a moving target, this samples
+    # config.VISIT_PREVIEW_FRAME_PERCENTAGES (default 0/25/50/100, deployment-tunable -- e.g.
+    # "5,35,65,90" to stay a bit clear of both edges) proportionally across the clip's own measured
+    # duration -- covering the visit's whole span regardless of where the real footage boundaries
+    # land -- and combines them into one composite grid image (guaranteed single-image, so any VLM
+    # handles it, unlike sending several separate images which depends on the specific backend/
+    # model actually supporting multi-image prompts) plus a separate animated GIF for human preview
+    # only (a chat-completion vision API decodes an image_url as a single static frame, so an
+    # actual GIF would never convey the animation to a model -- there's no point sending it one).
     det_id = representative_event["det_id"]
     event = fetch_frigate_event(det_id)
     box = compute_full_res_box(event)
 
     clip_row = {"start_ts": visit["start_ts"], "end_ts": visit["end_ts"], "camera": visit["cameras"]}
     clip_url = video.build_clip_url(clip_row)
-
-    # Anchored from the clip's own END, not its assumed start. Confirmed live in production that
-    # Frigate's continuous-recording clip endpoint can silently prepend extra lead-in footage
-    # before the requested start_ts-5 -- one real visit asked for a 15.2s window (start_ts-5 to
-    # end_ts+5) and got back 21.3s, ~6.1s more than requested. Seeking from an assumed
-    # clip-start-equals-start_ts-5 landed on an empty stretch of parking lot; the actual thumb_time
-    # frame (confirmed by pulling Frigate's own review thumbnail, which does show the moment) was
-    # ~11.3s into the file, not ~5.2s -- exactly matching where this end-anchored formula below
-    # places it. This lines up with Frigate storing continuous recording in fixed-length segments
-    # and building an arbitrary clip by concatenating whole segments that cover the request --
-    # snapping the start backward to a segment boundary, while the end reliably lines up with what
-    # was actually asked for (confirmed: measured duration was within ~0.1s of the requested
-    # end_ts+5 in that same case). So compute the offset from the far side instead: how far
-    # thumb_time sits before the requested end, subtracted from the clip's real (ffprobe-measured)
-    # duration.
     duration = _probe_duration_seconds(clip_url)
-    end_padding_epoch = int(_as_datetime(visit["end_ts"]).timestamp()) + 5
-    offset_from_end = end_padding_epoch - visit["thumb_time"]
-    # VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS (default 0) shifts the seek target relative to
-    # thumb_time -- positive moves later/forward, negative moves earlier. Exists for any leftover
-    # sub-second drift once the end-anchoring above is applied (e.g. keyframe spacing during the
-    # seek) -- tune it by comparing a few real crops against what thumb_time should show.
-    offset = duration - offset_from_end + config.VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS
 
-    # A genuine recording gap (confirmed separately in production: record.continuous.days=0 meant
-    # a 13s request came back only ~4.06s long) can still land the computed offset outside the
-    # clip's real bounds in either direction -- before its start (offset < 0) or within
-    # _DURATION_SAFETY_MARGIN_SECONDS of its end. Either way, fail explicitly instead of letting
-    # ffmpeg silently clamp to a nearby frame and return a plausible-looking but wrong-moment crop
-    # -- this routes through the normal retry-then-fallback path (visit_thumb_worker.py ->
-    # mark_visit_thumb_crop_retry_or_failed). _DURATION_SAFETY_MARGIN_SECONDS is a small fixed
-    # buffer for encoder/keyframe edge cases right at a clip's tail, not deployment-tunable -- it
-    # does NOT compensate for a real gap (no margin value would have; that gap was ~1.8s).
-    if offset < 0 or offset >= duration - _DURATION_SAFETY_MARGIN_SECONDS:
-        raise ValueError(
-            f"thumb_time-derived offset {offset:.3f}s falls outside the actual clip's bounds "
-            f"(duration {duration:.3f}s) for visit id={visit.get('id')} -- "
-            f"Frigate likely has a recording gap for this window"
+    usable = max(duration - 2 * _VISIT_PREVIEW_EDGE_MARGIN_SECONDS, 0.0)
+    offsets = [
+        _VISIT_PREVIEW_EDGE_MARGIN_SECONDS + (pct / 100) * usable
+        for pct in config.VISIT_PREVIEW_FRAME_PERCENTAGES
+    ]
+
+    # Each panel scaled to half MAX_CROP_DIMENSION so the assembled 2x2 grid lands near
+    # MAX_CROP_DIMENSION overall, not 4x it.
+    panel_vf = _build_vf_filter(box, config.MAX_CROP_DIMENSION // 2)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        panel_paths = []
+        for i, offset in enumerate(offsets):
+            raw_path = os.path.join(tmp, f"raw_{i}.jpg")
+            _grab_frame(clip_url, offset, raw_path)
+            if not os.path.exists(raw_path):
+                # Same ffmpeg silent-empty-output behavior crop_and_scale guards against.
+                _grab_frame(clip_url, _FALLBACK_FRAME_OFFSET_SECONDS, raw_path)
+            panel_path = os.path.join(tmp, f"panel_{i}.jpg")
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", raw_path, "-vf", panel_vf, panel_path],
+                check=True, capture_output=True,
+            )
+            panel_paths.append(panel_path)
+
+        grid_path = os.path.join(tmp, "grid.jpg")
+        grid_inputs = []
+        for p in panel_paths:
+            grid_inputs += ["-i", p]
+        subprocess.run(
+            ["ffmpeg", "-y", *grid_inputs, "-filter_complex",
+             "[0:v][1:v]hstack=2[top];[2:v][3:v]hstack=2[bot];[top][bot]vstack=2[out]",
+             "-map", "[out]", grid_path],
+            check=True, capture_output=True,
         )
+        with open(grid_path, "rb") as f:
+            grid_base64 = base64.b64encode(f.read()).decode()
 
-    return crop_and_scale(clip_url, offset, box)
+        # Animated GIF from the same panel frames (already cropped/scaled), played as a slideshow
+        # -- human preview only, never sent to the VLM (see docstring above). Palette generation
+        # keeps GIF's 256-color limit from looking muddy against real photos.
+        gif_path = os.path.join(tmp, "preview.gif")
+        subprocess.run(
+            ["ffmpeg", "-y", "-framerate", "1.5", "-i", os.path.join(tmp, "panel_%d.jpg"),
+             "-vf", "scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
+             "-loop", "0", gif_path],
+            check=True, capture_output=True,
+        )
+        with open(gif_path, "rb") as f:
+            gif_base64 = base64.b64encode(f.read()).decode()
+
+    return grid_base64, gif_base64
 
 
 def crop_event(raw_event: dict) -> dict:

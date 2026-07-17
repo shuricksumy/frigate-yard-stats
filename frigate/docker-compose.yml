@@ -114,17 +114,20 @@ services:
       # flows' disk usage can be measured/managed independently.
       STORE_VIDEO_ALERTS: ${STORE_VIDEO_ALERTS:-false}
       VIDEO_STORAGE_PATH_ALERTS: /data/video-alerts
-      # Independent visit-level re-crop using Frigate's own review "best frame" choice
-      # (data.thumb_time) instead of guessing via CROP_FRAME_OFFSET_PCT -- only known once the
-      # review closes, so this is a separate poll-loop stage/artifact (visits.crop_image_base64),
-      # not a replacement for the events-flow crop. Off by default.
+      # Independent visit-level preview -- a composite grid image sampling frames proportionally
+      # across the visit's own clip, plus a separate animated GIF for human preview, instead of
+      # seeking to one precise "best moment" (Frigate's thumb_time turned out unreliable to seek
+      # to -- see crop.build_visit_preview). Only known once the review closes, so this is a
+      # separate poll-loop stage/artifacts (visits.crop_image_base64/preview_gif_base64), not a
+      # replacement for the events-flow crop. Off by default.
       VISIT_THUMB_CROP_ENABLED: ${VISIT_THUMB_CROP_ENABLED:-false}
       VISIT_THUMB_CROP_PARALLEL_LIMIT: ${VISIT_THUMB_CROP_PARALLEL_LIMIT:-1}
       VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS: ${VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS:-5}
       VISIT_THUMB_CROP_MAX_ATTEMPTS: ${VISIT_THUMB_CROP_MAX_ATTEMPTS:-3}
       VISIT_THUMB_CROP_RETRY_WAIT_SECONDS: ${VISIT_THUMB_CROP_RETRY_WAIT_SECONDS:-5}
-      # Manual +/- shift if crops consistently land a bit off from thumb_time -- see .env.example.
-      VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS: ${VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS:-0}
+      # Which 4 points of the visit's own clip duration to sample for the preview grid/GIF, as
+      # percentages (0=clip start, 100=clip end) -- e.g. "5,35,65,90" to stay clear of both edges.
+      VISIT_PREVIEW_FRAME_PERCENTAGES: ${VISIT_PREVIEW_FRAME_PERCENTAGES:-0,25,50,100}
       # Telegram notifications (photo on crop, video reply once stored) -- see telegram.py.
       # Disabled by default; TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID only need to be set when on.
       TELEGRAM_EVENTS_ENABLED: ${TELEGRAM_EVENTS_ENABLED:-false}

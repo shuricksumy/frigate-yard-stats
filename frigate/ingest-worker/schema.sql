@@ -123,27 +123,31 @@ ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS telegram_photo_message_id
 -- CROP_FRAME_OFFSET_PCT can only approximate with a fixed percentage). Only known once the
 -- review closes -- well after the representative event's own crop_status='done' crop already ran
 -- -- so this produces a SEPARATE artifact (crop_image_base64 below), not a replacement for the
--- events-flow crop. See visit_thumb_worker.py / crop.crop_visit_thumbnail.
+-- events-flow crop. See visit_thumb_worker.py / crop.build_visit_preview.
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_time DOUBLE PRECISION;
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS crop_image_base64 TEXT;
+-- crop_image_base64 above is a single composite image (a fixed grid of frames sampled
+-- proportionally across the visit's own clip -- see crop.build_visit_preview), not one
+-- "best moment" frame -- this sidesteps having to precisely seek to Frigate's thumb_time at all
+-- (which turned out unreliable: Frigate's continuous-recording clip endpoint pads an
+-- unpredictable amount of extra footage onto either edge of the requested window, request to
+-- request, so neither a start- nor an end-anchored seek was reliable). preview_gif_base64 is a
+-- separate, human-only artifact -- an actual animated GIF of the same sampled frames, for the web
+-- UI lightbox -- never sent to the VLM (a chat-completion vision API decodes an image_url as one
+-- static frame, so an animated GIF wouldn't convey any temporal information to a model anyway).
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS preview_gif_base64 TEXT;
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_crop_status TEXT NOT NULL DEFAULT 'new'
   CHECK (thumb_crop_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_crop_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_crop_attempt_count INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_visits_thumb_crop_status ON yard_stats.visits (thumb_crop_status);
--- Any visit that existed before this migration got thumb_crop_status backfilled to the column's
--- DEFAULT ('new') by the ALTER TABLE above, but thumb_time is also NULL for those pre-existing
--- rows (it's only ever set by record_visit at INSERT time, never retroactively) -- without this,
--- visit_thumb_worker crashes on them (thumb_time - clip_start_epoch against a NULL) and burns all
--- VISIT_THUMB_CROP_MAX_ATTEMPTS before going 'failed'. Confirmed in production: an existing visit
--- row (created before this feature was deployed) was claimed and crashed exactly this way right
--- after upgrading. Also catches 'failed' -- a row that already burned its attempts this way
--- reports a misleading "failed" (implies a real attempt went wrong) rather than "skipped" (never
--- had a thumb_time to work with at all). Safe to re-run every startup -- a row with thumb_time IS
--- NULL can never succeed regardless of when it was created, so forcing it to 'skipped' is always
--- correct, not just a one-time repair.
-UPDATE yard_stats.visits SET thumb_crop_status = 'skipped'
-WHERE thumb_time IS NULL AND thumb_crop_status IN ('new', 'retry', 'failed');
+-- A previous version of this migration force-set thumb_crop_status='skipped' for any row with
+-- thumb_time IS NULL, back when the re-crop seeked to thumb_time specifically and could never
+-- succeed without it. That's no longer true -- crop.build_visit_preview samples frames
+-- proportionally across the visit's own clip duration (start_ts/end_ts/cameras only), so a row
+-- missing thumb_time can still be processed successfully. That backfill UPDATE was removed
+-- accordingly; any row it previously force-skipped stays 'skipped' (this migration doesn't retroactively
+-- reset it), but new/retried rows are no longer affected by thumb_time's presence at all.
 
 CREATE TABLE IF NOT EXISTS yard_stats.vehicle_sightings (
   id SERIAL PRIMARY KEY,

@@ -143,14 +143,12 @@ def test_count_visit_thumb_crop_in_progress(conn_ok):
         _cleanup(visit_id)
 
 
-def test_ensure_schema_skips_pre_existing_rows_with_null_thumb_time(conn_ok):
-    # Regression test: a visit inserted before VISIT_THUMB_CROP_ENABLED existed (thumb_time never
-    # populated) got its thumb_crop_status backfilled to the new column's DEFAULT ('new') by the
-    # ALTER TABLE ADD COLUMN in schema.sql -- confirmed in production this crashed
-    # visit_thumb_worker (thumb_time - clip_start_epoch against a NULL) on every claim attempt
-    # until it burned all its attempts and went 'failed'. Simulates that pre-existing state
-    # directly (bypassing record_visit, which always sets the status correctly for new rows) and
-    # confirms re-running db.ensure_schema() repairs it to 'skipped'.
+def test_visit_thumb_crop_no_longer_requires_thumb_time(conn_ok):
+    # crop.build_visit_preview samples frames proportionally across the visit's own clip duration
+    # (start_ts/end_ts/cameras only) -- unlike its predecessor (crop_visit_thumbnail, which seeked
+    # to thumb_time specifically), a row with thumb_time IS NULL can still be claimed and
+    # processed successfully, so ensure_schema no longer force-skips such rows (that cleanup was
+    # removed from schema.sql along with the old approach).
     visit_id = _insert_visit(thumb_crop_status="new", thumb_time=None)
     try:
         db.ensure_schema()
@@ -158,39 +156,6 @@ def test_ensure_schema_skips_pre_existing_rows_with_null_thumb_time(conn_ok):
             "SELECT thumb_crop_status FROM yard_stats.visits WHERE id = %s",
             (visit_id,), fetch=True,
         )[0]
-        assert row["thumb_crop_status"] == "skipped"
-    finally:
-        _cleanup(visit_id)
-
-
-def test_ensure_schema_also_repairs_failed_rows_with_null_thumb_time(conn_ok):
-    # By the time this fix ships, a row like the one above may have already burned all its
-    # attempts and gone 'failed' -- that reports a misleading "a real attempt went wrong" rather
-    # than "never had a thumb_time to work with at all", so this must be repaired too, not just
-    # 'new'/'retry'.
-    visit_id = _insert_visit(thumb_crop_status="failed", thumb_time=None)
-    try:
-        db.ensure_schema()
-        row = db._execute(
-            "SELECT thumb_crop_status FROM yard_stats.visits WHERE id = %s",
-            (visit_id,), fetch=True,
-        )[0]
-        assert row["thumb_crop_status"] == "skipped"
-    finally:
-        _cleanup(visit_id)
-
-
-def test_ensure_schema_does_not_touch_done_rows(conn_ok):
-    # A row that already has a real crop_image_base64 (thumb_crop_status='done') must never be
-    # reset to 'skipped' by this cleanup, even if thumb_time somehow reads NULL by then --
-    # 'done' means the artifact already exists and is safe to keep serving.
-    visit_id = _insert_visit(thumb_crop_status="done", thumb_time=None)
-    try:
-        db.ensure_schema()
-        row = db._execute(
-            "SELECT thumb_crop_status FROM yard_stats.visits WHERE id = %s",
-            (visit_id,), fetch=True,
-        )[0]
-        assert row["thumb_crop_status"] == "done"
+        assert row["thumb_crop_status"] == "new"
     finally:
         _cleanup(visit_id)

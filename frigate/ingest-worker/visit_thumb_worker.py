@@ -42,8 +42,8 @@ def process_claimed_visit(visit: dict) -> None:
         if representative is None or not representative.get("det_id"):
             raise ValueError(f"No representative raw_event with det_id for visit id={visit_id}")
 
-        crop_image_base64 = crop.crop_visit_thumbnail(visit, representative)
-        db.mark_visit_thumb_crop_done(visit_id, crop_image_base64)
+        crop_image_base64, preview_gif_base64 = crop.build_visit_preview(visit, representative)
+        db.mark_visit_thumb_crop_done(visit_id, crop_image_base64, preview_gif_base64)
         logger.info(
             "Cropped visit thumbnail for visit id=%s camera=%s thumb_time=%s",
             visit_id, visit.get("cameras"), visit.get("thumb_time"),

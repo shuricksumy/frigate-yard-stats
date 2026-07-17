@@ -175,8 +175,14 @@ def get_visit(visit_id: int) -> dict | None:
 def visit_thumb_crop_will_be_attempted(review: dict) -> bool:
     # Shared by record_visit (to set the initial thumb_crop_status) and mqtt_ingest's
     # _handle_review_message (to decide whether the Telegram visit-summary send should fire
-    # immediately or be deferred to visit_thumb_worker -- see there for why).
-    return config.VISIT_THUMB_CROP_ENABLED and review.get("thumb_time") is not None
+    # immediately or be deferred to visit_thumb_worker -- see there for why). Used to also require
+    # review.get("thumb_time") is not None, back when crop.build_visit_preview's predecessor
+    # (crop_visit_thumbnail) seeked to thumb_time specifically -- that approach was abandoned (see
+    # CLAUDE.md) in favor of sampling frames proportionally across the visit's own clip duration,
+    # which needs only start_ts/end_ts/cameras, not thumb_time at all. thumb_time is still stored
+    # on the visit row (informational -- Frigate's own opinion of the best moment) but no longer
+    # gates whether a preview can be built.
+    return config.VISIT_THUMB_CROP_ENABLED
 
 
 def record_visit(review: dict) -> int | None:
@@ -193,9 +199,9 @@ def record_visit(review: dict) -> int | None:
     # as insert_raw_event's initial_video_status: a cheap flag set once at insert, so the visit
     # video queue's WHERE clause never even considers these rows while the feature is disabled.
     initial_video_status = "new" if config.STORE_VIDEO_ALERTS else "skipped"
-    # Same reasoning for thumb_crop_status -- also skipped if Frigate didn't actually provide a
-    # thumb_time on this review (shouldn't happen based on live testing, but the re-crop can never
-    # succeed without it regardless of attempts).
+    # Same reasoning for thumb_crop_status -- skipped whenever the feature itself is off
+    # (VISIT_THUMB_CROP_ENABLED); no longer conditioned on thumb_time being present (see
+    # visit_thumb_crop_will_be_attempted).
     initial_thumb_crop_status = "new" if visit_thumb_crop_will_be_attempted(review) else "skipped"
     conn = get_conn()
     conn.autocommit = False
@@ -385,14 +391,15 @@ def claim_visit_thumb_crop_batch(limit: int) -> list:
     )
 
 
-def mark_visit_thumb_crop_done(visit_id: int, crop_image_base64: str) -> None:
+def mark_visit_thumb_crop_done(visit_id: int, crop_image_base64: str, preview_gif_base64: str | None = None) -> None:
     _execute(
         """
         UPDATE yard_stats.visits
-        SET thumb_crop_status = 'done', thumb_crop_status_changed_at = now(), crop_image_base64 = %s
+        SET thumb_crop_status = 'done', thumb_crop_status_changed_at = now(),
+            crop_image_base64 = %s, preview_gif_base64 = %s
         WHERE id = %s
         """,
-        (crop_image_base64, visit_id),
+        (crop_image_base64, preview_gif_base64, visit_id),
     )
 
 
@@ -922,6 +929,7 @@ def list_visits(
                 (v.video_path IS NOT NULL) AS visit_has_video,
                 v.thumb_crop_status,
                 (v.crop_image_base64 IS NOT NULL) AS has_thumb_crop,
+                (v.preview_gif_base64 IS NOT NULL) AS has_preview_gif,
                 re.id AS event_id, re.ai_status, re.crop_status,
                 (re.crop_image_base64 IS NOT NULL) AS event_has_image,
                 row_number() OVER (PARTITION BY v.id ORDER BY re.start_ts ASC, re.id ASC) AS rn,
@@ -934,6 +942,7 @@ def list_visits(
                visit_start_ts AS start_ts, visit_end_ts AS end_ts, event_count,
                event_id AS representative_event_id, ai_status, crop_status,
                visit_video_status AS video_status, thumb_crop_status, has_thumb_crop,
+               has_preview_gif,
                (has_thumb_crop OR event_has_image) AS has_image, visit_has_video AS has_video
         FROM linked
         WHERE rn = 1

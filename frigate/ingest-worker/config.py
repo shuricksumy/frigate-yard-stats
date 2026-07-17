@@ -137,12 +137,13 @@ STORE_VIDEO_ALERTS = _env("STORE_VIDEO_ALERTS", "false").lower() == "true"
 VIDEO_STORAGE_PATH_ALERTS = _env("VIDEO_STORAGE_PATH_ALERTS", "/data/video-alerts")
 
 # -------------------------------------------------
-# Visit thumbnail re-crop (fifth queue stage: visits.thumb_crop_status) -- see
-# visit_thumb_worker.py / crop.crop_visit_thumbnail. Uses Frigate's own review "best frame"
-# choice (data.thumb_time on frigate/reviews, confirmed live via MQTT) instead of guessing via
-# CROP_FRAME_OFFSET_PCT -- but thumb_time is only known once the review closes, well after the
-# representative event's own crop already ran, so this is a separate poll-loop stage producing a
-# separate artifact (visits.crop_image_base64), not a replacement for the events-flow crop.
+# Visit thumbnail/preview re-crop (fifth queue stage: visits.thumb_crop_status) -- see
+# visit_thumb_worker.py / crop.build_visit_preview. Produces a composite grid image (frames
+# sampled proportionally across the visit's own clip, not a single "best moment" seek to Frigate's
+# thumb_time -- that turned out unreliable, see build_visit_preview's docstring) plus a separate
+# animated GIF for human preview. Only known once the review closes, well after the representative
+# event's own crop already ran, so this is a separate poll-loop stage producing separate artifacts
+# (visits.crop_image_base64/preview_gif_base64), not a replacement for the events-flow crop.
 # -------------------------------------------------
 VISIT_THUMB_CROP_ENABLED = _env("VISIT_THUMB_CROP_ENABLED", "false").lower() == "true"
 VISIT_THUMB_CROP_PARALLEL_LIMIT = int(_env("VISIT_THUMB_CROP_PARALLEL_LIMIT", "1"))
@@ -151,11 +152,18 @@ VISIT_THUMB_CROP_PARALLEL_LIMIT = int(_env("VISIT_THUMB_CROP_PARALLEL_LIMIT", "1
 VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS = float(_env("VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS", "5"))
 VISIT_THUMB_CROP_MAX_ATTEMPTS = int(_env("VISIT_THUMB_CROP_MAX_ATTEMPTS", "3"))
 VISIT_THUMB_CROP_RETRY_WAIT_SECONDS = float(_env("VISIT_THUMB_CROP_RETRY_WAIT_SECONDS", "5"))
-# Manually shifts the re-crop's target time relative to thumb_time -- positive = later/forward,
-# negative = earlier/backward. Use this if your crops consistently land a bit off from thumb_time
-# (e.g. camera keyframe spacing during the seek) -- compare a few real crops against what
-# thumb_time should show and nudge this until they line up. 0 = use thumb_time exactly, as-is.
-VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS = float(_env("VISIT_THUMB_CROP_OFFSET_ADJUST_SECONDS", "0"))
+# Which 4 points of the visit's own clip duration to sample for the preview grid/GIF, as
+# percentages (0=clip start, 100=clip end) -- e.g. "5,35,65,90" to stay a bit clear of both edges
+# instead of landing exactly on them. Exactly 4 values required -- the grid assembly is a fixed
+# 2x2 layout (crop.build_visit_preview), not a variable-count one.
+VISIT_PREVIEW_FRAME_PERCENTAGES = [
+    float(p.strip()) for p in _env("VISIT_PREVIEW_FRAME_PERCENTAGES", "0,25,50,100").split(",") if p.strip()
+]
+if len(VISIT_PREVIEW_FRAME_PERCENTAGES) != 4:
+    raise ValueError(
+        f"VISIT_PREVIEW_FRAME_PERCENTAGES must have exactly 4 comma-separated values, "
+        f"got {VISIT_PREVIEW_FRAME_PERCENTAGES!r}"
+    )
 
 # -------------------------------------------------
 # Telegram notifications -- see telegram.py. Disabled (no-op) unless explicitly turned on.
