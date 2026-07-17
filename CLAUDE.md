@@ -518,6 +518,13 @@ alongside From/To -- the advanced panel's own date pickers cover the same need. 
 pickers override the Time range preset when either is set (`fetchEvents`/`fetchVisits` check
 `filters.start || filters.end` first, falling back to `hours` only when both are empty) -- same
 precedence `q`/`event_id` already had over the time window, just extended to cover the preset too.
+
+Every filter except the two free-text inputs (Search AI analysis, Event ID) applies immediately on
+`@change` (Time range, From, To, Type, AI status, Only-with-media) rather than needing the Search
+button/Enter -- changing a dropdown or picking a date with no visible effect until a separate
+submit click read as those controls being broken, not just requiring an extra step. The two
+text inputs stay submit-only deliberately -- firing a request per keystroke would be wasteful and
+janky for something typed character-by-character, unlike a discrete dropdown/date selection.
 `GET /events` itself is filterable by
 `object_type`/`crop_status`/`ai_status`/`video_status`/`has_media`/`event_id`/`q`, defaults to the
 last 1 hour, media-only. `GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same

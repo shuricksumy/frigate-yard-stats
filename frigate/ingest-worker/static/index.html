@@ -40,7 +40,7 @@
         </label>
         <label x-show="!advancedSearch">
           Time range
-          <select x-model.number="filters.hours" :title="(filters.start || filters.end) ? 'Ignored while a custom date range (From/To) is set' : ''">
+          <select x-model.number="filters.hours" @change="applyFilters()" :title="(filters.start || filters.end) ? 'Ignored while a custom date range (From/To) is set' : ''">
             <template x-for="h in hoursOptions" :key="h">
               <option :value="h" x-text="'Last ' + h + (h === 1 ? ' hour' : ' hours')"></option>
             </template>
@@ -54,15 +54,15 @@
           </label>
           <label>
             From
-            <input type="datetime-local" x-model="filters.start">
+            <input type="datetime-local" x-model="filters.start" @change="applyFilters()">
           </label>
           <label>
             To
-            <input type="datetime-local" x-model="filters.end">
+            <input type="datetime-local" x-model="filters.end" @change="applyFilters()">
           </label>
           <label>
             Type
-            <select x-model="filters.objectType">
+            <select x-model="filters.objectType" @change="applyFilters()">
               <option value="all">All</option>
               <template x-for="type in objectTypes" :key="type">
                 <option :value="type" x-text="type.charAt(0).toUpperCase() + type.slice(1)"></option>
@@ -71,7 +71,7 @@
           </label>
           <label x-show="viewMode === 'events'">
             AI status
-            <select x-model="filters.aiStatus">
+            <select x-model="filters.aiStatus" @change="applyFilters()">
               <option value="all">All</option>
               <option value="new">New</option>
               <option value="processing">Processing</option>
@@ -81,7 +81,7 @@
             </select>
           </label>
           <label class="checkbox-label" x-show="viewMode === 'events'">
-            <input type="checkbox" x-model="filters.onlyWithMedia">
+            <input type="checkbox" x-model="filters.onlyWithMedia" @change="applyFilters()">
             Only with media
           </label>
         </div>
