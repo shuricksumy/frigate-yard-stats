@@ -89,7 +89,7 @@
 
       <div class="filter-actions">
         <div class="filter-actions-secondary">
-          <button type="button" class="link-button" @click="advancedSearch = !advancedSearch" x-text="advancedSearch ? 'Hide advanced filters' : 'Advanced filters'"></button>
+          <button type="button" class="link-button" @click="toggleAdvancedSearch()" x-text="advancedSearch ? 'Hide advanced filters' : 'Advanced filters'"></button>
           <button type="button" class="link-button" @click="resetFilters()">Reset</button>
         </div>
         <div class="filter-actions-primary">

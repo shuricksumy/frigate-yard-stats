@@ -187,6 +187,20 @@ function eventsApp() {
       this.applyFilters();
     },
 
+    // Switching modes without resetting left stale advanced-only values (From/To, Event ID, ...)
+    // in effect but invisible once their fields hid again -- e.g. leaving From/To set after
+    // going back to simple mode silently overrode the reappeared Time range preset with no
+    // indication why. Resetting on every toggle (either direction) avoids that class of
+    // confusion entirely rather than only patching the one Time-range/From-To case.
+    toggleAdvancedSearch() {
+      this.advancedSearch = !this.advancedSearch;
+      this.filters = {
+        objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
+        hours: 1, start: "", end: "",
+      };
+      this.applyFilters();
+    },
+
     prevPage() {
       this.offset = Math.max(0, this.offset - this.limit);
       this.refresh();

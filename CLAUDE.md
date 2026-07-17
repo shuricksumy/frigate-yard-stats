@@ -481,7 +481,12 @@ shown redundantly alongside From/To -- the advanced panel's own date pickers cov
 Those From/To pickers override the Time range preset when either is set (`fetchEvents`/
 `fetchVisits` check `filters.start || filters.end` first, falling back to `hours` only when both
 are empty) -- same precedence `q`/`event_id` already had over the time window, just extended to
-cover the preset too.
+cover the preset too. `toggleAdvancedSearch` (the button's click handler, not a plain
+`advancedSearch = !advancedSearch` toggle) resets every filter back to its default on every
+switch, either direction -- values set in one mode otherwise kept applying invisibly once their
+field hid again after switching (e.g. a From/To range set in advanced mode silently overriding the
+reappeared Time range preset in simple mode, with nothing on screen explaining why), so resetting
+on toggle avoids that whole class of confusion rather than patching each case individually.
 `GET /events` itself is filterable by
 `object_type`/`crop_status`/`ai_status`/`video_status`/`has_media`/`event_id`/`q`, defaults to the
 last 1 hour, media-only. `GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same
