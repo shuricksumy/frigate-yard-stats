@@ -71,7 +71,13 @@ jobs:
           # At least one test calls db.ensure_schema() directly -- same reasoning as the "Apply
           # schema" step above.
           SCHEMA_SQL_PATH: schema.sql
-        run: pytest -q
+        # `python -m pytest`, not bare `pytest` -- the test files do `import db`/`import config`
+        # etc. (plain sibling modules, no package/__init__.py), which only resolves if the current
+        # directory is on sys.path. `python -m` adds it automatically; the bare `pytest` console
+        # script does not, which fails every test file's collection with ModuleNotFoundError
+        # despite working fine locally under `python -m pytest` (confirmed by reproducing the
+        # exact CI failure locally with plain `pytest -q` before applying this fix).
+        run: python -m pytest -q
 
   build-and-push:
     needs: test
