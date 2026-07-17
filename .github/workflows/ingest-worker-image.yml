@@ -52,6 +52,10 @@ jobs:
           POSTGRES_DB: home_automation
           FRIGATE_API_BASE: http://frigate.test:5000
           API_KEY: test-key
+          # config.py defaults to /app/schema.sql (the production container's layout) -- here
+          # we're running straight from the checked-out repo, with the working directory already
+          # set to frigate/ingest-worker below, so the plain relative filename resolves correctly.
+          SCHEMA_SQL_PATH: schema.sql
         run: python -c "import db; db.ensure_schema()"
 
       - name: Run tests
@@ -64,6 +68,9 @@ jobs:
           POSTGRES_DB: home_automation
           FRIGATE_API_BASE: http://frigate.test:5000
           API_KEY: test-key
+          # At least one test calls db.ensure_schema() directly -- same reasoning as the "Apply
+          # schema" step above.
+          SCHEMA_SQL_PATH: schema.sql
         run: pytest -q
 
   build-and-push:
