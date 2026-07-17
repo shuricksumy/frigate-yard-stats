@@ -152,40 +152,16 @@ _VISIT_PREVIEW_EDGE_MARGIN_SECONDS = 0.3
 # ~34.6s span -- silently wrong, not caught by anything, since this function (unlike its
 # predecessor) has no duration-vs-window check at all otherwise. video.download_clip has its own
 # analogous guard (VIDEO_MIN_VALID_BYTES) for the exact same "not ready yet" condition on the
-# byte-size axis; this is the duration-axis equivalent for this function specifically.
+# byte-size axis; this is the duration-axis equivalent for this function specifically. Only used
+# by _panels_from_clip (the already-downloaded-video path) -- a locally stored file's duration is
+# trustworthy to probe since there's no race left to guard against by the time it's on disk.
 _MIN_DURATION_RATIO = 0.5
 
 
-def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, str]:
-    # Returns (grid_image_base64, preview_gif_base64). Frigate's own thumb_time turned out
-    # unreliable as a seek target -- its continuous-recording clip endpoint pads an unpredictable
-    # amount of extra footage onto EITHER edge of the requested window, not consistently the same
-    # one request to request (confirmed live: one visit had extra footage prepended before the
-    # start, another had it appended after the end -- no single fixed anchor point is correct for
-    # both). Rather than chasing one precise "best moment" against a moving target, this samples
-    # config.VISIT_PREVIEW_FRAME_PERCENTAGES (default 0/25/50/100, deployment-tunable -- e.g.
-    # "5,35,65,90" to stay a bit clear of both edges) proportionally across the clip's own measured
-    # duration -- covering the visit's whole span regardless of where the real footage boundaries
-    # land -- and combines them into one composite grid image (guaranteed single-image, so any VLM
-    # handles it, unlike sending several separate images which depends on the specific backend/
-    # model actually supporting multi-image prompts) plus a separate animated GIF for human preview
-    # only (a chat-completion vision API decodes an image_url as a single static frame, so an
-    # actual GIF would never convey the animation to a model -- there's no point sending it one).
-    det_id = representative_event["det_id"]
-    event = fetch_frigate_event(det_id)
-    box = compute_full_res_box(event)
-
-    # Prefer a visit video alert_video_worker has already downloaded over fetching our own copy
-    # from Frigate's continuous-recording endpoint. That endpoint has proven to be a race against
-    # Frigate's own cleanup of continuous segments (confirmed live: the same URL requested only a
-    # few seconds apart returned a full clip, then a near-empty one) -- reusing whichever download
-    # already won that race is strictly more reliable than re-entering it on every attempt.
-    local_video_path = visit.get("video_path")
-    if local_video_path and os.path.isfile(local_video_path):
-        clip_url = local_video_path
-    else:
-        clip_row = {"start_ts": visit["start_ts"], "end_ts": visit["end_ts"], "camera": visit["cameras"]}
-        clip_url = video.build_clip_url(clip_row)
+def _panels_from_clip(clip_url: str, visit: dict, panel_vf: str, tmp: str) -> list[str]:
+    # Used when a visit video is already downloaded (alert_video_worker) -- a single known-good
+    # file, so probing its real duration and sampling proportionally across it is trustworthy (no
+    # race left to guard against once the whole clip is sitting on disk).
     duration = _probe_duration_seconds(clip_url)
 
     requested_span = (
@@ -205,24 +181,124 @@ def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, s
         for pct in config.VISIT_PREVIEW_FRAME_PERCENTAGES
     ]
 
+    panel_paths = []
+    for i, offset in enumerate(offsets):
+        raw_path = os.path.join(tmp, f"raw_{i}.jpg")
+        _grab_frame(clip_url, offset, raw_path)
+        if not os.path.exists(raw_path):
+            # Same ffmpeg silent-empty-output behavior crop_and_scale guards against.
+            _grab_frame(clip_url, _FALLBACK_FRAME_OFFSET_SECONDS, raw_path)
+        panel_path = os.path.join(tmp, f"panel_{i}.jpg")
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", raw_path, "-vf", panel_vf, panel_path],
+            check=True, capture_output=True,
+        )
+        panel_paths.append(panel_path)
+    return panel_paths
+
+
+def _grab_frame_near_timestamp(camera: str, timestamp: float, frame_path: str) -> bool:
+    # One independent Frigate request per sampled moment (used when no visit video is downloaded
+    # yet) instead of one whole-visit-span request -- Frigate only durably retains recording
+    # segments actually covered by an alert/detection/motion tag (record.continuous.days: 0 means
+    # a bare continuous segment survives only a very short-lived rolling buffer before Frigate's
+    # own cleanup purges it -- confirmed live: the identical URL returned a full clip, then a
+    # near-empty one, only 5 seconds apart). A single request spanning the whole visit fails as
+    # one unit if any part of that window was never tagged for longer retention; asking
+    # per-moment means a gap at one percentage point doesn't take the other three down with it.
+    # build_clip_url's own -5s/+5s padding gives a small window around `timestamp` for free, so
+    # passing the same instant as both start_ts and end_ts is enough -- the target moment then
+    # sits ~5s into the returned clip.
+    window_row = {"start_ts": timestamp, "end_ts": timestamp, "camera": camera}
+    clip_url = video.build_clip_url(window_row)
+    _grab_frame(clip_url, 5.0, frame_path)
+    if not os.path.exists(frame_path):
+        _grab_frame(clip_url, _FALLBACK_FRAME_OFFSET_SECONDS, frame_path)
+    return os.path.exists(frame_path)
+
+
+def _panels_from_independent_timestamps(visit: dict, panel_vf: str, tmp: str) -> list[str]:
+    start_epoch = _as_datetime(visit["start_ts"]).timestamp()
+    end_epoch = _as_datetime(visit["end_ts"]).timestamp()
+    camera = visit["cameras"]
+    timestamps = [
+        start_epoch + (pct / 100) * (end_epoch - start_epoch)
+        for pct in config.VISIT_PREVIEW_FRAME_PERCENTAGES
+    ]
+
+    raw_paths: list[str | None] = [None] * len(timestamps)
+    for i, ts in enumerate(timestamps):
+        raw_path = os.path.join(tmp, f"raw_{i}.jpg")
+        if _grab_frame_near_timestamp(camera, ts, raw_path):
+            raw_paths[i] = raw_path
+
+    if not any(raw_paths):
+        raise ValueError(
+            f"Could not grab a frame at any of the {len(timestamps)} sampled moments for visit "
+            f"id={visit.get('id')} -- Frigate has no retained footage anywhere in this visit's span"
+        )
+
+    # A gap at one sampled moment (no retained footage right there -- see above) reuses the
+    # nearest earlier successful frame rather than failing the whole grid over one missing
+    # percentage point; a leading gap (before any success) borrows the first success instead.
+    last_good = next(p for p in raw_paths if p is not None)
+    filled_paths = []
+    for p in raw_paths:
+        if p is not None:
+            last_good = p
+        filled_paths.append(last_good)
+
+    panel_paths = []
+    for i, raw_path in enumerate(filled_paths):
+        panel_path = os.path.join(tmp, f"panel_{i}.jpg")
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", raw_path, "-vf", panel_vf, panel_path],
+            check=True, capture_output=True,
+        )
+        panel_paths.append(panel_path)
+    return panel_paths
+
+
+def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, str]:
+    # Returns (grid_image_base64, preview_gif_base64). Frigate's own thumb_time turned out
+    # unreliable as a seek target -- its continuous-recording clip endpoint pads an unpredictable
+    # amount of extra footage onto EITHER edge of the requested window, not consistently the same
+    # one request to request (confirmed live: one visit had extra footage prepended before the
+    # start, another had it appended after the end -- no single fixed anchor point is correct for
+    # both). Rather than chasing one precise "best moment" against a moving target, this samples
+    # config.VISIT_PREVIEW_FRAME_PERCENTAGES (default 0/25/50/100, deployment-tunable -- e.g.
+    # "5,35,65,90" to stay a bit clear of both edges) proportionally across the visit's own span,
+    # combined into one composite grid image (guaranteed single-image, so any VLM handles it,
+    # unlike sending several separate images which depends on the specific backend/model actually
+    # supporting multi-image prompts) plus a separate animated GIF for human preview only (a
+    # chat-completion vision API decodes an image_url as a single static frame, so an actual GIF
+    # would never convey the animation to a model -- there's no point sending it one).
+    det_id = representative_event["det_id"]
+    event = fetch_frigate_event(det_id)
+    box = compute_full_res_box(event)
+
     # Each panel scaled to half MAX_CROP_DIMENSION so the assembled 2x2 grid lands near
     # MAX_CROP_DIMENSION overall, not 4x it.
     panel_vf = _build_vf_filter(box, config.MAX_CROP_DIMENSION // 2)
 
     with tempfile.TemporaryDirectory() as tmp:
-        panel_paths = []
-        for i, offset in enumerate(offsets):
-            raw_path = os.path.join(tmp, f"raw_{i}.jpg")
-            _grab_frame(clip_url, offset, raw_path)
-            if not os.path.exists(raw_path):
-                # Same ffmpeg silent-empty-output behavior crop_and_scale guards against.
-                _grab_frame(clip_url, _FALLBACK_FRAME_OFFSET_SECONDS, raw_path)
-            panel_path = os.path.join(tmp, f"panel_{i}.jpg")
-            subprocess.run(
-                ["ffmpeg", "-y", "-i", raw_path, "-vf", panel_vf, panel_path],
-                check=True, capture_output=True,
-            )
-            panel_paths.append(panel_path)
+        # Prefer a visit video alert_video_worker has already downloaded -- one known-good file,
+        # cheaper than 4 separate requests. Otherwise (or if that file turns out to be a short/bad
+        # clip too -- alert_video_worker only validates byte size via VIDEO_MIN_VALID_BYTES, which
+        # at typical settings is far below what even a genuinely short few-second clip weighs, so a
+        # bad download can pass that check and get stored as "done") fall through to sampling each
+        # of the 4 moments independently (see _panels_from_independent_timestamps) instead of
+        # treating a bad local file as a permanent dead end -- video_path never changes once set,
+        # so failing here on every retry would otherwise never recover.
+        local_video_path = visit.get("video_path")
+        panel_paths = None
+        if local_video_path and os.path.isfile(local_video_path):
+            try:
+                panel_paths = _panels_from_clip(local_video_path, visit, panel_vf, tmp)
+            except ValueError:
+                pass
+        if panel_paths is None:
+            panel_paths = _panels_from_independent_timestamps(visit, panel_vf, tmp)
 
         grid_path = os.path.join(tmp, "grid.jpg")
         grid_inputs = []

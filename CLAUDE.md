@@ -752,6 +752,55 @@ per retry pass), so a video that finishes downloading in between two thumb-crop 
 up automatically on the next one; `video_path` unset (video storage off, or not yet done) still
 falls back to requesting Frigate directly, exactly as before.
 
+#### When there's no downloaded video: sampling each moment independently instead of one whole-span request
+
+The "requesting Frigate directly" fallback above used to mean one request for the visit's whole
+`start_ts`->`end_ts` span (the same shape `alert_video_worker` uses), then sampling 4 frames out of
+whatever came back -- which meant the `_MIN_DURATION_RATIO` guard's fate was all-or-nothing: if
+Frigate hadn't retained the *entire* window, the whole grid attempt failed, even if some individual
+moments within it were perfectly retrievable. That single-request design was also never guaranteed
+to succeed just because `alert_video_worker` happened to; both independently ask for the same
+range, and per Frigate's own recording model, retention is decided **per recording segment** (each
+~10s), not per review/visit as a whole -- a segment only gets long-lived retention
+(`alerts`/`detections`/`motion`, 5/10/30 days respectively) if something actually triggered one of
+those categories *within that specific segment*; a segment with no fresh trigger only qualifies as
+`continuous`, which is `days: 0` on both cameras here and gets purged almost immediately by
+Frigate's own cleanup. A visit with a mostly-stationary object (little re-triggering) can easily
+have long stretches that were never anything but `continuous`-tagged, gone within seconds, even
+though the review/visit itself is retained as metadata indefinitely.
+
+Fixed by replacing the single whole-span request with `_panels_from_independent_timestamps`: each
+of the 4 `VISIT_PREVIEW_FRAME_PERCENTAGES` points is converted to its own absolute epoch timestamp
+(`visit.start_ts + pct/100 * (end_ts - start_ts)`) and requested as its own tiny window via
+`_grab_frame_near_timestamp` (reusing `build_clip_url`'s own -5s/+5s padding by passing the same
+instant as both `start_ts` and `end_ts`, so the target moment lands ~5s into its own small clip).
+A gap at any one moment (nothing retained right there) no longer takes the other three down with
+it -- it reuses the nearest earlier successful frame instead (a leading gap borrows the first
+success found); only raises if *none* of the 4 moments produced anything at all. This also drops
+the need for `_MIN_DURATION_RATIO`/`_VISIT_PREVIEW_EDGE_MARGIN_SECONDS` entirely on this path --
+there's no single probed duration to sanity-check a nominal window against anymore, since every
+request is already scoped to exactly the moment it wants.
+
+`build_visit_preview`'s already-downloaded-video path (`_panels_from_clip`) can itself now fall
+through to this same independent-timestamp method rather than being a second all-or-nothing dead
+end: `alert_video_worker` only validates a byte-size floor (`VIDEO_MIN_VALID_BYTES`, `1000` bytes
+in this deployment -- confirmed live to be far below what even a genuinely short few-second clip
+weighs), so a bad, too-short download can still pass that check and get stored as `video_path`, at
+which point it never changes again. Without a fallback, `_panels_from_clip`'s own duration-ratio
+check would then raise on *every* retry, forever, even though the more robust independent-timestamp
+method sitting right next to it could very likely still succeed. `build_visit_preview` now catches
+that specific `ValueError` and falls through instead of propagating it. Net effect: the
+already-downloaded video is purely a cheap optimization (one file read instead of 4 HTTP round
+trips) layered on top of the independent-timestamp method, which is the actual source of
+correctness -- it can only make a visit's preview faster, never worse, and `VISIT_THUMB_CROP_ENABLED`
+needs no dependency on `STORE_VIDEO_ALERTS` at all (a visit with no stored video, or none ever
+attempted, still builds a preview entirely from direct-to-Frigate per-moment requests). Verified
+against real production data via `docker exec` (not just mocked unit tests): both the
+already-downloaded-video path and the independent-timestamp path produce correct, real grids from
+the same live visit -- the only difference being the independent path's timestamp spread across
+panels is naturally tighter for a very short visit (it samples proportionally across the visit's
+own real span, not the wider padded window a downloaded clip provides for free).
+
 #### Wired into the AI queue, the alerts report, and Telegram
 
 All three remaining consumers use `crop_image_base64` (the composite grid, once built) exactly as
