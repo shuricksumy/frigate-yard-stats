@@ -691,6 +691,30 @@ tab uses these visit-scoped endpoints instead of the representative event's dire
 grid/lightbox picks up the better artifact automatically once ready, with no client-side fallback
 logic of its own.
 
+#### Bug: no defense against Frigate's clip endpoint returning a not-yet-finalized/placeholder clip
+
+The pivot to proportional sampling (above) sidestepped the *edge-padding* problem, but confirmed
+live in production it introduced a new, more basic gap: `build_visit_preview` has no check at all
+that the clip it got back is actually complete. A real visit's nominal window (`end_ts+5 -
+(start_ts-5)`) was ~44.6s, but the clip Frigate returned was only ~3.9s -- Frigate's continuous-
+recording endpoint hadn't finished writing that segment yet, the same "not ready" condition
+`video.download_clip`'s `VIDEO_MIN_VALID_BYTES` check exists to catch on the byte-size axis.
+Sampling `VISIT_PREVIEW_FRAME_PERCENTAGES` of that *tiny* duration instead of the visit's real span
+produced 4 frames all crammed within the same ~3.9s window (confirmed by pulling the actual stored
+grid: all 4 panels' burned-in OSD timestamps landed within a 3-second span, nowhere near the
+visit's real ~34.6s of activity) -- silently wrong, `thumb_crop_status` still went `done`, nothing
+signaled it. Diagnosed by comparing the visit's DB-recorded duration (event_count > 1, i.e. a
+multi-event visit expected to span tens of seconds) against the grid's actual sampled timestamps.
+
+Fixed by comparing the probed duration against the nominal requested window before sampling
+anything: if `duration < requested_span * _MIN_DURATION_RATIO` (a fixed `0.5`, not deployment-
+tunable, same treatment as `_DURATION_SAFETY_MARGIN_SECONDS` used to be), raise instead of silently
+proceeding -- routes into the existing retry-then-fallback path
+(`visit_thumb_worker.mark_visit_thumb_crop_retry_or_failed`) so a later retry (once Frigate has
+actually finished writing the segment) can succeed instead. `0.5` is deliberately generous -- this
+guards against an ~11x shortfall like the one found, not the few-seconds segment-boundary jitter
+proportional sampling is already designed to tolerate.
+
 #### Wired into the AI queue, the alerts report, and Telegram
 
 All three remaining consumers use `crop_image_base64` (the composite grid, once built) exactly as

@@ -144,6 +144,17 @@ def _probe_duration_seconds(clip_url: str) -> float:
 # even if that's already tuned to avoid the exact edges (e.g. "5,35,65,90").
 _VISIT_PREVIEW_EDGE_MARGIN_SECONDS = 0.3
 
+# Guards against Frigate's continuous-recording clip endpoint returning a not-yet-finalized/
+# placeholder clip -- confirmed live in production: a visit whose nominal window (end_ts+5 -
+# (start_ts-5)) was ~44.6s got back a clip only ~3.9s long (an ~11x shortfall, not the few-seconds
+# segment-boundary jitter this design is meant to tolerate). Sampling percentages of THAT duration
+# produced 4 frames all crammed within the same ~3.9s window instead of spanning the visit's real
+# ~34.6s span -- silently wrong, not caught by anything, since this function (unlike its
+# predecessor) has no duration-vs-window check at all otherwise. video.download_clip has its own
+# analogous guard (VIDEO_MIN_VALID_BYTES) for the exact same "not ready yet" condition on the
+# byte-size axis; this is the duration-axis equivalent for this function specifically.
+_MIN_DURATION_RATIO = 0.5
+
 
 def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, str]:
     # Returns (grid_image_base64, preview_gif_base64). Frigate's own thumb_time turned out
@@ -167,6 +178,17 @@ def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, s
     clip_row = {"start_ts": visit["start_ts"], "end_ts": visit["end_ts"], "camera": visit["cameras"]}
     clip_url = video.build_clip_url(clip_row)
     duration = _probe_duration_seconds(clip_url)
+
+    requested_span = (
+        (int(_as_datetime(visit["end_ts"]).timestamp()) + 5)
+        - (int(_as_datetime(visit["start_ts"]).timestamp()) - 5)
+    )
+    if duration < requested_span * _MIN_DURATION_RATIO:
+        raise ValueError(
+            f"Clip duration {duration:.3f}s is far shorter than the requested window "
+            f"{requested_span:.3f}s for visit id={visit.get('id')} -- Frigate likely hasn't "
+            f"finished writing this recording segment yet"
+        )
 
     usable = max(duration - 2 * _VISIT_PREVIEW_EDGE_MARGIN_SECONDS, 0.0)
     offsets = [

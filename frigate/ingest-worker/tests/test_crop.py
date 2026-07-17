@@ -149,6 +149,37 @@ def _fake_run_factory_for_preview(offsets_that_produce_no_output=frozenset()):
     return fake_run, calls
 
 
+def test_build_visit_preview_raises_when_clip_is_far_shorter_than_requested(monkeypatch):
+    # Regression test: confirmed live in production that a visit's nominal window (~44.6s) got
+    # back a clip only ~3.9s long -- Frigate's continuous-recording endpoint hadn't finished
+    # writing the segment yet (the same "not ready" condition VIDEO_MIN_VALID_BYTES guards against
+    # on the byte-size axis, video.download_clip). Without this check, build_visit_preview sampled
+    # percentages of that tiny duration instead, producing 4 frames all crammed within the same
+    # ~3.9s window instead of spanning the visit's real ~34.6s span -- silently wrong, thumb_crop_
+    # status still went 'done'. This must raise instead, routing into the normal retry-then-
+    # fallback path (visit_thumb_worker.py).
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
+    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 3.9335)
+    monkeypatch.setattr(
+        crop.subprocess, "run",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no frame grab should be attempted")),
+    )
+
+    visit = {
+        "id": 163,
+        "start_ts": 1784283716.537530,
+        "end_ts": 1784283751.139967,  # nominal requested span ~44.6s
+        "cameras": "outside",
+    }
+    representative_event = {"det_id": "fake-det-id"}
+
+    try:
+        crop.build_visit_preview(visit, representative_event)
+        assert False, "expected ValueError"
+    except ValueError as exc:
+        assert "far shorter than the requested window" in str(exc)
+
+
 def test_build_visit_preview_uses_visit_scoped_clip_and_samples_actual_duration(monkeypatch):
     # Frigate's continuous-recording clip endpoint pads an unpredictable amount of extra footage
     # onto EITHER edge of the requested window, inconsistently request to request (confirmed live
