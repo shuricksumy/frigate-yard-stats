@@ -68,6 +68,23 @@ def test_group_by_visit_keeps_ungrouped_sightings_separate():
     assert len(groups) == 2
 
 
+def test_build_alert_rows_orders_newest_first():
+    older = {
+        "visit_id": None, "raw_event_id": 1, "start_ts": datetime(2026, 7, 17, 9, 0, 0),
+        "camera": "outside2", "crop_image_base64": None,
+        "color": "red", "body_type": None, "make_guess": None, "model_guess": None,
+        "notable_features": None, "plate_text_llm": None, "plate_text_frigate": None,
+    }
+    newer = {
+        "visit_id": None, "raw_event_id": 2, "start_ts": datetime(2026, 7, 17, 10, 0, 0),
+        "camera": "outside2", "crop_image_base64": None,
+        "color": "blue", "body_type": None, "make_guess": None, "model_guess": None,
+        "notable_features": None, "plate_text_llm": None, "plate_text_frigate": None,
+    }
+    html = report._build_alert_rows([older, newer], [], [], [0])
+    assert html.index("blue") < html.index("red")
+
+
 def test_build_alert_rows_renders_both_summaries_in_one_row():
     t = datetime(2026, 7, 17, 10, 0, 0)
     car = {

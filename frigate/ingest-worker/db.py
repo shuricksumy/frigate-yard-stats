@@ -1351,7 +1351,7 @@ def get_report_data(start: datetime, end: datetime, source: str = "events") -> d
         {visit_join}
         WHERE vs.created_at >= %s AND vs.created_at <= %s
         {visit_clause}
-        ORDER BY re.start_ts ASC
+        ORDER BY re.start_ts DESC
         """,
         (start, end), fetch=True,
     )
@@ -1365,7 +1365,7 @@ def get_report_data(start: datetime, end: datetime, source: str = "events") -> d
         {visit_join}
         WHERE ps.created_at >= %s AND ps.created_at <= %s
         {visit_clause}
-        ORDER BY re.start_ts ASC
+        ORDER BY re.start_ts DESC
         """,
         (start, end), fetch=True,
     )

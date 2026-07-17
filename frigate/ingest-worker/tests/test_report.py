@@ -88,6 +88,20 @@ def _window():
     return now - timedelta(hours=1), now + timedelta(hours=1)
 
 
+def test_get_report_data_orders_newest_first(conn_ok):
+    older_id, older_det = _insert_raw_event("now() - interval '10 seconds'")
+    newer_id, newer_det = _insert_raw_event("now()")
+    _insert_vehicle_sighting(older_id)
+    _insert_vehicle_sighting(newer_id)
+    try:
+        start, end = _window()
+        data = db.get_report_data(start, end)
+        raw_event_ids = [v["raw_event_id"] for v in data["vehicles"]]
+        assert raw_event_ids.index(newer_id) < raw_event_ids.index(older_id)
+    finally:
+        _cleanup(older_id, newer_id)
+
+
 def test_default_source_events_includes_every_grouped_sighting(conn_ok):
     older_id, older_det = _insert_raw_event("now() - interval '10 seconds'")
     newer_id, newer_det = _insert_raw_event("now()")

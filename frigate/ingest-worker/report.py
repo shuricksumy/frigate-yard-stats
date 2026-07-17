@@ -84,7 +84,9 @@ def _group_by_visit(cars: list, persons: list) -> list[dict]:
 
 
 def _build_alert_rows(cars: list, persons: list, lightboxes: list, counter: list) -> str:
-    groups = sorted(_group_by_visit(cars, persons), key=lambda g: g["start_ts"])
+    # Newest first -- matches get_report_data's own ORDER BY re.start_ts DESC and the web report
+    # UI's convention (most recent activity at the top, not buried at the bottom of a long window).
+    groups = sorted(_group_by_visit(cars, persons), key=lambda g: g["start_ts"], reverse=True)
     rows = []
     for g in groups:
         vehicle_text = "; ".join(s for s in (_vehicle_summary(v) for v in g["vehicles"]) if s) or None

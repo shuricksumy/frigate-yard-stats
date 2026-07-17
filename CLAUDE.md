@@ -464,17 +464,24 @@ shared `refresh()` dispatcher so `applyFilters`/`prevPage`/`nextPage` stay view-
 card's click handler (`openVisitLightbox`) builds a minimal event-shaped object from the visit's
 `representative_event_id`/`has_image`/`has_video`/`ai_status` and hands it to the same
 `openLightbox` the Events view uses, rather than a separate lightbox implementation. Filters that
-don't apply to the Visits view (Event ID, AI status, Only with media, Search AI analysis) disable
-themselves when `viewMode === 'visits'`, same pattern as their existing `filters.eventId`-driven
-disabling. The filter bar itself defaults to a simplified view -- Search AI analysis plus a "Time range"
-preset dropdown (`filters.hours`, options `[1, 3, 6, 12, 24]` hours, sent as `GET /events`'/
-`GET /visits`'s own `hours` param) -- with an "Advanced filters" toggle (`advancedSearch`) that
-reveals Event ID/From/To/Type/AI status/Only-with-media on demand; those fields' wrapping
-`<div class="advanced-filters">` is `display: contents` in CSS so they flow as direct flex items
-of `.filters` when shown, rather than nesting a visible sub-box. The advanced panel's From/To
-date pickers override the Time range preset when either is set (`fetchEvents`/`fetchVisits` check
-`filters.start || filters.end` first, falling back to `hours` only when both are empty) -- same
-precedence `q`/`event_id` already had over the time window, just extended to cover the preset too.
+don't apply to the Visits view (Event ID, AI status, Only with media, Search AI analysis) are never
+disabled -- an earlier version disabled them via `viewMode === 'visits'`-driven `:disabled`
+bindings, but that turned out more confusing than helpful (half the filter bar visually greyed out
+with no obvious reason why); `fetchVisits` already silently ignores those fields itself (see its
+own comment), so leaving every control always interactive is simpler and no less correct. A
+`:title` tooltip on the ones that don't apply notes as much ("Not used in Visits view") without
+blocking interaction. The filter bar itself defaults to a simplified view -- Search AI analysis
+plus a "Time range" preset dropdown (`filters.hours`, options `[1, 3, 6, 12, 24]` hours, sent as
+`GET /events`'/`GET /visits`'s own `hours` param) -- with an "Advanced filters" toggle
+(`advancedSearch`) that reveals Event ID/From/To/Type/AI status/Only-with-media on demand; those
+fields' wrapping `<div class="advanced-filters">` is `display: contents` in CSS so they flow as
+direct flex items of `.filters` when shown, rather than nesting a visible sub-box. The Time range
+preset itself is hidden while the advanced panel is open (`x-show="!advancedSearch"`) rather than
+shown redundantly alongside From/To -- the advanced panel's own date pickers cover the same need.
+Those From/To pickers override the Time range preset when either is set (`fetchEvents`/
+`fetchVisits` check `filters.start || filters.end` first, falling back to `hours` only when both
+are empty) -- same precedence `q`/`event_id` already had over the time window, just extended to
+cover the preset too.
 `GET /events` itself is filterable by
 `object_type`/`crop_status`/`ai_status`/`video_status`/`has_media`/`event_id`/`q`, defaults to the
 last 1 hour, media-only. `GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same
@@ -488,12 +495,6 @@ param (in addition to the usual `X-API-Key` header) since `<img>`/`<video>` tags
 custom headers -- the UI itself just stores the key in a long-lived cookie after validating it
 against the API once.
 
-Note on the disabled-filter fix: Alpine's `x-bind:disabled` only removes a boolean HTML attribute
-when the bound expression is exactly `false`/`null`/`undefined` -- any other falsy value (an empty
-string, `0`) still counts as "set the attribute." Every `:disabled="filters.eventId"`-style binding
-in this UI is wrapped in `!!(...)` for that reason (`filters.eventId` starts as `""`, a string, not
-a boolean) -- confirmed live in a headless browser that omitting the `!!` left every gated filter
-permanently disabled regardless of `filters.eventId`'s actual value.
 
 An optional `mosquitto` Compose profile (`--profile mqtt`) provides a local/dev MQTT broker for
 bringing up the whole pipeline from scratch without an existing broker -- fully opt-in, never
