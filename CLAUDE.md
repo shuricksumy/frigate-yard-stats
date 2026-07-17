@@ -725,6 +725,33 @@ actually finished writing the segment) can succeed instead. `0.5` is deliberatel
 guards against an ~11x shortfall like the one found, not the few-seconds segment-boundary jitter
 proportional sampling is already designed to tolerate.
 
+#### Reusing an already-downloaded visit video instead of re-racing Frigate's clip endpoint
+
+The `_MIN_DURATION_RATIO` guard above was framed as catching Frigate "not having finished writing
+the segment yet" -- confirmed live that this is often not a timing race that a later retry
+outlasts, but a race against Frigate's own cleanup of continuous-recording segments (both cameras
+run `record.continuous.days: 0` in `frigate.conf`, so continuous footage only survives in a very
+short-lived rolling buffer before Frigate purges it). Confirmed directly: the identical clip URL,
+requested only 5 seconds apart by two different queue stages, returned a full-length clip the
+first time and a near-empty one the second -- and re-requesting the same URL minutes later
+continued to return the same near-empty result, ruling out "just needs more time." Worse,
+`STORE_VIDEO_ALERTS`'s `alert_video_worker` requests this exact same URL (via
+`video.build_clip_url`) independently, and empirically tends to win that race more often (it only
+needs one successful attempt, shortly after the review closes) -- meaning a full-length clip was
+frequently already sitting on disk (`visits.video_path`) at the exact moments `build_visit_preview`
+was re-losing the same race against Frigate.
+
+Fixed by having `build_visit_preview` prefer that already-downloaded file
+(`visit.get("video_path")`, when the file exists on disk) over re-fetching from Frigate at all --
+confirmed against the two real visits that prompted this fix that in both cases, by the time of the
+grid-building attempt that would have used it, the video worker had already stored a full-length
+clip. This is a pure opportunistic win, not a hard dependency between the two independent
+`STORE_VIDEO_ALERTS`/`VISIT_THUMB_CROP_ENABLED` switches -- each queue stage still re-fetches its
+own fresh copy of the visit row on every attempt (a separate `claim_visit_thumb_crop_batch` call
+per retry pass), so a video that finishes downloading in between two thumb-crop attempts is picked
+up automatically on the next one; `video_path` unset (video storage off, or not yet done) still
+falls back to requesting Frigate directly, exactly as before.
+
 #### Wired into the AI queue, the alerts report, and Telegram
 
 All three remaining consumers use `crop_image_base64` (the composite grid, once built) exactly as

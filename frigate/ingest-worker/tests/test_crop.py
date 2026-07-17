@@ -210,6 +210,53 @@ def test_build_visit_preview_uses_visit_scoped_clip_and_samples_actual_duration(
     assert offsets == [0.3, 5.3, 10.3, 20.3]
 
 
+def test_build_visit_preview_reuses_already_downloaded_visit_video(monkeypatch, tmp_path):
+    # Regression test: confirmed live that alert_video_worker's own clip download can succeed
+    # (full-length clip) mere seconds before build_visit_preview's independent re-request of the
+    # exact same Frigate URL comes back near-empty -- Frigate's continuous-recording endpoint is a
+    # race against its own segment cleanup, not a stable source you can re-query freely. Once a
+    # visit's video is already stored on disk (video_path set), reuse that file instead of
+    # re-entering the race.
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
+    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 20.6)
+    fake_run, calls = _fake_run_factory_for_preview()
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
+
+    local_video = tmp_path / "visit-171.mp4"
+    local_video.write_bytes(b"fake-clip-bytes")
+
+    visit = {
+        "start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2",
+        "video_path": str(local_video),
+    }
+    representative_event = {"det_id": "1784219191.5-abc123"}
+
+    grid_b64, gif_b64 = crop.build_visit_preview(visit, representative_event)
+
+    assert grid_b64 and gif_b64
+    grab_calls = [c for c in calls if "-ss" in c]
+    assert {c[c.index("-i") + 1] for c in grab_calls} == {str(local_video)}
+
+
+def test_build_visit_preview_fetches_from_frigate_when_no_video_stored_yet(monkeypatch):
+    # video_path absent (STORE_VIDEO_ALERTS off, or the video worker hasn't succeeded yet) --
+    # must fall back to the direct Frigate request rather than erroring or reusing a stale path.
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
+    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 20.6)
+    fake_run, calls = _fake_run_factory_for_preview()
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
+
+    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2", "video_path": None}
+    representative_event = {"det_id": "1784219191.5-abc123"}
+
+    crop.build_visit_preview(visit, representative_event)
+
+    grab_calls = [c for c in calls if "-ss" in c]
+    assert {c[c.index("-i") + 1] for c in grab_calls} == {
+        "http://frigate.test:5000/api/outside2/start/1784219186/end/1784219206/clip.mp4"
+    }
+
+
 def test_build_visit_preview_respects_configured_frame_percentages(monkeypatch):
     # VISIT_PREVIEW_FRAME_PERCENTAGES is deployment-tunable (e.g. "5,35,65,90" to stay a bit clear
     # of both edges instead of landing exactly on them) -- confirms changing it actually changes

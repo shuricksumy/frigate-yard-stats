@@ -175,8 +175,17 @@ def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, s
     event = fetch_frigate_event(det_id)
     box = compute_full_res_box(event)
 
-    clip_row = {"start_ts": visit["start_ts"], "end_ts": visit["end_ts"], "camera": visit["cameras"]}
-    clip_url = video.build_clip_url(clip_row)
+    # Prefer a visit video alert_video_worker has already downloaded over fetching our own copy
+    # from Frigate's continuous-recording endpoint. That endpoint has proven to be a race against
+    # Frigate's own cleanup of continuous segments (confirmed live: the same URL requested only a
+    # few seconds apart returned a full clip, then a near-empty one) -- reusing whichever download
+    # already won that race is strictly more reliable than re-entering it on every attempt.
+    local_video_path = visit.get("video_path")
+    if local_video_path and os.path.isfile(local_video_path):
+        clip_url = local_video_path
+    else:
+        clip_row = {"start_ts": visit["start_ts"], "end_ts": visit["end_ts"], "camera": visit["cameras"]}
+        clip_url = video.build_clip_url(clip_row)
     duration = _probe_duration_seconds(clip_url)
 
     requested_span = (
