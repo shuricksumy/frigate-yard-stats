@@ -440,12 +440,24 @@ earliest-linked raw_event (`row_number()` over each visit's linked `raw_events`,
 `start_ts` then `id` -- the simplest deterministic pick for a first comparison pass, not a
 "best crop" heuristic); `event_count` is how many det_ids were grouped into it, both computed in
 one pass via window functions over a `visit_id`-linked join, not two separate queries. Filterable
-by `object_type`/`camera`/`start`/`end`/`hours` only -- `event_id`/`q`/`ai_status`/`has_media` are
+by `object_type`/`camera`/`start`/`end`/`hours`/`q` -- `event_id`/`ai_status`/`has_media` are still
 per-raw_event concepts that don't compose cleanly with a grouped view, so this endpoint doesn't
 accept them at all rather than half-supporting them. Purely additive and read-only -- doesn't
 affect `GET /events`, the AI queue, or Telegram notifications; exists so `visits` data can be
 judged visually against real traffic before deciding whether to build the actual dedup behavior
 described above.
+
+`q` (added after the fact, once `only_visit_representative`'s dedup became object-type-aware --
+see above) matches a visit if **any** of its linked raw_events has a vehicle_sighting/
+person_sighting whose AI analysis text matches -- same fields/ILIKE substring match `GET /events`'
+own `q` uses (`db.list_visits`'s `EXISTS` subquery against a fresh `raw_events`/sighting join, not
+a condition on the row `list_visits`'s own CTE already joined in for `representative_event_id`/
+`event_count` -- a visit's match can come from a *different* linked event than whichever one
+`row_number()` picks as representative, e.g. searching a person's description on a visit whose
+representative happens to be the car, so this has to check across every linked event
+independently rather than filtering the CTE's per-row join, which would also wrongly skew
+`event_count`). Same window-bypass behavior as `GET /events`' `q` too -- ignores `start`/`end`/
+`hours` entirely, since you're searching your whole history, not browsing a range.
 
 `has_video`/`video_status` on `GET /visits` describe the *visit's own* video
 (`STORE_VIDEO_ALERTS`/`alert_video_worker.py`), not the representative raw_event's -- those are
@@ -470,37 +482,42 @@ between `GET /events` and `GET /visits` (`viewMode`, drives `fetchEvents`/`fetch
 shared `refresh()` dispatcher so `applyFilters`/`prevPage`/`nextPage` stay view-agnostic); a visit
 card's click handler (`openVisitLightbox`) builds a minimal event-shaped object from the visit's
 `representative_event_id`/`has_image`/`has_video`/`ai_status` and hands it to the same
-`openLightbox` the Events view uses, rather than a separate lightbox implementation. Filters that
-don't apply to the Visits view (Event ID, AI status, Only with media, Search AI analysis) are never
-disabled -- an earlier version disabled them via `viewMode === 'visits'`-driven `:disabled`
-bindings, but that turned out more confusing than helpful (half the filter bar visually greyed out
-with no obvious reason why); `fetchVisits` already silently ignores those fields itself (see its
-own comment), so leaving every control always interactive is simpler and no less correct. A
-`:title` tooltip on the ones that don't apply notes as much without blocking interaction. Search/
-Event ID/AI status doing nothing while sitting on the Visits tab (nothing on screen said why) read
-as a real bug in practice, not just an unclear-but-inert control -- `applyFilters` now auto-switches
-`viewMode` to `'events'` when one of those three is actually set and the Search button is hit while
-on the Visits tab, so the search takes effect instead of silently no-op'ing; the tooltip text
-matches ("switches you to the Events view"). `onlyWithMedia` deliberately isn't part of that
-auto-switch trigger -- toggling a checkbox off doesn't read as a deliberate "search" action the way
-typing text or an id does, so no-op'ing there is less surprising. The filter bar itself defaults to
+`openLightbox` the Events view uses, rather than a separate lightbox implementation.
+
+The filter bar shows only whatever's actually relevant to the active view, rather than every field
+regardless of `viewMode`. Event ID, AI status, and Only-with-media are per-raw_event concepts
+`fetchVisits` has no use for (see its own comment) -- their `<label>`s carry
+`x-show="viewMode === 'events'"` and disappear entirely on the Visits tab, rather than sitting
+there doing nothing. This replaced two earlier, less direct attempts: first disabling them via
+`:disabled` bindings (half the filter bar visually greyed out with no obvious reason why), then
+leaving them enabled with just a `:title` tooltip (Search/Event ID/AI status doing nothing on the
+Visits tab read as a real bug in practice, not just an unclear-but-inert control) plus an
+auto-switch-to-Events-on-search fallback. Search AI analysis (`q`) no longer needs any of that --
+`GET /visits` gained its own `q` support (see above), so it's a real filter in both views now, not
+an Events-only one; it's shown unconditionally. `applyFilters` still auto-switches `viewMode` to
+`'events'` if Event ID or AI status is somehow set while on the Visits tab (a stale value rather
+than the normal path, since both fields are hidden there), as a safety net rather than the primary
+mechanism now.
+
+Switching tabs (`switchView`) or toggling advanced/simple mode (`toggleAdvancedSearch`) both reset
+every filter back to its default (`_defaultFilters()`, one shared helper the two plus
+`resetFilters` all call) -- a value set in one view/mode otherwise kept silently applying once its
+field disappeared after switching (e.g. an Events-only AI status filter carrying over after
+switching to Visits and back, or an advanced-mode From/To range overriding the reappeared Time
+range preset in simple mode) -- resetting on every context switch avoids that whole class of
+confusion rather than patching each case individually. The filter bar itself defaults to
 a simplified view -- Search AI analysis
 plus a "Time range" preset dropdown (`filters.hours`, options `[1, 3, 6, 12, 24]` hours, sent as
 `GET /events`'/`GET /visits`'s own `hours` param) -- with an "Advanced filters" toggle
-(`advancedSearch`) that reveals Event ID/From/To/Type/AI status/Only-with-media on demand; those
-fields' wrapping `<div class="advanced-filters">` is `display: contents` in CSS so they flow as
-direct flex items of `.filters` when shown, rather than nesting a visible sub-box. The Time range
-preset itself is hidden while the advanced panel is open (`x-show="!advancedSearch"`) rather than
-shown redundantly alongside From/To -- the advanced panel's own date pickers cover the same need.
-Those From/To pickers override the Time range preset when either is set (`fetchEvents`/
-`fetchVisits` check `filters.start || filters.end` first, falling back to `hours` only when both
-are empty) -- same precedence `q`/`event_id` already had over the time window, just extended to
-cover the preset too. `toggleAdvancedSearch` (the button's click handler, not a plain
-`advancedSearch = !advancedSearch` toggle) resets every filter back to its default on every
-switch, either direction -- values set in one mode otherwise kept applying invisibly once their
-field hid again after switching (e.g. a From/To range set in advanced mode silently overriding the
-reappeared Time range preset in simple mode, with nothing on screen explaining why), so resetting
-on toggle avoids that whole class of confusion rather than patching each case individually.
+(`advancedSearch`) that reveals From/To/Type (both views) plus Event ID/AI status/Only-with-media
+(Events view only, per the `x-show` above) on demand; those fields' wrapping
+`<div class="advanced-filters">` is `display: contents` in CSS so they flow as direct flex items
+of `.filters` when shown, rather than nesting a visible sub-box. The Time range preset itself is
+hidden while the advanced panel is open (`x-show="!advancedSearch"`) rather than shown redundantly
+alongside From/To -- the advanced panel's own date pickers cover the same need. Those From/To
+pickers override the Time range preset when either is set (`fetchEvents`/`fetchVisits` check
+`filters.start || filters.end` first, falling back to `hours` only when both are empty) -- same
+precedence `q`/`event_id` already had over the time window, just extended to cover the preset too.
 `GET /events` itself is filterable by
 `object_type`/`crop_status`/`ai_status`/`video_status`/`has_media`/`event_id`/`q`, defaults to the
 last 1 hour, media-only. `GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same

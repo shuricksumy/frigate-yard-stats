@@ -128,7 +128,8 @@ def get_visits(
     camera: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
-    hours: float = Query(1, gt=0, description="Used when start/end aren't both given -- window is the last N hours (default: last 1 hour)."),
+    q: str | None = Query(None, description="Free-text search (substring, case-insensitive) across every linked raw_event's AI analysis result -- matches the visit if ANY of its grouped events matches, same fields GET /events' own q searches. Ignores the start/end/hours window entirely, same reasoning as GET /events' q -- you're searching your whole history, not browsing a range."),
+    hours: float = Query(1, gt=0, description="Used when start/end aren't both given -- window is the last N hours (default: last 1 hour). Ignored if q is given."),
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
@@ -138,8 +139,11 @@ def get_visits(
     single row. representative_event_id is the visit's earliest-linked raw_event (used for the
     thumbnail/lightbox); event_count is how many det_ids were grouped into it. Read-only and
     purely additive -- doesn't affect GET /events, the AI queue, or Telegram notifications."""
-    resolved_start, resolved_end = _resolve_window(start, end, hours)
-    return db.list_visits(object_type, camera, resolved_start, resolved_end, limit, offset)
+    if q and q.strip():
+        resolved_start = resolved_end = None
+    else:
+        resolved_start, resolved_end = _resolve_window(start, end, hours)
+    return db.list_visits(object_type, camera, resolved_start, resolved_end, q, limit, offset)
 
 
 @app.get("/visits/{visit_id}/sightings", response_model=schemas.VisitSightings, tags=["events"], dependencies=[Depends(require_api_key)])

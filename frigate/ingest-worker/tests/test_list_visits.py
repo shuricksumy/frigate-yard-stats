@@ -33,7 +33,28 @@ def _insert_raw_event(det_id: str, start_ts_expr: str = "now()", objects: str = 
     return rows[0]["id"]
 
 
+def _insert_vehicle_sighting(raw_event_id: int, **kwargs) -> int:
+    kwargs.setdefault("color", "silver")
+    columns = ", ".join(["raw_event_id"] + list(kwargs))
+    placeholders = ", ".join(["%s"] * (len(kwargs) + 1))
+    rows = db._execute(
+        f"INSERT INTO yard_stats.vehicle_sightings ({columns}) VALUES ({placeholders}) RETURNING id",
+        (raw_event_id, *kwargs.values()), fetch=True,
+    )
+    return rows[0]["id"]
+
+
+def _insert_person_sighting(raw_event_id: int, description: str = "dark jacket") -> int:
+    rows = db._execute(
+        "INSERT INTO yard_stats.person_sightings (raw_event_id, description) VALUES (%s, %s) RETURNING id",
+        (raw_event_id, description), fetch=True,
+    )
+    return rows[0]["id"]
+
+
 def _cleanup(*raw_event_ids, visit_id=None):
+    db._execute("DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id = ANY(%s)", (list(raw_event_ids),))
+    db._execute("DELETE FROM yard_stats.person_sightings WHERE raw_event_id = ANY(%s)", (list(raw_event_ids),))
     db._execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", (list(raw_event_ids),))
     if visit_id is not None:
         db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
@@ -169,5 +190,61 @@ def test_list_visits_has_video_reflects_the_visit_not_the_representative_event(c
         match = next(r for r in rows if r["id"] == visit_id)
         assert match["has_video"] is True
         assert match["video_status"] == "done"
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
+
+
+def test_list_visits_q_matches_visit_by_representative_events_own_sighting(conn_ok):
+    det_id = f"pytest-{uuid.uuid4()}"
+    raw_id = _insert_raw_event(det_id, objects="car")
+    _insert_vehicle_sighting(raw_id, color="silver", model_guess="Passat")
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    try:
+        matching = db.list_visits(q="passat", start=None, end=None, limit=50, offset=0)
+        assert any(r["id"] == visit_id for r in matching)
+
+        non_matching = db.list_visits(q="camry", start=None, end=None, limit=50, offset=0)
+        assert not any(r["id"] == visit_id for r in non_matching)
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
+
+
+def test_list_visits_q_matches_visit_by_a_non_representative_events_sighting(conn_ok):
+    # Regression case this feature exists for: a visit grouping a car det_id (the earliest,
+    # therefore representative) and a person det_id -- the search term only matches the person's
+    # description, not the representative car's own sighting, so this must not be a plain per-row
+    # filter on the representative alone (see list_visits' q comment).
+    car_det = f"pytest-{uuid.uuid4()}"
+    person_det = f"pytest-{uuid.uuid4()}"
+    car_id = _insert_raw_event(car_det, "now() - interval '10 seconds'", objects="car")
+    person_id = _insert_raw_event(person_det, "now()", objects="person")
+    _insert_vehicle_sighting(car_id, color="silver")
+    _insert_person_sighting(person_id, description="wearing a bright green jacket")
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car,person",
+        "start_time": 1784198451.0, "end_time": 1784198470.0,
+        "det_ids": [car_det, person_det],
+    })
+    try:
+        matching = db.list_visits(q="green jacket", start=None, end=None, limit=50, offset=0)
+        assert any(r["id"] == visit_id for r in matching)
+    finally:
+        _cleanup(car_id, person_id, visit_id=visit_id)
+
+
+def test_list_visits_q_is_case_insensitive_substring(conn_ok):
+    det_id = f"pytest-{uuid.uuid4()}"
+    raw_id = _insert_raw_event(det_id, objects="car")
+    _insert_vehicle_sighting(raw_id, notable_features="roof rack")
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    try:
+        matching = db.list_visits(q="ROOF", start=None, end=None, limit=50, offset=0)
+        assert any(r["id"] == visit_id for r in matching)
     finally:
         _cleanup(raw_id, visit_id=visit_id)

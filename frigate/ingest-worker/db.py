@@ -849,6 +849,7 @@ def list_visits(
     camera: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
+    q: str | None = None,
     limit: int = 20,
     offset: int = 0,
 ) -> list:
@@ -884,6 +885,30 @@ def list_visits(
     if end:
         clauses.append("v.start_ts <= %s")
         params.append(end)
+    if q and q.strip():
+        # Matches a visit if ANY of its linked raw_events has a vehicle_sighting/person_sighting
+        # whose AI analysis text matches -- same fields/ILIKE substring match as GET /events' own
+        # q. An EXISTS subquery against a fresh raw_events/sighting join, not a condition on the
+        # `re` row already joined into `linked` below -- a visit can group several distinct events
+        # (e.g. a car and a person), and the match might come from either one, not necessarily the
+        # one row_number picks as the representative, so this can't be a plain per-row filter
+        # without breaking event_count/rn (which need every linked event, matching or not).
+        term = f"%{q.strip()}%"
+        clauses.append("""
+        EXISTS (
+            SELECT 1 FROM yard_stats.raw_events re2
+            LEFT JOIN yard_stats.vehicle_sightings vs2 ON vs2.raw_event_id = re2.id
+            LEFT JOIN yard_stats.person_sightings ps2 ON ps2.raw_event_id = re2.id
+            WHERE re2.visit_id = v.id
+              AND (
+                vs2.color ILIKE %s OR vs2.body_type ILIKE %s OR vs2.make_guess ILIKE %s OR
+                vs2.model_guess ILIKE %s OR vs2.notable_features ILIKE %s OR
+                vs2.plate_text_llm ILIKE %s OR vs2.plate_text_frigate ILIKE %s OR vs2.notes ILIKE %s OR
+                ps2.description ILIKE %s OR ps2.notes ILIKE %s
+              )
+        )
+        """)
+        params.extend([term] * 10)
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.extend([limit, offset])

@@ -47,6 +47,15 @@ function eventsApp() {
       hours: 1, start: "", end: "",
     },
 
+    // Shared by resetFilters/toggleAdvancedSearch/switchView -- every one of them resets to this
+    // same clean slate, just triggered by a different action.
+    _defaultFilters() {
+      return {
+        objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
+        hours: 1, start: "", end: "",
+      };
+    },
+
     lightboxEvent: null,
     lightboxMode: "video",
     // Array of {title, fields}, one entry per sighting -- a plain event has at most one (vehicle
@@ -116,6 +125,11 @@ function eventsApp() {
       if (this.viewMode === mode) return;
       this.viewMode = mode;
       this.offset = 0;
+      // A filter set in one view (an Events-only field, or even a shared one like q) otherwise
+      // kept applying on the next fetch after switching -- same class of confusion the advanced/
+      // simple mode toggle already resets for (see toggleAdvancedSearch). A clean slate on every
+      // tab switch is simpler than reasoning about which values are still meaningful in the new view.
+      this.filters = this._defaultFilters();
       this.refresh();
     },
 
@@ -174,14 +188,13 @@ function eventsApp() {
     },
 
     applyFilters() {
-      // Search/Event ID/AI status are per-raw_event concepts fetchVisits() intentionally ignores
-      // (see there) -- filling them in while on the Visits tab and hitting Search looked like a
-      // no-op bug (nothing on screen explains why), since the fields themselves are never
-      // disabled. Auto-switching to the Events view when one of them is actually set makes the
-      // search actually take effect instead of silently doing nothing.
+      // Event ID/AI status are per-raw_event concepts fetchVisits() intentionally ignores (see
+      // there) and are hidden entirely while on the Visits tab (see index.html), but a value can
+      // still be left over from before a tab switch in edge cases -- auto-switching to Events
+      // when one is actually set makes Search take effect instead of silently doing nothing. q
+      // (Search AI analysis) is excluded here since GET /visits now supports it directly.
       const eventId = String(this.filters.eventId || "").trim();
-      const q = String(this.filters.q || "").trim();
-      const usesEventsOnlyFilter = !!(eventId || q || (this.filters.aiStatus && this.filters.aiStatus !== "all"));
+      const usesEventsOnlyFilter = !!(eventId || (this.filters.aiStatus && this.filters.aiStatus !== "all"));
       if (this.viewMode === "visits" && usesEventsOnlyFilter) {
         this.viewMode = "events";
       }
@@ -190,10 +203,7 @@ function eventsApp() {
     },
 
     resetFilters() {
-      this.filters = {
-        objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
-        hours: 1, start: "", end: "",
-      };
+      this.filters = this._defaultFilters();
       this.advancedSearch = false;
       this.applyFilters();
     },
@@ -205,10 +215,7 @@ function eventsApp() {
     // confusion entirely rather than only patching the one Time-range/From-To case.
     toggleAdvancedSearch() {
       this.advancedSearch = !this.advancedSearch;
-      this.filters = {
-        objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
-        hours: 1, start: "", end: "",
-      };
+      this.filters = this._defaultFilters();
       this.applyFilters();
     },
 
@@ -277,12 +284,13 @@ function eventsApp() {
     async fetchVisits() {
       // Comparison view alongside fetchEvents -- one card per Frigate review/alert segment
       // (visit) instead of one per raw_event, so duplicate det_ids from tracker re-ID/label
-      // flicker collapse into a single card. Only start/end/objectType carry over from the
-      // filter bar -- eventId/q/aiStatus/onlyWithMedia are per-raw_event concepts that don't
-      // compose cleanly with a grouped view, so this view intentionally ignores them rather than
-      // half-applying them.
+      // flicker collapse into a single card. start/end/objectType/q carry over from the filter
+      // bar -- eventId/aiStatus/onlyWithMedia are per-raw_event concepts that don't compose
+      // cleanly with a grouped view, so this view intentionally ignores them rather than
+      // half-applying them (and are hidden entirely in this view -- see index.html).
       this.loading = true;
       try {
+        const q = String(this.filters.q || "").trim();
         const params = new URLSearchParams({
           limit: String(this.limit),
           offset: String(this.offset),
@@ -290,7 +298,11 @@ function eventsApp() {
         if (this.filters.objectType && this.filters.objectType !== "all") {
           params.set("object_type", this.filters.objectType);
         }
-        if (this.filters.start || this.filters.end) {
+        if (q) {
+          // Same window-bypass behavior as fetchEvents' own q -- a text search spans your whole
+          // history, not just the visible date window.
+          params.set("q", q);
+        } else if (this.filters.start || this.filters.end) {
           if (this.filters.start) params.set("start", new Date(this.filters.start).toISOString());
           if (this.filters.end) params.set("end", new Date(this.filters.end).toISOString());
         } else {
