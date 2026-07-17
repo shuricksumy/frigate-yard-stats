@@ -70,6 +70,11 @@ services:
       MAX_CROP_DIMENSION: ${MAX_CROP_DIMENSION:-1280}
       CROP_PADDING_PCT: ${CROP_PADDING_PCT:-0.2}
       CROP_FRAME_OFFSET_PCT: ${CROP_FRAME_OFFSET_PCT:-0.5}
+      # Skips the crop filter entirely (crop_image_base64 becomes the full original frame, still
+      # scaled to MAX_CROP_DIMENSION) -- affects both the web UI display and what gets sent to the
+      # VLM, since they share this one field. Off by default: the crop exists so the model can
+      # read small detail (plates, notable features) a full wide frame makes illegible.
+      CROP_DISABLED: ${CROP_DISABLED:-false}
       # Queue tuning -- how many events may be crop_status='processing' at once, how long
       # before a stuck one is reclaimed, how many crop failures before giving up on an event,
       # and how often the poll loop checks for new work.

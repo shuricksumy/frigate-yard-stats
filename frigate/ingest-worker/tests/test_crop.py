@@ -82,6 +82,45 @@ def test_crop_and_scale_raises_on_invalid_box(monkeypatch):
         pass
 
 
+def test_crop_and_scale_skips_crop_filter_when_disabled(monkeypatch):
+    # CROP_DISABLED=true -- crop_image_base64 becomes the full original frame (still scaled to
+    # MAX_CROP_DIMENSION), not a region around the object. Same field feeds both the web UI and
+    # the VLM call, so this one flag changes what gets displayed AND analyzed.
+    monkeypatch.setattr(config, "CROP_DISABLED", True)
+    captured_vf = []
+
+    def fake_run(cmd, check, capture_output):
+        if "-vf" in cmd:
+            captured_vf.append(cmd[cmd.index("-vf") + 1])
+        if "-ss" in cmd:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"fake-frame-bytes")
+        else:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"fake-cropped-bytes")
+
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
+
+    result = crop.crop_and_scale("http://frigate.test/api/events/abc/clip.mp4", 5.0, [0, 0, 100, 100])
+
+    assert result
+    assert len(captured_vf) == 1
+    assert "crop=" not in captured_vf[0]
+    assert "scale=" in captured_vf[0]
+
+
+def test_crop_and_scale_disabled_ignores_an_invalid_box(monkeypatch):
+    # box is unused when CROP_DISABLED is set, so an otherwise-invalid box must not raise here --
+    # it never affects the result in this mode.
+    monkeypatch.setattr(config, "CROP_DISABLED", True)
+    fake_run, _ = _fake_run_factory(offsets_that_produce_no_output=set())
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
+
+    result = crop.crop_and_scale("http://frigate.test/api/events/abc/clip.mp4", 5.0, [0, 0, 0, 100])
+
+    assert result
+
+
 def test_crop_visit_thumbnail_uses_visit_scoped_clip_and_thumb_time_offset(monkeypatch):
     # thumb_time is an absolute epoch timestamp (unlike CROP_FRAME_OFFSET_PCT, a percentage of one
     # raw_event's own span) and can fall outside the representative event's own window -- so this

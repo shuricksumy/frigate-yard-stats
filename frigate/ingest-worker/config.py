@@ -50,6 +50,13 @@ MAX_ATTEMPTS = int(_env("MAX_ATTEMPTS", "3"))
 CROP_INITIAL_WAIT_SECONDS = float(_env("CROP_INITIAL_WAIT_SECONDS", "5"))
 MAX_CROP_DIMENSION = int(_env("MAX_CROP_DIMENSION", "1280"))
 CROP_PADDING_PCT = float(_env("CROP_PADDING_PCT", "0.2"))
+# Skips the crop filter entirely -- crop_image_base64 becomes the full original camera frame
+# (still scaled to MAX_CROP_DIMENSION) instead of a region around the object. This is the single
+# field both the web UI and the VLM call use, so this one flag changes what gets displayed AND
+# what gets analyzed, not just one or the other. Off by default -- the crop exists specifically so
+# the VLM can read small detail (plates, notable features) that's illegible in a full wide frame;
+# only turn this on if you've decided that trade-off is worth it for your use case.
+CROP_DISABLED = _env("CROP_DISABLED", "false").lower() == "true"
 # Where in the event's start_ts->end_ts span to seek for the crop frame (0.0=start, 0.5=midpoint,
 # 1.0=end). Frigate picks its own alert thumbnail at whatever frame scored highest during the
 # event, which isn't a fixed offset and isn't exposed via its API (confirmed live: one event's own

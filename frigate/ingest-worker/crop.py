@@ -84,10 +84,26 @@ _FALLBACK_FRAME_OFFSET_SECONDS = 1.0
 
 
 def crop_and_scale(clip_url: str, timestamp_offset: float, box: list[float]) -> str:
-    x1, y1, x2, y2 = box
-    w, h = x2 - x1, y2 - y1
-    if w <= 0 or h <= 0:
-        raise ValueError(f"Invalid box {box}: width={w}, height={h} must both be positive")
+    scale_filter = (
+        f"scale='min({config.MAX_CROP_DIMENSION},iw)':'min({config.MAX_CROP_DIMENSION},ih)':"
+        "force_original_aspect_ratio=decrease"
+    )
+    if config.CROP_DISABLED:
+        # box is unused in this mode -- no validation needed, since it never affects the result
+        # (crop_image_base64 becomes the full original frame, just scaled down).
+        vf = scale_filter
+    else:
+        x1, y1, x2, y2 = box
+        w, h = x2 - x1, y2 - y1
+        if w <= 0 or h <= 0:
+            raise ValueError(f"Invalid box {box}: width={w}, height={h} must both be positive")
+        pad_x, pad_y = w * config.CROP_PADDING_PCT, h * config.CROP_PADDING_PCT
+        crop_x1 = max(0, x1 - pad_x)
+        crop_y1 = max(0, y1 - pad_y)
+        crop_x2 = min(config.RECORD_WIDTH, x2 + pad_x)
+        crop_y2 = min(config.RECORD_HEIGHT, y2 + pad_y)
+        crop_filter = f"crop={crop_x2 - crop_x1}:{crop_y2 - crop_y1}:{crop_x1}:{crop_y1}"
+        vf = f"{crop_filter},{scale_filter}"
 
     with tempfile.TemporaryDirectory() as tmp:
         frame_path = os.path.join(tmp, "frame.jpg")
@@ -101,19 +117,9 @@ def crop_and_scale(clip_url: str, timestamp_offset: float, box: list[float]) -> 
             # is always within an actual saved clip, however much its tail got truncated.
             _grab_frame(clip_url, _FALLBACK_FRAME_OFFSET_SECONDS, frame_path)
 
-        pad_x, pad_y = w * config.CROP_PADDING_PCT, h * config.CROP_PADDING_PCT
-        crop_x1 = max(0, x1 - pad_x)
-        crop_y1 = max(0, y1 - pad_y)
-        crop_x2 = min(config.RECORD_WIDTH, x2 + pad_x)
-        crop_y2 = min(config.RECORD_HEIGHT, y2 + pad_y)
         crop_path = os.path.join(tmp, "crop.jpg")
-        crop_filter = f"crop={crop_x2 - crop_x1}:{crop_y2 - crop_y1}:{crop_x1}:{crop_y1}"
-        scale_filter = (
-            f"scale='min({config.MAX_CROP_DIMENSION},iw)':'min({config.MAX_CROP_DIMENSION},ih)':"
-            "force_original_aspect_ratio=decrease"
-        )
         subprocess.run(
-            ["ffmpeg", "-y", "-i", frame_path, "-vf", f"{crop_filter},{scale_filter}", crop_path],
+            ["ffmpeg", "-y", "-i", frame_path, "-vf", vf, crop_path],
             check=True, capture_output=True,
         )
 

@@ -566,6 +566,18 @@ Because `region` can be large, the cropped JPEG is downscaled to `MAX_CROP_DIMEN
 1280px, long side) before being base64-encoded — VLMs downsample beyond that internally anyway,
 so there's no analysis benefit to sending a bigger image, only more load on the vision encoder.
 
+**`CROP_DISABLED`** (default `false`) skips the crop filter entirely -- `crop_image_base64` becomes
+the full original camera frame (still scaled to `MAX_CROP_DIMENSION`) instead of a region around
+the object. This is the one field the web UI, Telegram, the report, and the VLM call all share, so
+the single flag changes what's displayed *and* what gets analyzed at once -- there's no separate
+"wide view for humans, cropped for the model" split, since both consumers read the same stored
+value. `crop.crop_and_scale` branches on it before building the ffmpeg `-vf` filter: with it on,
+`box` is entirely unused (no crop-region math, no box-validity check either, since an invalid box
+never affects a result that doesn't depend on it) and only the scale filter runs. Off by default
+because the crop exists specifically so the VLM can read small detail (plates, notable features)
+that's illegible in a full wide frame at any reasonable resolution -- this is a real trade-off
+(context vs. legibility), not a strict improvement, so it's opt-in.
+
 `crop.py` grabs its frame from a configurable offset into the event's own start/end span
 (`CROP_FRAME_OFFSET_PCT`, `crop.compute_frame_offset_seconds`, default `0.5` = midpoint, this
 project's original fixed behavior) -- but for a long-lived tracked object (a car sitting in a
