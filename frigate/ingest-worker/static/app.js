@@ -408,9 +408,11 @@ function eventsApp() {
 
     async openLightbox(event) {
       this.lightboxEvent = event;
-      // Default to video when both exist -- richer than a still frame -- but the toggle buttons
-      // (shown only when both are present) let you switch to the image side and back.
-      this.lightboxMode = event.has_video ? "video" : "image";
+      // Default to the animated preview GIF when available -- richer than either a still frame or
+      // the plain video, since it's already framed to the sampled moments of interest -- then
+      // video, then the still image as a last resort. The toggle buttons (shown whenever more
+      // than one is available) let you switch between them freely.
+      this.lightboxMode = event.has_preview_gif ? "preview" : event.has_video ? "video" : "image";
       this.lightboxGroups = [];
       // A visit's own ai_status (event.ai_status) only reflects its single earliest-linked
       // event -- a second, different-object-type event in the same visit can still be

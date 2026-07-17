@@ -43,17 +43,30 @@ def build_visit_caption(camera: str, objects: str | None, event_count: int) -> s
     return f"\U0001F514 <b>VISIT: {label.upper()}</b> | {(camera or '').upper()}{grouped_note}"
 
 
-def send_visit_summary(camera: str, objects: str | None, event_count: int, image_base64: str | None) -> int | None:
-    """Fires once per visit (Frigate review 'end', see mqtt_ingest.py) -- a photo of the visit's
-    representative event if its crop is already available, else a text-only summary (the crop
-    stage may not have finished analyzing that event by the time the review closes). Gated by
-    TELEGRAM_ALERTS_ENABLED, independent of TELEGRAM_EVENTS_ENABLED above (the existing per-raw_event
-    notifications) -- lets you A/B per-event vs. per-visit notifications. Never raises."""
+def send_visit_summary(
+    camera: str, objects: str | None, event_count: int,
+    gif_base64: str | None = None, image_base64: str | None = None,
+) -> int | None:
+    """Fires once per visit (Frigate review 'end', see mqtt_ingest.py). Prefers the visit's own
+    animated preview GIF (crop.build_visit_preview -- sent via sendAnimation so Telegram actually
+    plays it, not sendPhoto/sendDocument which would show it as a static first frame or a file
+    attachment) -- falls back to a plain photo of the representative event's own crop if the GIF
+    isn't available (still being built, or the preview permanently failed), then a text-only
+    summary if neither is ready. Gated by TELEGRAM_ALERTS_ENABLED, independent of
+    TELEGRAM_EVENTS_ENABLED above (the existing per-raw_event notifications) -- lets you A/B
+    per-event vs. per-visit notifications. Never raises."""
     if not config.TELEGRAM_ALERTS_ENABLED:
         return None
     caption = build_visit_caption(camera, objects, event_count)
     try:
-        if image_base64:
+        if gif_base64:
+            resp = requests.post(
+                f"{_API_BASE}/bot{config.TELEGRAM_BOT_TOKEN}/sendAnimation",
+                data={"chat_id": config.TELEGRAM_CHAT_ID, "parse_mode": "HTML", "caption": caption},
+                files={"animation": ("visit.gif", base64.b64decode(gif_base64), "image/gif")},
+                timeout=30,
+            )
+        elif image_base64:
             resp = requests.post(
                 f"{_API_BASE}/bot{config.TELEGRAM_BOT_TOKEN}/sendPhoto",
                 data={"chat_id": config.TELEGRAM_CHAT_ID, "parse_mode": "HTML", "caption": caption},

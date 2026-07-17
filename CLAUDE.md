@@ -681,15 +681,25 @@ needs `start_ts`/`end_ts`/`cameras`). A schema-migration cleanup that used to fo
 existing rows with `thumb_time IS NULL` (correct under the old thumb_time-dependent approach) was
 removed from `schema.sql` accordingly -- such a row can now succeed like any other.
 
-`GET /visits/{id}/thumbnail` and `GET /visits/{id}/image` prefer this composite grid, falling back
-to the representative event's own crop (available almost immediately, long before the preview can
-be), then a frame pulled from the visit's own stored video -- same belt-and-suspenders chain as the
-existing per-event thumbnail/image endpoints. `GET /visits`' `has_image` reflects either source
-being available (`has_thumb_crop OR` the representative event's own image); `has_thumb_crop`/
-`has_preview_gif`/`thumb_crop_status` are additive fields for observability. The web UI's Visits
-tab uses these visit-scoped endpoints instead of the representative event's directly, so the
-grid/lightbox picks up the better artifact automatically once ready, with no client-side fallback
-logic of its own.
+`GET /visits/{id}/thumbnail` prefers the animated GIF over the composite grid -- unlike
+`GET /events/{id}/thumbnail`, which always returns a still JPEG, a visit's grid card in the web
+UI's Visits tab plays the sampled-frames sequence directly (the GIF is already built at a modest
+size, served as-is, no further scaling). Falls back to a scaled-down JPEG of the composite grid,
+then the representative event's own crop (available almost immediately, long before the preview
+can be), then a frame pulled from the visit's own stored video -- same belt-and-suspenders chain as
+the existing per-event thumbnail endpoint. `GET /visits/{id}/image` (the lightbox's dedicated
+"Image" mode) stays grid-only, deliberately -- the lightbox already has a separate "Preview" mode
+for the GIF, so `/image` isn't the place to also prefer it. `GET /visits`' `has_image` reflects
+either source being available (`has_thumb_crop OR` the representative event's own image);
+`has_thumb_crop`/`has_preview_gif`/`thumb_crop_status` are additive fields for observability. The
+web UI's Visits tab uses these visit-scoped endpoints instead of the representative event's
+directly, so the grid/lightbox picks up the better artifact automatically once ready, with no
+client-side fallback logic of its own.
+
+The lightbox's toggle order is Preview/Video/Image (`static/index.html`), and `openLightbox`
+defaults to `'preview'` when `has_preview_gif` is true (falling back to `'video'`, then `'image'`)
+-- the GIF is richer than a still frame and already framed to the sampled moments of interest, so
+it's the best default when available, ahead of even the full video.
 
 #### Bug: no defense against Frigate's clip endpoint returning a not-yet-finalized/placeholder clip
 
@@ -744,17 +754,24 @@ available yet," not what that image's internal structure is:
   `mqtt_ingest._handle_review_message` only sends the summary immediately when
   `db.visit_thumb_crop_will_be_attempted(review)` is false (i.e. `VISIT_THUMB_CROP_ENABLED` is off)
   -- otherwise it skips the immediate send entirely, and `visit_thumb_worker.process_claimed_visit`
-  sends it once `thumb_crop_status` reaches a terminal state: `done` -> the fresh composite grid;
-  `failed` (attempts exhausted) -> falls back to the representative event's own crop (or text-only),
-  so a visit is never left without its notification just because the preview build never panned
-  out. `mark_visit_thumb_crop_retry_or_failed` returns the resulting status specifically so the
-  worker can tell "still retrying, don't send yet" apart from "just went terminal, send now"
-  without re-deriving that from the attempt-count arithmetic itself. This is a genuine behavior
-  change from the original per-event notifications -- the notification now arrives however long
-  the review takes to close plus however long the preview build takes, not near-instantly -- a
-  deliberate trade (quality over speed) rather than the alternative of editing an already-sent
-  photo in place (`editMessageMedia`), which was considered and rejected as more moving parts for
-  the same result.
+  sends it once `thumb_crop_status` reaches a terminal state: `done` -> the animated preview GIF
+  (`telegram.send_visit_summary`'s `gif_base64` param, sent via Telegram's `sendAnimation` so it
+  actually plays -- `sendPhoto`/`sendDocument` would show it as a static first frame or a bare file
+  attachment instead); `failed` (attempts exhausted) -> falls back to the representative event's
+  own crop as a plain photo (`image_base64` param, `sendPhoto`) or text-only, so a visit is never
+  left without its notification just because the preview build never panned out. Deliberately the
+  GIF, not the composite grid, for this one consumer -- Telegram is the human-facing notification,
+  where the animation is more informative than a single still; the AI queue/report still always
+  use the grid (see above), since that's what's actually sent for analysis. The immediate-send path
+  in `mqtt_ingest.py` (used when a deferred send won't happen at all) always passes `image_base64`
+  only -- no GIF ever exists yet at that point, since `build_visit_preview` hasn't run.
+  `mark_visit_thumb_crop_retry_or_failed` returns the resulting status specifically so the worker
+  can tell "still retrying, don't send yet" apart from "just went terminal, send now" without
+  re-deriving that from the attempt-count arithmetic itself. This is a genuine behavior change from
+  the original per-event notifications -- the notification now arrives however long the review
+  takes to close plus however long the preview build takes, not near-instantly -- a deliberate
+  trade (quality over speed) rather than the alternative of editing an already-sent photo in place
+  (`editMessageMedia`), which was considered and rejected as more moving parts for the same result.
 
 ### Camera allow-list
 

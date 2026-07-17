@@ -127,7 +127,7 @@ def test_worker_sends_deferred_summary_on_successful_crop(conn_ok, monkeypatch):
     calls = []
     monkeypatch.setattr(
         visit_thumb_worker.telegram, "send_visit_summary",
-        lambda camera, objects, count, image: calls.append(image) or 1,
+        lambda camera, objects, count, gif_base64=None, image_base64=None: calls.append(gif_base64 or image_base64) or 1,
     )
 
     det_id = f"pytest-{uuid.uuid4()}"
@@ -140,7 +140,10 @@ def test_worker_sends_deferred_summary_on_successful_crop(conn_ok, monkeypatch):
     visit = db.get_visit(visit_id)
     try:
         visit_thumb_worker.process_claimed_visit(dict(visit, thumb_crop_attempt_count=1))
-        assert calls == ["new-visit-crop"]
+        # Telegram now gets the animated GIF (sendAnimation), not the composite grid (crop_
+        # image_base64) -- the grid is still what's stored/analyzed/shown elsewhere, just not
+        # what's sent to Telegram once a GIF is available.
+        assert calls == ["new-visit-gif"]
         row = db._execute(
             "SELECT thumb_crop_status FROM yard_stats.visits WHERE id = %s", (visit_id,), fetch=True,
         )[0]
@@ -159,7 +162,7 @@ def test_worker_sends_fallback_summary_once_crop_permanently_fails(conn_ok, monk
     calls = []
     monkeypatch.setattr(
         visit_thumb_worker.telegram, "send_visit_summary",
-        lambda camera, objects, count, image: calls.append(image) or 1,
+        lambda camera, objects, count, gif_base64=None, image_base64=None: calls.append(gif_base64 or image_base64) or 1,
     )
 
     det_id = f"pytest-{uuid.uuid4()}"
@@ -194,7 +197,7 @@ def test_worker_does_not_send_summary_while_still_retrying(conn_ok, monkeypatch)
     calls = []
     monkeypatch.setattr(
         visit_thumb_worker.telegram, "send_visit_summary",
-        lambda camera, objects, count, image: calls.append(image) or 1,
+        lambda camera, objects, count, gif_base64=None, image_base64=None: calls.append(gif_base64 or image_base64) or 1,
     )
 
     det_id = f"pytest-{uuid.uuid4()}"

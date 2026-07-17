@@ -121,7 +121,8 @@ def _handle_review_message(msg):
             representative = db.get_representative_event_for_visit(visit_id)
             image_base64 = representative.get("crop_image_base64") if representative else None
             message_id = telegram.send_visit_summary(
-                review["camera"], review["objects"], len(review["det_ids"]) or 1, image_base64,
+                review["camera"], review["objects"], len(review["det_ids"]) or 1,
+                image_base64=image_base64,
             )
             if message_id is not None:
                 # Durable reply-threading target, same idea as raw_events.telegram_photo_message_id

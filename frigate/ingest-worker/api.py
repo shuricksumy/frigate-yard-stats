@@ -211,15 +211,18 @@ def get_event_image(event_id: int):
 
 @app.get("/visits/{visit_id}/thumbnail", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
 def get_visit_thumbnail(visit_id: int):
-    """A small on-the-fly JPEG for the Visits view grid -- prefers the visit's own composite
-    preview grid (VISIT_THUMB_CROP_ENABLED, crop.build_visit_preview), which isn't ready until some
-    time after the review closes; falls back to the representative event's own crop (available
-    almost immediately), then a frame from the visit's own stored video, same belt-and-suspenders
-    reasoning as GET /events/{id}/thumbnail. Accepts X-API-Key header or ?api_key= query param
-    since this is loaded directly by an <img> tag."""
+    """A small on-the-fly image for the Visits view grid -- prefers the visit's own animated
+    preview GIF (VISIT_THUMB_CROP_ENABLED, crop.build_visit_preview) so the grid card itself plays
+    the sampled-frames sequence, already built at a modest size so it's served as-is; falls back to
+    a scaled-down JPEG of the composite grid image, then the representative event's own crop
+    (available almost immediately, long before the preview can be), then a frame from the visit's
+    own stored video, same belt-and-suspenders reasoning as GET /events/{id}/thumbnail. Accepts
+    X-API-Key header or ?api_key= query param since this is loaded directly by an <img> tag."""
     visit = db.get_visit(visit_id)
     if visit is None:
         raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
+    if visit.get("preview_gif_base64"):
+        return Response(content=base64.b64decode(visit["preview_gif_base64"]), media_type="image/gif")
     image_base64 = visit.get("crop_image_base64")
     if not image_base64:
         representative = db.get_representative_event_for_visit(visit_id)

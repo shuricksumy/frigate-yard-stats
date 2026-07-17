@@ -9,7 +9,9 @@ import telegram
 logger = logging.getLogger(__name__)
 
 
-def _send_deferred_visit_summary(visit: dict, image_base64: str | None) -> None:
+def _send_deferred_visit_summary(
+    visit: dict, gif_base64: str | None = None, image_base64: str | None = None,
+) -> None:
     # Fires the visit-summary Telegram message mqtt_ingest.py deliberately skipped sending
     # immediately (see visit_thumb_crop_will_be_attempted) -- this worker is the only place that
     # ever settles a visit's thumb_crop_status to a terminal state (done or failed), so it's the
@@ -21,7 +23,8 @@ def _send_deferred_visit_summary(visit: dict, image_base64: str | None) -> None:
     try:
         event_count = db.count_events_for_visit(visit_id)
         message_id = telegram.send_visit_summary(
-            visit.get("cameras"), visit.get("objects"), event_count, image_base64,
+            visit.get("cameras"), visit.get("objects"), event_count,
+            gif_base64=gif_base64, image_base64=image_base64,
         )
         if message_id is not None:
             db.set_visit_telegram_photo_message_id(visit_id, message_id)
@@ -48,7 +51,7 @@ def process_claimed_visit(visit: dict) -> None:
             "Cropped visit thumbnail for visit id=%s camera=%s thumb_time=%s",
             visit_id, visit.get("cameras"), visit.get("thumb_time"),
         )
-        _send_deferred_visit_summary(visit, crop_image_base64)
+        _send_deferred_visit_summary(visit, gif_base64=preview_gif_base64)
     except Exception:
         logger.warning(
             "Visit thumbnail crop failed for visit id=%s (attempt %s/%s)",
@@ -61,7 +64,7 @@ def process_claimed_visit(visit: dict) -> None:
             # summary anyway, falling back to the representative event's own crop (or text-only
             # if that's not ready either), rather than never notifying about this visit at all.
             fallback_image = representative.get("crop_image_base64") if representative else None
-            _send_deferred_visit_summary(visit, fallback_image)
+            _send_deferred_visit_summary(visit, image_base64=fallback_image)
         else:
             time.sleep(config.VISIT_THUMB_CROP_RETRY_WAIT_SECONDS)
 
