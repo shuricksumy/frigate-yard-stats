@@ -476,8 +476,15 @@ disabled -- an earlier version disabled them via `viewMode === 'visits'`-driven 
 bindings, but that turned out more confusing than helpful (half the filter bar visually greyed out
 with no obvious reason why); `fetchVisits` already silently ignores those fields itself (see its
 own comment), so leaving every control always interactive is simpler and no less correct. A
-`:title` tooltip on the ones that don't apply notes as much ("Not used in Visits view") without
-blocking interaction. The filter bar itself defaults to a simplified view -- Search AI analysis
+`:title` tooltip on the ones that don't apply notes as much without blocking interaction. Search/
+Event ID/AI status doing nothing while sitting on the Visits tab (nothing on screen said why) read
+as a real bug in practice, not just an unclear-but-inert control -- `applyFilters` now auto-switches
+`viewMode` to `'events'` when one of those three is actually set and the Search button is hit while
+on the Visits tab, so the search takes effect instead of silently no-op'ing; the tooltip text
+matches ("switches you to the Events view"). `onlyWithMedia` deliberately isn't part of that
+auto-switch trigger -- toggling a checkbox off doesn't read as a deliberate "search" action the way
+typing text or an id does, so no-op'ing there is less surprising. The filter bar itself defaults to
+a simplified view -- Search AI analysis
 plus a "Time range" preset dropdown (`filters.hours`, options `[1, 3, 6, 12, 24]` hours, sent as
 `GET /events`'/`GET /visits`'s own `hours` param) -- with an "Advanced filters" toggle
 (`advancedSearch`) that reveals Event ID/From/To/Type/AI status/Only-with-media on demand; those

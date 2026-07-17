@@ -174,6 +174,17 @@ function eventsApp() {
     },
 
     applyFilters() {
+      // Search/Event ID/AI status are per-raw_event concepts fetchVisits() intentionally ignores
+      // (see there) -- filling them in while on the Visits tab and hitting Search looked like a
+      // no-op bug (nothing on screen explains why), since the fields themselves are never
+      // disabled. Auto-switching to the Events view when one of them is actually set makes the
+      // search actually take effect instead of silently doing nothing.
+      const eventId = String(this.filters.eventId || "").trim();
+      const q = String(this.filters.q || "").trim();
+      const usesEventsOnlyFilter = !!(eventId || q || (this.filters.aiStatus && this.filters.aiStatus !== "all"));
+      if (this.viewMode === "visits" && usesEventsOnlyFilter) {
+        this.viewMode = "events";
+      }
       this.offset = 0;
       this.refresh();
     },

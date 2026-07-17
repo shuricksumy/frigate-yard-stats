@@ -36,7 +36,7 @@
       <div class="filter-fields">
         <label class="search-field">
           Search AI analysis
-          <input type="text" x-model="filters.q" placeholder="e.g. red toyota, plate ABC123" :title="viewMode === 'visits' ? 'Not used in Visits view -- switch to Events to search' : ''">
+          <input type="text" x-model="filters.q" placeholder="e.g. red toyota, plate ABC123" :title="viewMode === 'visits' ? 'Only applies to Events -- searching switches you to the Events view' : ''">
         </label>
         <label x-show="!advancedSearch">
           Time range
@@ -50,7 +50,7 @@
         <div class="advanced-filters" x-show="advancedSearch" style="display:none">
           <label>
             Event ID
-            <input type="number" x-model="filters.eventId" placeholder="e.g. 1234" :title="viewMode === 'visits' ? 'Not used in Visits view' : ''">
+            <input type="number" x-model="filters.eventId" placeholder="e.g. 1234" :title="viewMode === 'visits' ? 'Only applies to Events -- searching switches you to the Events view' : ''">
           </label>
           <label>
             From
@@ -71,7 +71,7 @@
           </label>
           <label>
             AI status
-            <select x-model="filters.aiStatus" :title="viewMode === 'visits' ? 'Not used in Visits view' : ''">
+            <select x-model="filters.aiStatus" :title="viewMode === 'visits' ? 'Only applies to Events -- searching switches you to the Events view' : ''">
               <option value="all">All</option>
               <option value="new">New</option>
               <option value="processing">Processing</option>
