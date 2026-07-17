@@ -136,3 +136,33 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  prune-old-versions:
+    # Every push here builds one new image (tagged both :latest and :<short-sha> on the same
+    # digest -- see "Extract image metadata" above), so the old :latest from last time becomes
+    # just another old short-sha-tagged version nothing ever cleans up on its own -- GHCR keeps
+    # every version indefinitely by default. This keeps only the single newest version (the one
+    # build-and-push just pushed), deleting every older one each time this workflow runs.
+    #
+    # Trade-off: this also deletes any older short-sha tag you might have wanted to keep around
+    # for a manual rollback (docker-compose.yml's INGEST_WORKER_IMAGE_TAG can pin to one) -- if
+    # you ever need that, increase min-versions-to-keep below instead of relying on old tags
+    # surviving indefinitely.
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+    steps:
+      - name: Delete old ingest-worker package versions
+        # GITHUB_TOKEN can push/pull GHCR packages (packages: write above), but GitHub's package
+        # deletion API rejects it regardless of workflow permissions -- deleting requires a
+        # classic PAT with the delete:packages scope (read:packages too, to list versions first).
+        # Create one at https://github.com/settings/tokens, add it as a repo secret named
+        # GHCR_CLEANUP_TOKEN -- until that secret exists this step just fails here, without
+        # affecting the image build-and-push already pushed above.
+        uses: actions/delete-package-versions@v5
+        with:
+          package-name: ${{ github.event.repository.name }}/ingest-worker
+          package-type: container
+          min-versions-to-keep: 1
+          token: ${{ secrets.GHCR_CLEANUP_TOKEN }}
