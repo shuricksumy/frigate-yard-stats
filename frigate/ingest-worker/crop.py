@@ -158,10 +158,13 @@ _VISIT_PREVIEW_EDGE_MARGIN_SECONDS = 0.3
 _MIN_DURATION_RATIO = 0.5
 
 
-def _panels_from_clip(clip_url: str, visit: dict, panel_vf: str, tmp: str) -> list[str]:
+def _panels_from_clip(clip_url: str, visit: dict, tmp: str) -> list[str]:
     # Used when a visit video is already downloaded (alert_video_worker) -- a single known-good
     # file, so probing its real duration and sampling proportionally across it is trustworthy (no
-    # race left to guard against once the whole clip is sitting on disk).
+    # race left to guard against once the whole clip is sitting on disk). Returns the 4 raw
+    # (un-cropped, un-scaled) frame paths -- the caller applies whatever size it needs each of them
+    # at (a smaller one for the grid, a full-size one for the GIF), since both are just different
+    # crops of the same underlying moments.
     duration = _probe_duration_seconds(clip_url)
 
     requested_span = (
@@ -181,20 +184,15 @@ def _panels_from_clip(clip_url: str, visit: dict, panel_vf: str, tmp: str) -> li
         for pct in config.VISIT_PREVIEW_FRAME_PERCENTAGES
     ]
 
-    panel_paths = []
+    raw_paths = []
     for i, offset in enumerate(offsets):
         raw_path = os.path.join(tmp, f"raw_{i}.jpg")
         _grab_frame(clip_url, offset, raw_path)
         if not os.path.exists(raw_path):
             # Same ffmpeg silent-empty-output behavior crop_and_scale guards against.
             _grab_frame(clip_url, _FALLBACK_FRAME_OFFSET_SECONDS, raw_path)
-        panel_path = os.path.join(tmp, f"panel_{i}.jpg")
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", raw_path, "-vf", panel_vf, panel_path],
-            check=True, capture_output=True,
-        )
-        panel_paths.append(panel_path)
-    return panel_paths
+        raw_paths.append(raw_path)
+    return raw_paths
 
 
 def _grab_frame_near_timestamp(camera: str, timestamp: float, frame_path: str) -> bool:
@@ -217,7 +215,10 @@ def _grab_frame_near_timestamp(camera: str, timestamp: float, frame_path: str) -
     return os.path.exists(frame_path)
 
 
-def _panels_from_independent_timestamps(visit: dict, panel_vf: str, tmp: str) -> list[str]:
+def _panels_from_independent_timestamps(visit: dict, tmp: str) -> list[str]:
+    # Returns the 4 raw (un-cropped, un-scaled) frame paths, already deduped (a gap reuses a
+    # neighbor's raw path -- see below) -- same contract as _panels_from_clip, so the caller can
+    # apply whatever size it needs each of them at.
     start_epoch = _as_datetime(visit["start_ts"]).timestamp()
     end_epoch = _as_datetime(visit["end_ts"]).timestamp()
     camera = visit["cameras"]
@@ -247,16 +248,7 @@ def _panels_from_independent_timestamps(visit: dict, panel_vf: str, tmp: str) ->
         if p is not None:
             last_good = p
         filled_paths.append(last_good)
-
-    panel_paths = []
-    for i, raw_path in enumerate(filled_paths):
-        panel_path = os.path.join(tmp, f"panel_{i}.jpg")
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", raw_path, "-vf", panel_vf, panel_path],
-            check=True, capture_output=True,
-        )
-        panel_paths.append(panel_path)
-    return panel_paths
+    return filled_paths
 
 
 def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, str]:
@@ -277,9 +269,13 @@ def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, s
     event = fetch_frigate_event(det_id)
     box = compute_full_res_box(event)
 
-    # Each panel scaled to half MAX_CROP_DIMENSION so the assembled 2x2 grid lands near
-    # MAX_CROP_DIMENSION overall, not 4x it.
+    # Each grid panel scaled to half MAX_CROP_DIMENSION so the assembled 2x2 grid lands near
+    # MAX_CROP_DIMENSION overall, not 4x it. The GIF is a different artifact -- it plays one frame
+    # at a time rather than combining all 4 into one image, so it has no reason to share that
+    # half-size constraint -- each of its frames is scaled to the SAME full MAX_CROP_DIMENSION a
+    # normal single-event crop_image_base64 uses, not shrunk further for file-size's sake.
     panel_vf = _build_vf_filter(box, config.MAX_CROP_DIMENSION // 2)
+    gif_frame_vf = _build_vf_filter(box, config.MAX_CROP_DIMENSION)
 
     with tempfile.TemporaryDirectory() as tmp:
         # Prefer a visit video alert_video_worker has already downloaded -- one known-good file,
@@ -291,14 +287,33 @@ def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, s
         # treating a bad local file as a permanent dead end -- video_path never changes once set,
         # so failing here on every retry would otherwise never recover.
         local_video_path = visit.get("video_path")
-        panel_paths = None
+        raw_paths = None
         if local_video_path and os.path.isfile(local_video_path):
             try:
-                panel_paths = _panels_from_clip(local_video_path, visit, panel_vf, tmp)
+                raw_paths = _panels_from_clip(local_video_path, visit, tmp)
             except ValueError:
                 pass
-        if panel_paths is None:
-            panel_paths = _panels_from_independent_timestamps(visit, panel_vf, tmp)
+        if raw_paths is None:
+            raw_paths = _panels_from_independent_timestamps(visit, tmp)
+
+        # Both the grid panels and the GIF frames are just different-sized crops of the same 4
+        # raw moments -- built here, once, from the same source frames.
+        panel_paths = []
+        gif_frame_paths = []
+        for i, raw_path in enumerate(raw_paths):
+            panel_path = os.path.join(tmp, f"panel_{i}.jpg")
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", raw_path, "-vf", panel_vf, panel_path],
+                check=True, capture_output=True,
+            )
+            panel_paths.append(panel_path)
+
+            gif_frame_path = os.path.join(tmp, f"gif_frame_{i}.jpg")
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", raw_path, "-vf", gif_frame_vf, gif_frame_path],
+                check=True, capture_output=True,
+            )
+            gif_frame_paths.append(gif_frame_path)
 
         grid_path = os.path.join(tmp, "grid.jpg")
         grid_inputs = []
@@ -313,13 +328,13 @@ def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, s
         with open(grid_path, "rb") as f:
             grid_base64 = base64.b64encode(f.read()).decode()
 
-        # Animated GIF from the same panel frames (already cropped/scaled), played as a slideshow
-        # -- human preview only, never sent to the VLM (see docstring above). Palette generation
-        # keeps GIF's 256-color limit from looking muddy against real photos.
+        # Animated GIF from the full-size frames above, played as a slideshow -- human preview
+        # only, never sent to the VLM (see docstring above). Palette generation keeps GIF's
+        # 256-color limit from looking muddy against real photos.
         gif_path = os.path.join(tmp, "preview.gif")
         subprocess.run(
-            ["ffmpeg", "-y", "-framerate", "1.5", "-i", os.path.join(tmp, "panel_%d.jpg"),
-             "-vf", "scale=480:-1:flags=lanczos,split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
+            ["ffmpeg", "-y", "-framerate", "1.5", "-i", os.path.join(tmp, "gif_frame_%d.jpg"),
+             "-vf", "split[s0][s1];[s0]palettegen[p];[s1][p]paletteuse",
              "-loop", "0", gif_path],
             check=True, capture_output=True,
         )

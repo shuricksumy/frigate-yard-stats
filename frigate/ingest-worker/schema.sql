@@ -1,5 +1,66 @@
+-- Applied on every ingest-worker startup (idempotent -- CREATE ... IF NOT EXISTS throughout), so a
+-- brand new Postgres instance is ready with no manual `psql -f` step. This file was consolidated
+-- from its incremental ALTER-based migration history into a single clean baseline (the project's
+-- one production instance was reset from scratch at the same time) -- any *future* column/table
+-- change should still follow the old idiom (ALTER TABLE ... ADD COLUMN IF NOT EXISTS, added below
+-- rather than edited into the CREATE TABLE blocks) so this file stays safe to re-apply against a
+-- live, already-populated database.
+
 CREATE SCHEMA IF NOT EXISTS yard_stats;
 
+-- One row per Frigate review/alert segment (frigate/reviews MQTT topic) -- groups the raw_events
+-- det_ids Frigate's own tracker considers the same real-world activity (occlusion handling,
+-- re-ID, label flicker e.g. car -> truck mid-track). Populated by db.record_visit. See CLAUDE.md's
+-- "Visit grouping via Frigate's review/alert stream" section for the full picture.
+CREATE TABLE IF NOT EXISTS yard_stats.visits (
+  id SERIAL PRIMARY KEY,
+  zone TEXT,
+  objects TEXT,
+  start_ts TIMESTAMPTZ NOT NULL,
+  end_ts TIMESTAMPTZ NOT NULL,
+  cameras TEXT,
+  camera_count INTEGER,
+  -- Fourth queue stage (STORE_VIDEO_ALERTS) -- one clip per visit's whole start_ts->end_ts span,
+  -- independent of whether any of its linked raw_events also has its own per-event video. Same
+  -- shape as raw_events.video_status below. See alert_video_worker.py.
+  video_status TEXT NOT NULL DEFAULT 'new'
+    CHECK (video_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped')),
+  video_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  video_attempt_count INTEGER NOT NULL DEFAULT 0,
+  -- Only the filesystem path is stored here -- the file itself lives on disk only
+  -- (VIDEO_STORAGE_PATH_ALERTS), never in Postgres.
+  video_path TEXT,
+  -- Durable reply-threading target for the visit's video/summary Telegram messages
+  -- (TELEGRAM_ALERTS_ENABLED) -- same idea as raw_events.telegram_photo_message_id below.
+  telegram_photo_message_id BIGINT,
+  -- Frigate's own review "best frame" timestamp -- stored for reference only, no longer read by
+  -- crop.build_visit_preview (see CLAUDE.md's "Visit preview" section for why that seek-based
+  -- approach was abandoned in favor of proportional sampling across the clip's own measured
+  -- duration).
+  thumb_time DOUBLE PRECISION,
+  -- Fifth queue stage (VISIT_THUMB_CROP_ENABLED) -- a composite grid image (4 frames sampled
+  -- proportionally across the visit's own clip) plus a separate animated GIF for human preview
+  -- only. Separate artifacts from any linked raw_event's own crop_image_base64 -- see
+  -- crop.build_visit_preview / visit_thumb_worker.py.
+  crop_image_base64 TEXT,
+  preview_gif_base64 TEXT,
+  thumb_crop_status TEXT NOT NULL DEFAULT 'new'
+    CHECK (thumb_crop_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped')),
+  thumb_crop_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  thumb_crop_attempt_count INTEGER NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_visits_zone_ts ON yard_stats.visits (zone, start_ts);
+CREATE INDEX IF NOT EXISTS idx_visits_video_status ON yard_stats.visits (video_status);
+CREATE INDEX IF NOT EXISTS idx_visits_thumb_crop_status ON yard_stats.visits (thumb_crop_status);
+
+-- One row per Frigate "end" event, any label (car/truck/person/dog/...). Carries three
+-- independent queue state machines -- crop_status/video_status owned directly by ingest-worker,
+-- ai_status owned by n8n via ingest-worker's /ai-queue/* API -- see CLAUDE.md's "Architecture"
+-- section for the full write-up of who owns which and why. All three share the same shape:
+-- new -> processing -> retry/failed -> done, plus 'skipped' for a state a row can start in but
+-- never needs to leave (crop_status: has_snapshot=false at ingest time; video_status:
+-- STORE_VIDEO=false).
 CREATE TABLE IF NOT EXISTS yard_stats.raw_events (
   id SERIAL PRIMARY KEY,
   camera TEXT NOT NULL,
@@ -10,20 +71,6 @@ CREATE TABLE IF NOT EXISTS yard_stats.raw_events (
   det_id TEXT,
   has_clip BOOLEAN,
   has_snapshot BOOLEAN,
-  -- Two independent queue state machines, owned by two different systems:
-  --   crop_status -- owned by ingest-worker (Python). Ingests every Frigate label (car, truck,
-  --                  person, dog, ...), crops via ffmpeg, stores crop_image_base64. Never calls an LLM.
-  --   ai_status   -- owned by the n8n Vehicle/Person Metadata Processor workflows. Only ever
-  --                  looks at rows where crop_status = 'done'; calls the VLM(s), writes results
-  --                  to vehicle_sightings/person_sightings.
-  -- Both use the same shape:
-  --   new        -> not yet picked up
-  --   processing -> claimed by a run, work in flight
-  --   retry      -> was 'processing' but the run never finished (crash/timeout, reaped), or
-  --                 errored below that stage's max-attempts cap
-  --   failed     -- errored at/above that stage's max-attempts cap (terminal)
-  --   done       -> crop_status: crop_image_base64 populated. ai_status: a row exists in
-  --                 vehicle_sightings / person_sightings.
   crop_status TEXT NOT NULL DEFAULT 'new'
     CHECK (crop_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped')),
   crop_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -32,17 +79,30 @@ CREATE TABLE IF NOT EXISTS yard_stats.raw_events (
     CHECK (ai_status IN ('new', 'processing', 'retry', 'failed', 'done')),
   ai_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   ai_attempt_count INTEGER NOT NULL DEFAULT 0,
-  -- The exact cropped JPEG (base64) ingest-worker produced for this event -- lives on raw_events
-  -- (not the sightings tables) since it's produced before AI analysis and is label-agnostic.
+  video_status TEXT NOT NULL DEFAULT 'new'
+    CHECK (video_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped')),
+  video_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  video_attempt_count INTEGER NOT NULL DEFAULT 0,
+  -- Only the filesystem path is stored here -- the file itself lives on disk only
+  -- (VIDEO_STORAGE_PATH), never in Postgres.
+  video_path TEXT,
+  -- The exact cropped JPEG (base64) ingest-worker produced for this event -- lives here (not the
+  -- sightings tables) since it's produced before AI analysis and is label-agnostic.
   crop_image_base64 TEXT,
-  -- Captured by ingest-worker from the same Frigate API fetch used to get the crop region --
-  -- the settled/final LPR read and detection score, not the live MQTT "end" payload's values
-  -- (sub_label in particular can resolve after the event first fires). Kept here so the n8n
-  -- AI-processing stage never needs to call Frigate's API itself.
+  -- Captured from the same Frigate API fetch used to get the crop region -- the settled/final LPR
+  -- read and detection score, not the live MQTT "end" payload's values (sub_label in particular
+  -- can resolve after the event first fires). Kept here so n8n's AI stage never calls Frigate's
+  -- API itself.
   sub_label TEXT,
   score DOUBLE PRECISION,
+  -- Durable equivalent of an in-memory pendingReplies map -- lets the later video Telegram send
+  -- reply-thread onto the earlier photo send, even across a service restart.
+  telegram_photo_message_id BIGINT,
+  -- Links this event to the visits row Frigate's own review/alert stream grouped it into -- set by
+  -- db.record_visit once the review closes (not at ingest time, since a review can close well
+  -- after the event itself).
   reconciled BOOLEAN NOT NULL DEFAULT false,
-  visit_id INTEGER,
+  visit_id INTEGER REFERENCES yard_stats.visits(id),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_raw_events_reconciled ON yard_stats.raw_events (reconciled);
@@ -50,105 +110,11 @@ CREATE INDEX IF NOT EXISTS idx_raw_events_zone_ts ON yard_stats.raw_events (zone
 CREATE INDEX IF NOT EXISTS idx_raw_events_has_snapshot ON yard_stats.raw_events (has_snapshot);
 CREATE INDEX IF NOT EXISTS idx_raw_events_crop_status ON yard_stats.raw_events (crop_status);
 CREATE INDEX IF NOT EXISTS idx_raw_events_ai_status ON yard_stats.raw_events (ai_status);
-
--- Third queue stage, same shape as crop_status/ai_status: new -> processing -> retry/failed ->
--- done, plus 'skipped' for when STORE_VIDEO=false (set at ingest time so the queue never claims
--- those rows at all, rather than special-casing a disabled feature inside the poll loop).
-ALTER TABLE yard_stats.raw_events ADD COLUMN IF NOT EXISTS video_status TEXT NOT NULL DEFAULT 'new'
-  CHECK (video_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
-ALTER TABLE yard_stats.raw_events ADD COLUMN IF NOT EXISTS video_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
-ALTER TABLE yard_stats.raw_events ADD COLUMN IF NOT EXISTS video_attempt_count INTEGER NOT NULL DEFAULT 0;
--- Only the filesystem path is stored here -- the video file itself lives on disk only
--- (VIDEO_STORAGE_PATH), never in Postgres.
-ALTER TABLE yard_stats.raw_events ADD COLUMN IF NOT EXISTS video_path TEXT;
--- Durable equivalent of the n8n workflow's in-memory pendingReplies map -- lets the later video
--- Telegram send reply-thread onto the earlier photo send, even across a service restart.
-ALTER TABLE yard_stats.raw_events ADD COLUMN IF NOT EXISTS telegram_photo_message_id BIGINT;
 CREATE INDEX IF NOT EXISTS idx_raw_events_video_status ON yard_stats.raw_events (video_status);
-
--- crop_status gained a 'skipped' value: Frigate can emit a full "end" MQTT lifecycle for a
--- tracked object it never actually persists as a real event (no snapshot ever committed) --
--- confirmed in production by det_ids that 404 against Frigate's own /api/events/<id>. Cropping
--- those can never succeed no matter how much queue throughput is added, so ingest_raw_event
--- marks them crop_status='skipped' at ingest time (has_snapshot=false) instead of leaving them
--- to pile up as an eternally-unprocessed 'new'. Existing deployments have the narrower 5-value
--- constraint from before 'skipped' existed, so it's dropped and recreated here (a no-op past the
--- first run, once the wider constraint is already in place).
-ALTER TABLE yard_stats.raw_events DROP CONSTRAINT IF EXISTS raw_events_crop_status_check;
-ALTER TABLE yard_stats.raw_events ADD CONSTRAINT raw_events_crop_status_check
-  CHECK (crop_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
-
-CREATE TABLE IF NOT EXISTS yard_stats.visits (
-  id SERIAL PRIMARY KEY,
-  zone TEXT,
-  objects TEXT,
-  start_ts TIMESTAMPTZ NOT NULL,
-  end_ts TIMESTAMPTZ NOT NULL,
-  cameras TEXT,
-  camera_count INTEGER,
-  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
-);
-CREATE INDEX IF NOT EXISTS idx_visits_zone_ts ON yard_stats.visits (zone, start_ts);
-
--- raw_events.visit_id/reconciled (columns already existed, previously never populated by any
--- code) now get set by db.record_visit -- one row per Frigate review/alert segment (frigate/
--- reviews MQTT topic), which already groups multiple det_ids together as the same real-world
--- activity (tracker re-ID/occlusion, label flicker e.g. car -> truck mid-track). DROP+ADD rather
--- than a plain ADD CONSTRAINT, same idempotent-rerun idiom as raw_events_crop_status_check above
--- (existing deployments already have the column with no FK, so this is safe to add after the
--- fact -- every existing value is NULL).
 CREATE INDEX IF NOT EXISTS idx_raw_events_visit_id ON yard_stats.raw_events (visit_id);
-ALTER TABLE yard_stats.raw_events DROP CONSTRAINT IF EXISTS raw_events_visit_id_fkey;
-ALTER TABLE yard_stats.raw_events ADD CONSTRAINT raw_events_visit_id_fkey
-  FOREIGN KEY (visit_id) REFERENCES yard_stats.visits(id);
 
--- Fourth video-storage queue, same shape/columns as raw_events' video_status (new -> processing
--- -> retry/failed -> done, plus 'skipped' when STORE_VIDEO_ALERTS=false) but on visits instead of
--- raw_events -- one clip per visit (its whole start_ts->end_ts span), independent of whether any
--- of its linked raw_events also has its own per-event video. See alert_video_worker.py.
-ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS video_status TEXT NOT NULL DEFAULT 'new'
-  CHECK (video_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
-ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS video_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
-ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS video_attempt_count INTEGER NOT NULL DEFAULT 0;
-ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS video_path TEXT;
-CREATE INDEX IF NOT EXISTS idx_visits_video_status ON yard_stats.visits (video_status);
--- Durable reply-threading target for the visit's video, same idea as
--- raw_events.telegram_photo_message_id -- lets alert_video_worker's video send reply onto the
--- earlier visit-summary photo/text message once the visit's clip is stored.
-ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS telegram_photo_message_id BIGINT;
-
--- Fifth queue stage, same shape again but for a per-visit re-crop using Frigate's own review
--- "best frame" choice (data.thumb_time on frigate/reviews -- confirmed live via MQTT to be
--- present on every review message and content/score-dependent, the same class of judgment
--- CROP_FRAME_OFFSET_PCT can only approximate with a fixed percentage). Only known once the
--- review closes -- well after the representative event's own crop_status='done' crop already ran
--- -- so this produces a SEPARATE artifact (crop_image_base64 below), not a replacement for the
--- events-flow crop. See visit_thumb_worker.py / crop.build_visit_preview.
-ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_time DOUBLE PRECISION;
-ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS crop_image_base64 TEXT;
--- crop_image_base64 above is a single composite image (a fixed grid of frames sampled
--- proportionally across the visit's own clip -- see crop.build_visit_preview), not one
--- "best moment" frame -- this sidesteps having to precisely seek to Frigate's thumb_time at all
--- (which turned out unreliable: Frigate's continuous-recording clip endpoint pads an
--- unpredictable amount of extra footage onto either edge of the requested window, request to
--- request, so neither a start- nor an end-anchored seek was reliable). preview_gif_base64 is a
--- separate, human-only artifact -- an actual animated GIF of the same sampled frames, for the web
--- UI lightbox -- never sent to the VLM (a chat-completion vision API decodes an image_url as one
--- static frame, so an animated GIF wouldn't convey any temporal information to a model anyway).
-ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS preview_gif_base64 TEXT;
-ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_crop_status TEXT NOT NULL DEFAULT 'new'
-  CHECK (thumb_crop_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
-ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_crop_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
-ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS thumb_crop_attempt_count INTEGER NOT NULL DEFAULT 0;
-CREATE INDEX IF NOT EXISTS idx_visits_thumb_crop_status ON yard_stats.visits (thumb_crop_status);
--- A previous version of this migration force-set thumb_crop_status='skipped' for any row with
--- thumb_time IS NULL, back when the re-crop seeked to thumb_time specifically and could never
--- succeed without it. That's no longer true -- crop.build_visit_preview samples frames
--- proportionally across the visit's own clip duration (start_ts/end_ts/cameras only), so a row
--- missing thumb_time can still be processed successfully. That backfill UPDATE was removed
--- accordingly; any row it previously force-skipped stays 'skipped' (this migration doesn't retroactively
--- reset it), but new/retried rows are no longer affected by thumb_time's presence at all.
-
+-- One row per AI-analyzed vehicle event (car/truck). plate_text_frigate (from raw_events.sub_label)
+-- is kept alongside plate_text_llm (the OCR model's own read) as a cross-check.
 CREATE TABLE IF NOT EXISTS yard_stats.vehicle_sightings (
   id SERIAL PRIMARY KEY,
   raw_event_id INTEGER REFERENCES yard_stats.raw_events(id),
@@ -166,12 +132,8 @@ CREATE TABLE IF NOT EXISTS yard_stats.vehicle_sightings (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_vehicle_sightings_raw_event ON yard_stats.vehicle_sightings (raw_event_id);
--- ADD COLUMN IF NOT EXISTS instead of relying on CREATE TABLE IF NOT EXISTS above, since this
--- schema.sql reapplies on every ingest-worker startup against already-existing tables.
-ALTER TABLE yard_stats.vehicle_sightings ADD COLUMN IF NOT EXISTS model_guess TEXT;
-ALTER TABLE yard_stats.vehicle_sightings ADD COLUMN IF NOT EXISTS model_confidence TEXT;
-ALTER TABLE yard_stats.vehicle_sightings ADD COLUMN IF NOT EXISTS notable_features TEXT;
 
+-- One row per AI-analyzed person event.
 CREATE TABLE IF NOT EXISTS yard_stats.person_sightings (
   id SERIAL PRIMARY KEY,
   raw_event_id INTEGER REFERENCES yard_stats.raw_events(id),

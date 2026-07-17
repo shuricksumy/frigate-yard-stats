@@ -349,8 +349,9 @@ def test_build_visit_preview_respects_crop_disabled_for_every_panel(monkeypatch)
 
     crop.build_visit_preview(visit, representative_event)
 
+    # 4 grid panels + 4 full-size GIF frames, all derived from the same 4 raw moments.
     panel_calls = [c for c in calls if "-vf" in c and "-ss" not in c and "-framerate" not in c]
-    assert len(panel_calls) == 4
+    assert len(panel_calls) == 8
     for c in panel_calls:
         assert "crop=" not in c[c.index("-vf") + 1]
         assert "scale=" in c[c.index("-vf") + 1]

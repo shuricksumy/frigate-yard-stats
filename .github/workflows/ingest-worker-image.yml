@@ -13,7 +13,61 @@ env:
   IMAGE_NAME: ${{ github.repository }}/ingest-worker
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: n8n_projects
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: home_automation
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        working-directory: frigate/ingest-worker
+        run: pip install -r requirements.txt pytest
+
+      - name: Apply schema
+        working-directory: frigate/ingest-worker
+        env:
+          MQTT_HOST: localhost
+          POSTGRES_HOST: localhost
+          POSTGRES_USER: n8n_projects
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: home_automation
+          FRIGATE_API_BASE: http://frigate.test:5000
+          API_KEY: test-key
+        run: python -c "import db; db.ensure_schema()"
+
+      - name: Run tests
+        working-directory: frigate/ingest-worker
+        env:
+          MQTT_HOST: localhost
+          POSTGRES_HOST: localhost
+          POSTGRES_USER: n8n_projects
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: home_automation
+          FRIGATE_API_BASE: http://frigate.test:5000
+          API_KEY: test-key
+        run: pytest -q
+
   build-and-push:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read

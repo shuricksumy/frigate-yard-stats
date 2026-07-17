@@ -666,12 +666,21 @@ helper `crop_and_scale` uses) are combined into:
   not just the API shape -- a single composite image sidesteps that uncertainty completely, since
   every VLM handles exactly one image per input by definition.
 - **`visits.preview_gif_base64`** -- a separate animated GIF (`ffmpeg` image2 sequence input +
-  palette generation) of the same four frames playing as a slideshow, for the web UI lightbox only.
-  Never sent to the VLM -- for the same reason multiple separate images weren't used for AI
-  analysis, an animated GIF's `image_url` would just be decoded as its first frame by a standard
-  vision pipeline, conveying no temporal information to a model at all. Served via
+  palette generation) of the same four moments playing as a slideshow, for the web UI lightbox and
+  Telegram only. Never sent to the VLM -- for the same reason multiple separate images weren't
+  used for AI analysis, an animated GIF's `image_url` would just be decoded as its first frame by a
+  standard vision pipeline, conveying no temporal information to a model at all. Served via
   `GET /visits/{id}/preview.gif`; the web UI's lightbox gets a third toggle button ("Preview",
   alongside Video/Image) shown whenever `has_preview_gif` is true.
+
+  The GIF's own frames are scaled to the full `MAX_CROP_DIMENSION` (the same cap a normal
+  single-event `crop_image_base64` gets), not the grid's half-size panels -- the two artifacts are
+  built from the same 4 raw frames but sized independently: the grid halves each panel
+  specifically so the assembled 2x2 combination lands near `MAX_CROP_DIMENSION` overall rather than
+  4x it, but the GIF only ever shows one frame at a time, so that constraint doesn't apply to it at
+  all. An earlier version additionally downscaled the GIF to a hardcoded 480px width on top of
+  that (to keep file size down) -- dropped once it was clear that made the human-facing preview
+  (Telegram, the web UI) noticeably blurrier than the actual crop quality for no real benefit.
 
 `thumb_time` is still stored on the visit row (`record_visit`, informational -- Frigate's own
 opinion of the best moment) but no longer read by `build_visit_preview` at all, and no longer gates

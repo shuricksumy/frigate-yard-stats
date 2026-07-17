@@ -1,8 +1,10 @@
 .env
 __pycache__/
+.pytest_cache/
 postgres-projects/
 *.har
 .claude/
+.DS_Store
 
 # Runtime data written by bind-mounted volumes -- keep the directories (via .gitkeep) but never
 # their contents: stored clips are semi-sensitive (see CLAUDE.md), and the mosquitto dirs are

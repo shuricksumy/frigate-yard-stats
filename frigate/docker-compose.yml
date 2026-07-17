@@ -68,6 +68,9 @@ services:
       # beyond this anyway); CROP_PADDING_PCT is extra margin around Frigate's `region` box;
       # CROP_FRAME_OFFSET_PCT is where in the event's span to seek (0.5 = midpoint, the default).
       MAX_CROP_DIMENSION: ${MAX_CROP_DIMENSION:-1280}
+      # Smaller copy of the same crop for report/preview UIs (see report.py) -- not the same knob
+      # as MAX_CROP_DIMENSION, which VLM calls still use at full size.
+      THUMBNAIL_MAX_DIMENSION: ${THUMBNAIL_MAX_DIMENSION:-240}
       CROP_PADDING_PCT: ${CROP_PADDING_PCT:-0.2}
       CROP_FRAME_OFFSET_PCT: ${CROP_FRAME_OFFSET_PCT:-0.5}
       # Skips the crop filter entirely (crop_image_base64 becomes the full original frame, still
