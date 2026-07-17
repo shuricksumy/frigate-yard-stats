@@ -17,7 +17,7 @@ def _send_deferred_visit_summary(
     # ever settles a visit's thumb_crop_status to a terminal state (done or failed), so it's the
     # only place that can know when it's finally time to send. Never raises, same
     # belt-and-suspenders reasoning as every other Telegram call site in this project.
-    if not config.TELEGRAM_ALERTS_ENABLED:
+    if config.TELEGRAM_ALERTS_MODE not in ("image", "all"):
         return
     visit_id = visit["id"]
     try:

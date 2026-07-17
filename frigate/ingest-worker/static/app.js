@@ -32,6 +32,10 @@ function eventsApp() {
     loading: false,
     limit: 24,
     offset: 0,
+    // Total rows matching the current filters (X-Total-Count response header) -- null until the
+    // first successful fetch, so totalPages()/currentPage() can tell "unknown yet" apart from
+    // "zero results" instead of guessing from currentList().length < limit.
+    totalCount: null,
     objectTypes: [],
     advancedSearch: false,
     // Quick time-range presets for the default view's "Time range" selector -- the advanced
@@ -135,6 +139,22 @@ function eventsApp() {
 
     currentList() {
       return this.viewMode === "visits" ? this.visits : this.events;
+    },
+
+    currentPage() {
+      return Math.floor(this.offset / this.limit) + 1;
+    },
+
+    // 1 while totalCount hasn't come back yet (or is 0) -- always at least one page, matching
+    // currentPage()'s own floor of 1.
+    totalPages() {
+      if (!this.totalCount) return 1;
+      return Math.max(1, Math.ceil(this.totalCount / this.limit));
+    },
+
+    hasNextPage() {
+      if (this.totalCount === null) return this.currentList().length >= this.limit;
+      return this.offset + this.limit < this.totalCount;
     },
 
     async fetchObjectTypes() {
@@ -251,10 +271,12 @@ function eventsApp() {
             params.set("ai_status", this.filters.aiStatus);
           }
           if (q) {
-            // A text search spans your whole history, not just the visible date window --
-            // matches the API's own event_id/q window-bypass behavior.
             params.set("q", q);
-          } else if (this.filters.start || this.filters.end) {
+          }
+          // The time window still applies alongside q -- a search only looks within the
+          // currently selected range, same as every other filter, rather than spanning your
+          // whole history regardless of what's selected.
+          if (this.filters.start || this.filters.end) {
             // Advanced panel's custom From/To overrides the quick "Time range" preset when set.
             if (this.filters.start) params.set("start", new Date(this.filters.start).toISOString());
             if (this.filters.end) params.set("end", new Date(this.filters.end).toISOString());
@@ -272,10 +294,13 @@ function eventsApp() {
         }
         if (!resp.ok) throw new Error(`GET /events failed: ${resp.status}`);
         this.events = await resp.json();
+        const totalHeader = resp.headers.get("X-Total-Count");
+        this.totalCount = totalHeader !== null ? Number(totalHeader) : null;
         this.lastUpdated = new Date();
       } catch (err) {
         console.error(err);
         this.events = [];
+        this.totalCount = null;
       } finally {
         this.loading = false;
       }
@@ -299,10 +324,11 @@ function eventsApp() {
           params.set("object_type", this.filters.objectType);
         }
         if (q) {
-          // Same window-bypass behavior as fetchEvents' own q -- a text search spans your whole
-          // history, not just the visible date window.
           params.set("q", q);
-        } else if (this.filters.start || this.filters.end) {
+        }
+        // Same as fetchEvents -- the time window still applies alongside q rather than a search
+        // spanning your whole history regardless of what's selected.
+        if (this.filters.start || this.filters.end) {
           if (this.filters.start) params.set("start", new Date(this.filters.start).toISOString());
           if (this.filters.end) params.set("end", new Date(this.filters.end).toISOString());
         } else {
@@ -318,10 +344,13 @@ function eventsApp() {
         }
         if (!resp.ok) throw new Error(`GET /visits failed: ${resp.status}`);
         this.visits = await resp.json();
+        const totalHeader = resp.headers.get("X-Total-Count");
+        this.totalCount = totalHeader !== null ? Number(totalHeader) : null;
         this.lastUpdated = new Date();
       } catch (err) {
         console.error(err);
         this.visits = [];
+        this.totalCount = null;
       } finally {
         this.loading = false;
       }

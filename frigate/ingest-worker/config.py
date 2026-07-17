@@ -8,6 +8,18 @@ def _env(name: str, default: str | None = None) -> str:
     return value
 
 
+_TELEGRAM_MODES = ("none", "image", "video", "all")
+
+
+def _telegram_mode(name: str) -> str:
+    # "image"/"video" are independent halves, not a ladder -- "video" does NOT imply "image" is
+    # also sent. "all" is the only mode that sends both.
+    value = _env(name, "none").lower()
+    if value not in _TELEGRAM_MODES:
+        raise ValueError(f"{name} must be one of {_TELEGRAM_MODES}, got {value!r}")
+    return value
+
+
 MQTT_HOST = _env("MQTT_HOST")
 MQTT_PORT = int(_env("MQTT_PORT", "1883"))
 MQTT_USERNAME = os.environ.get("MQTT_USERNAME")
@@ -166,17 +178,21 @@ if len(VISIT_PREVIEW_FRAME_PERCENTAGES) != 4:
     )
 
 # -------------------------------------------------
-# Telegram notifications -- see telegram.py. Disabled (no-op) unless explicitly turned on.
+# Telegram notifications -- see telegram.py. Each is a mode, not a bool: "none" (off, the
+# default), "image" (photo/GIF only, no video clip), "video" (video clip only, no photo/GIF), or
+# "all" (both). Splitting photo from video lets you skip uploading large video clips to Telegram
+# while still getting the lightweight photo/GIF notification, or the other way around, instead of
+# an all-or-nothing switch.
 # -------------------------------------------------
-TELEGRAM_EVENTS_ENABLED = _env("TELEGRAM_EVENTS_ENABLED", "false").lower() == "true"
+TELEGRAM_EVENTS_MODE = _telegram_mode("TELEGRAM_EVENTS_MODE")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-# Independent switch for the alerts/visits flow -- a single summary notification per visit
-# (photo + caption if the representative event's crop is already available, text-only otherwise),
-# fired once when a Frigate review closes. Separate from TELEGRAM_EVENTS_ENABLED above, which
-# gates the existing per-raw_event photo/video notifications -- lets you A/B whether per-event or
-# per-visit notifications (or both, or neither) are more useful for your traffic.
-TELEGRAM_ALERTS_ENABLED = _env("TELEGRAM_ALERTS_ENABLED", "false").lower() == "true"
+# Independent mode for the alerts/visits flow -- "image" sends the single per-visit summary
+# (preview GIF/photo + caption), "video" sends the visit's own stored clip as a reply to that
+# summary, fired once when a Frigate review closes. Separate from TELEGRAM_EVENTS_MODE above,
+# which gates the existing per-raw_event photo/video notifications -- lets you A/B whether
+# per-event or per-visit notifications (or both, or neither) are more useful for your traffic.
+TELEGRAM_ALERTS_MODE = _telegram_mode("TELEGRAM_ALERTS_MODE")
 
 # -------------------------------------------------
 # Web report UI -- see static/index.html. Frigate object labels aren't fixed (depends on your

@@ -82,8 +82,11 @@ is almost always why.
 
 ## Telegram messages never arrive
 
-- Confirm `TELEGRAM_EVENTS_ENABLED`/`TELEGRAM_ALERTS_ENABLED` (whichever you expect) is `true`,
-  and `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are both real values, not the `changeme` placeholder.
+- Confirm `TELEGRAM_EVENTS_MODE`/`TELEGRAM_ALERTS_MODE` (whichever you expect) is set to `image`,
+  `video`, or `all` — not left at the default `none` — and that it actually covers what you're
+  waiting for (`video` alone does not also send the photo/summary; only `all` sends both). Also
+  confirm `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are both real values, not the `changeme`
+  placeholder.
 - Message your bot at least once first — Telegram bots can't message a chat that's never
   messaged them (see [`configuration.md`](configuration.md#telegram-notifications) for the
   bot-creation steps).

@@ -31,7 +31,7 @@ CREATE TABLE IF NOT EXISTS yard_stats.visits (
   -- (VIDEO_STORAGE_PATH_ALERTS), never in Postgres.
   video_path TEXT,
   -- Durable reply-threading target for the visit's video/summary Telegram messages
-  -- (TELEGRAM_ALERTS_ENABLED) -- same idea as raw_events.telegram_photo_message_id below.
+  -- (TELEGRAM_ALERTS_MODE) -- same idea as raw_events.telegram_photo_message_id below.
   telegram_photo_message_id BIGINT,
   -- Frigate's own review "best frame" timestamp -- stored for reference only, no longer read by
   -- crop.build_visit_preview (see CLAUDE.md's "Visit preview" section for why that seek-based

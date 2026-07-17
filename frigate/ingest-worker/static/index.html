@@ -148,8 +148,8 @@
 
     <div class="pager" x-show="!loading && currentList().length > 0" style="display:none">
       <button @click="prevPage()" :disabled="offset === 0">Prev</button>
-      <span x-text="'Page ' + (Math.floor(offset / limit) + 1)"></span>
-      <button @click="nextPage()" :disabled="currentList().length < limit">Next</button>
+      <span x-text="currentPage() + ' / ' + totalPages()"></span>
+      <button @click="nextPage()" :disabled="!hasNextPage()">Next</button>
     </div>
   </div>
 

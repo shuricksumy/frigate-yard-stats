@@ -116,7 +116,11 @@ def _handle_review_message(msg):
     # high-res image, or failed -> falls back to the representative event's own crop), rather than
     # immediately here with whatever the representative event's crop looks like right now. Only
     # skips the immediate send when a deferred one is actually guaranteed to happen later.
-    if config.TELEGRAM_ALERTS_ENABLED and visit_id is not None and not db.visit_thumb_crop_will_be_attempted(review):
+    if (
+        config.TELEGRAM_ALERTS_MODE in ("image", "all")
+        and visit_id is not None
+        and not db.visit_thumb_crop_will_be_attempted(review)
+    ):
         try:
             representative = db.get_representative_event_for_visit(visit_id)
             image_base64 = representative.get("crop_image_base64") if representative else None

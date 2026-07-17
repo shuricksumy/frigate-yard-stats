@@ -94,6 +94,7 @@ def get_object_types():
 
 @app.get("/events", response_model=list[schemas.EventSummary], tags=["events"], dependencies=[Depends(require_api_key)])
 def get_events(
+    response: Response,
     object_type: str | None = Query(None, description="Comma-separated Frigate object labels, e.g. 'car,truck'. Omit or pass 'all' for no filter"),
     camera: str | None = None,
     start: datetime | None = None,
@@ -103,19 +104,25 @@ def get_events(
     video_status: str | None = None,
     has_media: bool = Query(True, description="Only return rows with a stored crop image and/or video -- default true, since a row with neither (crop_status not yet 'done', including 'skipped') has nothing to show. Pass false to see every row regardless."),
     event_id: int | None = Query(None, description="Exact-match a single event by id -- ignores the start/end/hours window entirely, since you're looking for one specific known event, not browsing a range."),
-    q: str | None = Query(None, description="Free-text search (substring, case-insensitive) across the AI analysis result -- vehicle color/body_type/make/model/notable_features/plate/notes, or person description/notes. Only matches rows that already have a sighting (ai_status='done'). Ignores the start/end/hours window entirely, same reasoning as event_id -- you're searching your whole history, not browsing a range."),
-    hours: float = Query(1, gt=0, description="Used when start/end aren't both given -- window is the last N hours (default: last 1 hour). Ignored if event_id or q is given."),
+    q: str | None = Query(None, description="Free-text search (substring, case-insensitive) across the AI analysis result -- vehicle color/body_type/make/model/notable_features/plate/notes, or person description/notes. Only matches rows that already have a sighting (ai_status='done'). Combines with start/end/hours (and every other filter) rather than bypassing them -- searches within the selected window, not your whole history."),
+    hours: float = Query(1, gt=0, description="Used when start/end aren't both given -- window is the last N hours (default: last 1 hour). Ignored if event_id is given; still applies alongside q."),
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
     """List raw_events, most recent first. Defaults to the last 1 hour, every object type, every
     ai_status, media-only -- matching the web report's default view. No image field -- keeps list
     responses small; use GET /events/{id} for full detail or GET /events/{id}/thumbnail for a
-    small preview image."""
-    if event_id is not None or (q and q.strip()):
+    small preview image. Sets an X-Total-Count response header (total rows matching the same
+    filters, ignoring limit/offset) so a caller can compute a page count without a second request."""
+    if event_id is not None:
         resolved_start = resolved_end = None
     else:
         resolved_start, resolved_end = _resolve_window(start, end, hours)
+    total = db.count_events(
+        object_type, camera, resolved_start, resolved_end,
+        crop_status, ai_status, video_status, has_media, event_id, q,
+    )
+    response.headers["X-Total-Count"] = str(total)
     return db.list_events(
         object_type, camera, resolved_start, resolved_end,
         crop_status, ai_status, video_status, has_media, event_id, q, limit, offset,
@@ -124,12 +131,13 @@ def get_events(
 
 @app.get("/visits", response_model=list[schemas.VisitSummary], tags=["events"], dependencies=[Depends(require_api_key)])
 def get_visits(
+    response: Response,
     object_type: str | None = Query(None, description="Comma-separated Frigate object labels, e.g. 'car,truck'. Matches if the visit contains any of the given types. Omit or pass 'all' for no filter"),
     camera: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
-    q: str | None = Query(None, description="Free-text search (substring, case-insensitive) across every linked raw_event's AI analysis result -- matches the visit if ANY of its grouped events matches, same fields GET /events' own q searches. Ignores the start/end/hours window entirely, same reasoning as GET /events' q -- you're searching your whole history, not browsing a range."),
-    hours: float = Query(1, gt=0, description="Used when start/end aren't both given -- window is the last N hours (default: last 1 hour). Ignored if q is given."),
+    q: str | None = Query(None, description="Free-text search (substring, case-insensitive) across every linked raw_event's AI analysis result -- matches the visit if ANY of its grouped events matches, same fields GET /events' own q searches. Combines with start/end/hours (and every other filter) rather than bypassing them -- searches within the selected window, not your whole history."),
+    hours: float = Query(1, gt=0, description="Used when start/end aren't both given -- window is the last N hours (default: last 1 hour). Still applies alongside q."),
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
@@ -138,11 +146,12 @@ def get_visits(
     tracked-object det_id, so duplicate det_ids from tracker re-ID/label flicker collapse into a
     single row. representative_event_id is the visit's earliest-linked raw_event (used for the
     thumbnail/lightbox); event_count is how many det_ids were grouped into it. Read-only and
-    purely additive -- doesn't affect GET /events, the AI queue, or Telegram notifications."""
-    if q and q.strip():
-        resolved_start = resolved_end = None
-    else:
-        resolved_start, resolved_end = _resolve_window(start, end, hours)
+    purely additive -- doesn't affect GET /events, the AI queue, or Telegram notifications. Sets
+    an X-Total-Count response header (total visits matching the same filters, ignoring
+    limit/offset) so a caller can compute a page count without a second request."""
+    resolved_start, resolved_end = _resolve_window(start, end, hours)
+    total = db.count_visits(object_type, camera, resolved_start, resolved_end, q)
+    response.headers["X-Total-Count"] = str(total)
     return db.list_visits(object_type, camera, resolved_start, resolved_end, q, limit, offset)
 
 

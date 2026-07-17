@@ -754,7 +754,7 @@ def purge_older_than(cutoff: datetime, execute: bool) -> dict:
     return counts
 
 
-def list_events(
+def _build_events_query(
     object_type: str | None = None,
     camera: str | None = None,
     start: datetime | None = None,
@@ -765,9 +765,10 @@ def list_events(
     has_media: bool = True,
     event_id: int | None = None,
     q: str | None = None,
-    limit: int = 20,
-    offset: int = 0,
-) -> list:
+) -> tuple[str, list]:
+    # Factored out of list_events so count_events can reuse the exact same filters (LIMIT/OFFSET-
+    # free) rather than re-deriving them in a parallel function that could silently drift out of
+    # sync with list_events' own filtering over time.
     clauses = []
     params: list = []
     join = ""
@@ -833,9 +834,7 @@ def list_events(
         params.append(video_status)
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    params.extend([limit, offset])
-    return _execute(
-        f"""
+    query = f"""
         SELECT DISTINCT re.id, re.camera, re.zone, re.objects, re.start_ts, re.end_ts,
                re.crop_status, re.ai_status, re.video_status,
                re.sub_label, re.score, (re.video_path IS NOT NULL) AS has_video,
@@ -844,22 +843,61 @@ def list_events(
         {join}
         {where}
         ORDER BY re.start_ts DESC
-        LIMIT %s OFFSET %s
-        """,
-        params,
-        fetch=True,
+    """
+    return query, params
+
+
+def list_events(
+    object_type: str | None = None,
+    camera: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    crop_status: str | None = None,
+    ai_status: str | None = None,
+    video_status: str | None = None,
+    has_media: bool = True,
+    event_id: int | None = None,
+    q: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> list:
+    query, params = _build_events_query(
+        object_type, camera, start, end, crop_status, ai_status, video_status, has_media, event_id, q,
     )
+    return _execute(f"{query} LIMIT %s OFFSET %s", params + [limit, offset], fetch=True)
 
 
-def list_visits(
+def count_events(
+    object_type: str | None = None,
+    camera: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    crop_status: str | None = None,
+    ai_status: str | None = None,
+    video_status: str | None = None,
+    has_media: bool = True,
+    event_id: int | None = None,
+    q: str | None = None,
+) -> int:
+    # Same filters as list_events, no LIMIT/OFFSET -- lets the web UI show "page X of Y" instead
+    # of just "there might be more" (e.g. by comparing len(events) to limit).
+    query, params = _build_events_query(
+        object_type, camera, start, end, crop_status, ai_status, video_status, has_media, event_id, q,
+    )
+    rows = _execute(f"SELECT COUNT(*) AS count FROM ({query}) AS sub", params, fetch=True)
+    return rows[0]["count"]
+
+
+def _build_visits_query(
     object_type: str | None = None,
     camera: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
     q: str | None = None,
-    limit: int = 20,
-    offset: int = 0,
-) -> list:
+) -> tuple[str, list]:
+    # Factored out of list_visits so count_visits can reuse the exact same filters (LIMIT/OFFSET-
+    # free) rather than re-deriving them in a parallel function that could silently drift out of
+    # sync with list_visits' own filtering over time.
     # Comparison view alongside list_events -- one row per Frigate review/alert segment instead
     # of one per raw_event, so duplicate det_ids from tracker re-ID/label flicker collapse into a
     # single row. representative_event_id is the earliest-linked raw_event (row_number() = 1,
@@ -918,9 +956,7 @@ def list_visits(
         params.extend([term] * 10)
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    params.extend([limit, offset])
-    return _execute(
-        f"""
+    query = f"""
         WITH linked AS (
             SELECT
                 v.id AS visit_id, v.zone, v.objects, v.cameras, v.camera_count,
@@ -947,11 +983,34 @@ def list_visits(
         FROM linked
         WHERE rn = 1
         ORDER BY visit_start_ts DESC
-        LIMIT %s OFFSET %s
-        """,
-        params,
-        fetch=True,
-    )
+    """
+    return query, params
+
+
+def list_visits(
+    object_type: str | None = None,
+    camera: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    q: str | None = None,
+    limit: int = 20,
+    offset: int = 0,
+) -> list:
+    query, params = _build_visits_query(object_type, camera, start, end, q)
+    return _execute(f"{query} LIMIT %s OFFSET %s", params + [limit, offset], fetch=True)
+
+
+def count_visits(
+    object_type: str | None = None,
+    camera: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    q: str | None = None,
+) -> int:
+    # Same filters as list_visits, no LIMIT/OFFSET -- lets the web UI show "page X of Y".
+    query, params = _build_visits_query(object_type, camera, start, end, q)
+    rows = _execute(f"SELECT COUNT(*) AS count FROM ({query}) AS sub", params, fetch=True)
+    return rows[0]["count"]
 
 
 def get_vehicle_sightings(

@@ -51,7 +51,7 @@ Frigate (MQTT frigate/events, every object label: car/truck/person/dog/...
 ingest-worker/  (Python, one container, no LLM calls)
    - MQTT subscriber -> INSERT raw_events, unfiltered by label
    - Second MQTT subscriber (frigate/reviews) -> INSERT visits, link raw_events.visit_id ->
-     fire-and-forget Telegram visit summary if TELEGRAM_ALERTS_ENABLED
+     fire-and-forget Telegram visit summary if TELEGRAM_ALERTS_MODE includes it
    - Crop-stage poll loop, every POLL_INTERVAL_SECONDS:
        reap stale crop_status='processing' -> count in-progress -> claim batch (FOR UPDATE SKIP LOCKED)
        -> GET Frigate event (region/sub_label/score) -> crop via built-in ffmpeg, size-capped
@@ -134,7 +134,7 @@ are actually enforced.
   API. It's intentionally dumb/mechanical so it can be plain, testable Python instead of n8n
   Code-node gymnastics. Self-contained: builds from its own folder, bakes `schema.sql` and
   `static/` into the image, needs only Postgres + MQTT + Frigate's HTTP API to run (plus Telegram's
-  API if `TELEGRAM_EVENTS_ENABLED=true`).
+  API if `TELEGRAM_EVENTS_MODE` is anything other than `none`).
 - **n8n** owns everything AI-shaped: deciding when to claim work and calling the VLM(s), the daily
   report, and the Q&A workflow. Its processors never touch Frigate's API, crop or video anything
   themselves, and never call Telegram — they only ever read `crop_image_base64` that's already
@@ -350,12 +350,16 @@ in production: a clip was already gone `"No recordings found for the specified t
 the behavioral spec proved out by the `FrigateRetry.json` n8n workflow it replaces, straight into
 Python rather than adding new n8n nodes.
 
-`TELEGRAM_EVENTS_ENABLED=true` turns on fire-and-forget notifications (`telegram.py`): a photo right after
-crop (regardless of `STORE_VIDEO` -- photo-only is a valid steady state), and, once a clip is
-stored, a video sent as a reply to that photo (`telegram_photo_message_id`, persisted on the row --
-a durable version of the `FrigateRetry.json` workflow's in-memory `pendingReplies` map, so the
-reply-threading survives a service restart). Both directions are wrapped so a Telegram failure
-(bad token, rate limit, network blip) can never take down the crop or video poll loop.
+`TELEGRAM_EVENTS_MODE` turns on fire-and-forget notifications (`telegram.py`) -- a mode, not a
+bool: `none` (off, the default), `image` (photo only, right after crop -- regardless of
+`STORE_VIDEO`, photo-only is a valid steady state), `video` (the clip only, once stored, sent
+standalone rather than threaded onto a photo that was never sent), or `all` (both -- the video
+sent as a reply to the earlier photo, `telegram_photo_message_id` persisted on the row so the
+reply-threading survives a service restart, a durable version of the `FrigateRetry.json`
+workflow's in-memory `pendingReplies` map). `image` and `video` are independent halves, not a
+ladder -- `video` does not imply `image` is also sent, only `all` sends both. Both directions are
+wrapped so a Telegram failure (bad token, rate limit, network blip) can never take down the crop
+or video poll loop.
 
 `STORE_VIDEO_ALERTS=true` turns on a fourth, independent video queue -- same `new` -> `processing`
 -> `retry`/`failed` -> `done`/`skipped` shape, but on `visits` instead of `raw_events`
@@ -377,21 +381,25 @@ separate, so the two flows can be A/B'd without doubling every tuning knob. Rete
 same way it already did for `raw_events.video_path`, so a visit-level clip doesn't outlive its
 retention window as an orphaned file once its DB row is swept.
 
-`TELEGRAM_ALERTS_ENABLED=true` turns on a separate notification path for the alerts/visits flow --
-one summary message per visit (`telegram.send_visit_summary`), fired once from
-`mqtt_ingest._handle_review_message` right after `db.record_visit` succeeds (not from a poll loop).
-Uses the visit's representative event's `crop_image_base64` as a photo if the crop stage has
-already finished it by the time the review closes; falls back to a text-only `sendMessage`
-otherwise, since crop timing isn't guaranteed to have caught up yet. Independent of
-`TELEGRAM_EVENTS_ENABLED` above (the existing per-raw_event photo/video messages) -- both, either, or
-neither can be on at once, specifically so you can compare which notification granularity is more
-useful for your traffic rather than committing to one upfront.
+`TELEGRAM_ALERTS_MODE` turns on a separate notification path for the alerts/visits flow -- same
+`none`/`image`/`video`/`all` shape as `TELEGRAM_EVENTS_MODE` above, just against `visits` instead
+of `raw_events`. `image` sends one summary message per visit (`telegram.send_visit_summary`),
+fired once from `mqtt_ingest._handle_review_message` right after `db.record_visit` succeeds (not
+from a poll loop) -- uses the visit's representative event's `crop_image_base64` as a photo if the
+crop stage has already finished it by the time the review closes, falls back to a text-only
+`sendMessage` otherwise, since crop timing isn't guaranteed to have caught up yet. `video` sends
+the visit's own stored clip (see `STORE_VIDEO_ALERTS` below) as a reply to that summary once
+downloaded; `all` sends both, `none` neither. Independent of `TELEGRAM_EVENTS_MODE` above (the
+existing per-raw_event photo/video messages) -- any combination of the two can be set at once,
+specifically so you can compare which notification granularity is more useful for your traffic
+rather than committing to one upfront.
 
-If `STORE_VIDEO_ALERTS` is also on, the visit's video is sent as a reply to that same summary
-message once `alert_video_worker` finishes downloading it (`telegram.send_visit_video`, reply-
-threaded via `visits.telegram_photo_message_id` -- durable across a restart, same idea as
-`raw_events.telegram_photo_message_id`) -- mirroring how the events flow's video reply threads
-onto its earlier photo. The two alerts-flow switches are otherwise fully independent (one can be on
+If `STORE_VIDEO_ALERTS` is also on and `TELEGRAM_ALERTS_MODE` includes `video`, the visit's video
+is sent as a reply to that same summary message once `alert_video_worker` finishes downloading it
+(`telegram.send_visit_video`, reply-threaded via `visits.telegram_photo_message_id` -- durable
+across a restart, same idea as `raw_events.telegram_photo_message_id`) -- mirroring how the events
+flow's video reply threads onto its earlier photo. `STORE_VIDEO_ALERTS` and `TELEGRAM_ALERTS_MODE`
+are otherwise fully independent (one can be on
 without the other; a visit clip download failure/retry never blocks or delays the summary
 message, and vice versa) -- this reply-threading is the one place they connect.
 
@@ -412,8 +420,12 @@ plate_text_llm/plate_text_frigate/notes, or `person_sightings`' description/note
 JOIN` to both tables (`SELECT DISTINCT` guards against a fan-out if either sighting table ever had
 more than one row per `raw_event_id`, which nothing enforces at the schema level). Only ever
 matches rows that already have a sighting, i.e. `ai_status='done'`, so it composes harmlessly with
-`has_media`'s default. Like `event_id`, `q` bypasses the time window entirely -- searching your
-whole sightings history, not the visible date range.
+`has_media`'s default. Unlike `event_id`, `q` does *not* bypass the time window -- it combines
+with `start`/`end`/`hours` (and every other filter) rather than overriding them, so a search only
+looks within whatever range is currently selected. (An earlier version bypassed the window
+entirely, the same way `event_id` still does -- reverted once it became clear a search result
+from outside the visibly selected range, with no indication why, read as broken rather than a
+deliberate whole-history search.)
 
 `GET /events/{id}/thumbnail` and `GET /events/{id}/image` fall back to extracting a frame from the
 stored video (`video.extract_frame_jpeg`, ffmpeg, 0.1s in to dodge a black first frame on some
@@ -456,8 +468,8 @@ a condition on the row `list_visits`'s own CTE already joined in for `representa
 `row_number()` picks as representative, e.g. searching a person's description on a visit whose
 representative happens to be the car, so this has to check across every linked event
 independently rather than filtering the CTE's per-row join, which would also wrongly skew
-`event_count`). Same window-bypass behavior as `GET /events`' `q` too -- ignores `start`/`end`/
-`hours` entirely, since you're searching your whole history, not browsing a range.
+`event_count`). Same as `GET /events`' `q` -- combines with `start`/`end`/`hours` rather than
+bypassing them, so a search only looks within the currently selected range.
 
 `has_video`/`video_status` on `GET /visits` describe the *visit's own* video
 (`STORE_VIDEO_ALERTS`/`alert_video_worker.py`), not the representative raw_event's -- those are
@@ -527,7 +539,12 @@ text inputs stay submit-only deliberately -- firing a request per keystroke woul
 janky for something typed character-by-character, unlike a discrete dropdown/date selection.
 `GET /events` itself is filterable by
 `object_type`/`crop_status`/`ai_status`/`video_status`/`has_media`/`event_id`/`q`, defaults to the
-last 1 hour, media-only. `GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same
+last 1 hour, media-only. Both `GET /events` and `GET /visits` set an `X-Total-Count` response
+header -- total rows matching the current filters with `limit`/`offset` ignored (`db.count_events`/
+`db.count_visits`, sharing the exact same filter-building as `db.list_events`/`db.list_visits` via
+`_build_events_query`/`_build_visits_query` so the two can never drift apart) -- so the web UI's
+pager can show "page X of Y" (`totalPages()` in `static/app.js`) instead of just a bare "Prev/Next"
+with no sense of how much data there is. `GET /events/{id}/thumbnail` (a small on-the-fly JPEG, same
 `crop.scale_image_base64` helper `report.py` uses) feeds the grid in both views, and
 `GET /media/video/{id}` (range-request `FileResponse`, so the browser's scrubber works) or
 `GET /events/{id}/image` feed the lightbox depending on `has_video`/`has_image` -- when an event
@@ -835,7 +852,7 @@ available yet," not what that image's internal structure is:
   not opt-in, since a report runs well after the fact on a schedule, so unlike the AI queue there's
   no real latency cost to just always taking the better image when it exists. `source=events`
   reports never apply this (matches the AI queue's own scoping decision).
-- **`TELEGRAM_ALERTS_ENABLED`'s visit-summary message**: deferred, not edited after the fact.
+- **`TELEGRAM_ALERTS_MODE`'s visit-summary message** (the `image`/`all` half): deferred, not edited after the fact.
   `mqtt_ingest._handle_review_message` only sends the summary immediately when
   `db.visit_thumb_crop_will_be_attempted(review)` is false (i.e. `VISIT_THUMB_CROP_ENABLED` is off)
   -- otherwise it skips the immediate send entirely, and `visit_thumb_worker.process_claimed_visit`
@@ -895,9 +912,9 @@ camera is correct, wanted behavior, not duplication to collapse.
 
 Using `visit_id` to actually reduce work is now available but opt-in, not the default: `POST
 /ai-queue/claim`'s `source=visits` skips analyzing duplicate det_ids a visit already grouped (see
-Query/report/AI-queue API above), and `STORE_VIDEO_ALERTS`/`TELEGRAM_ALERTS_ENABLED` add
+Query/report/AI-queue API above), and `STORE_VIDEO_ALERTS`/`TELEGRAM_ALERTS_MODE` add
 independent per-visit video/notification flows alongside (not instead of) the existing per-event
-`STORE_VIDEO`/`TELEGRAM_EVENTS_ENABLED` ones (see Video storage above). All three are deliberately
+`STORE_VIDEO`/`TELEGRAM_EVENTS_MODE` ones (see Video storage above). All three are deliberately
 independent switches from their events-flow counterparts -- the point is to A/B per-event vs.
 per-visit behavior against real traffic, not to pick one and commit. `GET /visits` remains the
 read-only comparison view for judging `visits` data itself, separate from these behavior switches.

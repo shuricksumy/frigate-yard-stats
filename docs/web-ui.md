@@ -70,6 +70,12 @@ A download button next to the close button grabs whichever of video/image is cur
 - **`N events grouped`** (Visits view only) — how many individual detections Frigate's tracker
   bundled into this one visit.
 
+## Paging
+
+Prev/Next buttons below the grid step through results; the label between them shows
+`<page> / <total pages>` (e.g. `2 / 5`), computed from the total row count matching your current
+filters — not just "there might be more data" from a full page of results.
+
 ## Auto-refresh
 
 The checkbox next to the Search button keeps the current page's data refreshing on its own,

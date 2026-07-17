@@ -83,7 +83,7 @@ def test_review_skipped_when_camera_not_in_allow_list(monkeypatch):
 
 def test_review_processed_when_camera_in_allow_list(monkeypatch):
     monkeypatch.setattr(config, "CAMERAS", ["outside2"])
-    monkeypatch.setattr(config, "TELEGRAM_ALERTS_ENABLED", False)
+    monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "none")
     calls = []
     monkeypatch.setattr(mqtt_ingest.db, "record_visit", lambda review: calls.append(review) or 1)
 

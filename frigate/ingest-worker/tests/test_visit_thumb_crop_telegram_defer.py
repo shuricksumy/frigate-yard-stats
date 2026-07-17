@@ -72,7 +72,7 @@ def conn_ok():
 
 
 def test_immediate_send_skipped_when_thumb_crop_will_be_attempted(conn_ok, monkeypatch):
-    monkeypatch.setattr(config, "TELEGRAM_ALERTS_ENABLED", True)
+    monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "all")
     monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", True)
     calls = []
     monkeypatch.setattr(mqtt_ingest.telegram, "send_visit_summary", lambda *a, **k: calls.append((a, k)) or 1)
@@ -97,7 +97,7 @@ def test_immediate_send_skipped_when_thumb_crop_will_be_attempted(conn_ok, monke
 
 
 def test_immediate_send_happens_when_thumb_crop_disabled(conn_ok, monkeypatch):
-    monkeypatch.setattr(config, "TELEGRAM_ALERTS_ENABLED", True)
+    monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "all")
     monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", False)
     calls = []
     monkeypatch.setattr(mqtt_ingest.telegram, "send_visit_summary", lambda *a, **k: calls.append((a, k)) or 1)
@@ -122,7 +122,7 @@ def test_immediate_send_happens_when_thumb_crop_disabled(conn_ok, monkeypatch):
 
 
 def test_worker_sends_deferred_summary_on_successful_crop(conn_ok, monkeypatch):
-    monkeypatch.setattr(config, "TELEGRAM_ALERTS_ENABLED", True)
+    monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "all")
     monkeypatch.setattr(visit_thumb_worker, "crop", type("C", (), {"build_visit_preview": staticmethod(lambda v, r: ("new-visit-crop", "new-visit-gif"))}))
     calls = []
     monkeypatch.setattr(
@@ -153,7 +153,7 @@ def test_worker_sends_deferred_summary_on_successful_crop(conn_ok, monkeypatch):
 
 
 def test_worker_sends_fallback_summary_once_crop_permanently_fails(conn_ok, monkeypatch):
-    monkeypatch.setattr(config, "TELEGRAM_ALERTS_ENABLED", True)
+    monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "all")
     monkeypatch.setattr(config, "VISIT_THUMB_CROP_MAX_ATTEMPTS", 1)
 
     def _boom(visit, representative):
@@ -186,7 +186,7 @@ def test_worker_sends_fallback_summary_once_crop_permanently_fails(conn_ok, monk
 
 
 def test_worker_does_not_send_summary_while_still_retrying(conn_ok, monkeypatch):
-    monkeypatch.setattr(config, "TELEGRAM_ALERTS_ENABLED", True)
+    monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "all")
     monkeypatch.setattr(config, "VISIT_THUMB_CROP_MAX_ATTEMPTS", 5)
     monkeypatch.setattr(config, "VISIT_THUMB_CROP_RETRY_WAIT_SECONDS", 0)
     monkeypatch.setattr(config, "VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS", 0)

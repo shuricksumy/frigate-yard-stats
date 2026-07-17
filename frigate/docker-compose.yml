@@ -131,14 +131,16 @@ services:
       # Which 4 points of the visit's own clip duration to sample for the preview grid/GIF, as
       # percentages (0=clip start, 100=clip end) -- e.g. "5,35,65,90" to stay clear of both edges.
       VISIT_PREVIEW_FRAME_PERCENTAGES: ${VISIT_PREVIEW_FRAME_PERCENTAGES:-0,25,50,100}
-      # Telegram notifications (photo on crop, video reply once stored) -- see telegram.py.
-      # Disabled by default; TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID only need to be set when on.
-      TELEGRAM_EVENTS_ENABLED: ${TELEGRAM_EVENTS_ENABLED:-false}
+      # Telegram notifications -- none/image/video/all, not a bool (see telegram.py). "none" by
+      # default; TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID only need to be set when either mode below
+      # isn't "none".
+      TELEGRAM_EVENTS_MODE: ${TELEGRAM_EVENTS_MODE:-none}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
-      # Independent switch for the alerts/visits flow -- one summary notification per visit
-      # instead of the per-event photo/video messages TELEGRAM_EVENTS_ENABLED controls.
-      TELEGRAM_ALERTS_ENABLED: ${TELEGRAM_ALERTS_ENABLED:-false}
+      # Independent mode for the alerts/visits flow -- one summary notification per visit ("image")
+      # and/or the visit's own clip as a reply ("video"), instead of the per-event photo/video
+      # messages TELEGRAM_EVENTS_MODE controls.
+      TELEGRAM_ALERTS_MODE: ${TELEGRAM_ALERTS_MODE:-none}
       # Object labels your Frigate config actually produces -- drives the web UI's Type filter
       # dropdown (GET /object-types) so it doesn't need a frontend change to pick up a new label.
       OBJECT_TYPES: ${OBJECT_TYPES:-car,truck,person,dog}

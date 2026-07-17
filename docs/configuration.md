@@ -108,13 +108,19 @@ depends on your `record.continuous.days` setting.
 
 ## Telegram notifications
 
-Two more **independent** switches, both off by default:
+Two more **independent** settings, each a *mode* (`none` / `image` / `video` / `all`), not a bool
+— `none` by default:
 
-- `TELEGRAM_EVENTS_ENABLED` — a photo per event (right after cropping), followed by a video reply
-  once the clip is stored (if `STORE_VIDEO` is also on).
-- `TELEGRAM_ALERTS_ENABLED` — one summary message per *visit* instead (photo/GIF once the preview
-  is ready, or text-only immediately if `VISIT_THUMB_CROP_ENABLED` is off) — a reply video follows
-  if `STORE_VIDEO_ALERTS` is also on.
+- `TELEGRAM_EVENTS_MODE` — per-event notifications. `image` sends a photo right after cropping;
+  `video` sends the clip once it's stored (`STORE_VIDEO`), standalone rather than threaded onto a
+  photo that was never sent; `all` sends both (the video as a reply to the earlier photo).
+- `TELEGRAM_ALERTS_MODE` — per-*visit* notifications instead. `image` sends one summary message
+  per visit (photo/GIF once the preview is ready, or text-only immediately if
+  `VISIT_THUMB_CROP_ENABLED` is off); `video` sends the visit's own clip (`STORE_VIDEO_ALERTS`) as
+  a reply to that summary; `all` sends both.
+
+`image` and `video` are independent halves within each mode, not a ladder — setting `video` alone
+does *not* also send the photo/summary; only `all` sends both.
 
 To use either, you need a Telegram bot and your own chat ID:
 
@@ -124,9 +130,9 @@ To use either, you need a Telegram bot and your own chat ID:
    `https://api.telegram.org/bot<your-token>/getUpdates` in a browser — your numeric chat ID is in
    the JSON response under `message.chat.id`. That's `TELEGRAM_CHAT_ID`.
 
-Both event- and alert-level notifications can be on at once, either alone, or neither — this is
-deliberately a place to A/B which granularity is actually useful for your traffic rather than a
-choice you're expected to get right upfront.
+`TELEGRAM_EVENTS_MODE` and `TELEGRAM_ALERTS_MODE` can be set to any combination independently —
+this is deliberately a place to A/B which granularity (and which of photo vs. video) is actually
+useful for your traffic rather than a choice you're expected to get right upfront.
 
 ## Retention
 
