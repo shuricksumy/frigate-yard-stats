@@ -24,10 +24,15 @@ def _img_cell(
         # rather than also re-encoding a separate smaller copy: unlike a JPEG there's no cheap way
         # to produce a second, smaller re-encoded GIF here, and a second lightbox <img> pointing at
         # the exact same base64 bytes would reintroduce the identical double-embed bloat this
-        # report already fixed once for JPEGs (the old n8n version's 42MB report bug).
+        # report already fixed once for JPEGs (the old n8n version's 42MB report bug). Click-to-
+        # enlarge instead reuses this same <img> element's already-decoded src (showGifModal(this.
+        # src), see generate_report's shared #gif-modal) rather than a second server-rendered <img>
+        # tag -- the browser holds one decoded copy either way, but the static HTML source itself
+        # never carries the base64 text twice.
         return (
-            f'<img src="data:image/gif;base64,{gif_base64}" alt="preview (animated)" '
-            'style="max-width:160px;max-height:160px;display:block;">'
+            f'<img src="data:image/gif;base64,{gif_base64}" alt="preview (animated, click to enlarge)" '
+            'style="max-width:160px;max-height:160px;display:block;cursor:pointer;" '
+            'onclick="showGifModal(this.src)">'
         )
     # Two different sizes, each embedded exactly once: a small on-the-fly thumbnail for the
     # inline preview (generated here, never touching the stored full-quality image), and the
@@ -135,7 +140,22 @@ tr:nth-child(even){background:#f7f7f7;}
 .lightbox{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:1000;text-align:center;}
 .lightbox:target{display:flex;align-items:center;justify-content:center;}
 .lightbox img{max-width:95%;max-height:95%;}
+#gif-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:1000;align-items:center;justify-content:center;text-align:center;cursor:pointer;}
+#gif-modal img{max-width:95%;max-height:95%;}
 </style>"""
+
+    # One shared modal + tiny script for every GIF cell's click-to-enlarge, rather than a
+    # per-row lightbox <div> the way the JPEG case gets -- see _img_cell's comment: reusing
+    # the clicked <img>'s own already-decoded src avoids ever writing the GIF's base64 text
+    # into the HTML source a second time. Always included (source="events" never renders a
+    # GIF cell, so it's simply never invoked there, at negligible fixed cost).
+    gif_modal = (
+        '<div id="gif-modal" onclick="this.style.display=\'none\'"><img id="gif-modal-img"></div>'
+        "<script>function showGifModal(src){"
+        "document.getElementById('gif-modal-img').src=src;"
+        "document.getElementById('gif-modal').style.display='flex';"
+        "}</script>"
+    )
 
     if source == "visits":
         # One combined table per alert (visit) instead of separate Vehicles/Persons tables -- a
@@ -185,7 +205,7 @@ tr:nth-child(even){background:#f7f7f7;}
 
     html_doc = (
         f'<!DOCTYPE html><html><head><meta charset="utf-8">{style}</head><body>'
-        f"{body}\n{chr(10).join(lightboxes)}\n</body></html>"
+        f"{body}\n{chr(10).join(lightboxes)}\n{gif_modal}\n</body></html>"
     )
 
     return {
