@@ -38,6 +38,14 @@ jobs:
         with:
           python-version: "3.12"
 
+      - name: Install ffmpeg
+        # Matches the Dockerfile's own `apt-get install -y ffmpeg` -- report.py's _img_cell (via
+        # crop.scale_image_base64) shells out to a real ffmpeg binary to build the report
+        # thumbnail, and the runner doesn't have one preinstalled (confirmed: this exact CI job
+        # failed with FileNotFoundError: 'ffmpeg' once a test started exercising that path for
+        # real instead of mocking subprocess like test_crop.py's tests do).
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
       - name: Install dependencies
         working-directory: frigate/ingest-worker
         run: pip install -r requirements.txt pytest
