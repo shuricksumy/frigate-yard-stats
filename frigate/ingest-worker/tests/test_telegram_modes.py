@@ -64,3 +64,16 @@ def test_send_visit_video_gated_by_alerts_mode(monkeypatch, mode, expect_sent, t
     result = telegram.send_visit_video(str(tmp_path / "clip.mp4"), "caption", reply_to_message_id=None)
     assert result == expect_sent
     assert (len(calls) == 1) == expect_sent
+
+
+def test_send_photo_uses_configured_api_base_url(monkeypatch, fake_post):
+    # TELEGRAM_API_BASE_URL lets a self-hosted Local Bot API server (telegram-bot-api Compose
+    # profile) stand in for api.telegram.org -- every request must go through it, not a
+    # hardcoded cloud-API URL.
+    monkeypatch.setattr(config, "TELEGRAM_EVENTS_MODE", "image")
+    monkeypatch.setattr(config, "TELEGRAM_API_BASE_URL", "http://telegram-bot-api:8081")
+    monkeypatch.setattr(config, "TELEGRAM_BOT_TOKEN", "test-token")
+    telegram.send_photo("aGVsbG8=", "caption")
+    assert len(fake_post) == 1
+    url = fake_post[0][0][0]
+    assert url == "http://telegram-bot-api:8081/bottest-token/sendPhoto"

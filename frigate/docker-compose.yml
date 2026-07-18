@@ -137,6 +137,11 @@ services:
       TELEGRAM_EVENTS_MODE: ${TELEGRAM_EVENTS_MODE:-none}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      # Defaults to Telegram's own cloud API. Point at the optional telegram-bot-api service
+      # below instead (e.g. http://telegram-bot-api:8081, Compose service-name DNS) for lower
+      # latency and a 2000MB upload cap instead of the cloud API's 50MB -- see that service's
+      # own comment for when this is worth turning on.
+      TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:-https://api.telegram.org}
       # Independent mode for the alerts/visits flow -- one summary notification per visit ("image")
       # and/or the visit's own clip as a reply ("video"), instead of the per-event photo/video
       # messages TELEGRAM_EVENTS_MODE controls.
@@ -177,6 +182,33 @@ services:
       - ./mosquitto/config:/mosquitto/config
       - ./mosquitto/data:/mosquitto/data
       - ./mosquitto/log:/mosquitto/log
+    networks:
+      - npm_proxy
+
+  # Optional self-hosted Telegram Bot API server (github.com/tdlib/telegram-bot-api, this image
+  # a prebuilt wrapper around it) -- its own profile so it's fully opt-in, same pattern as
+  # mosquitto above. Worth turning on once TELEGRAM_EVENTS_MODE/TELEGRAM_ALERTS_MODE actually
+  # sends real traffic: it drops the public-internet round trip (ingest-worker reaches it over
+  # the Docker network instead of api.telegram.org) and raises Telegram's own upload cap from
+  # 50MB to 2000MB -- this project's STORE_VIDEO/STORE_VIDEO_ALERTS clips, recorded at 4K, can
+  # realistically exceed the cloud API's 50MB limit and silently fail to send. Requires your own
+  # api_id/api_hash from https://my.telegram.org (Telegram account, not the bot token -- a
+  # separate credential the Local Bot API server needs to talk to Telegram's MTProto backend
+  # directly). Bring up with `docker compose --profile pipeline --profile telegram-bot-api up -d`,
+  # then set TELEGRAM_API_BASE_URL=http://telegram-bot-api:8081 (Compose service-name DNS) above
+  # instead of the default api.telegram.org.
+  telegram-bot-api:
+    profiles: ["telegram-bot-api"]
+    image: aiogram/telegram-bot-api:latest
+    container_name: telegram-bot-api
+    restart: unless-stopped
+    environment:
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+    volumes:
+      - ./telegram-bot-api/data:/var/lib/telegram-bot-api
+    ports:
+      - "8081:8081"
     networks:
       - npm_proxy
 

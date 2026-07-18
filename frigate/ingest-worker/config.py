@@ -187,6 +187,14 @@ if len(VISIT_PREVIEW_FRAME_PERCENTAGES) != 4:
 TELEGRAM_EVENTS_MODE = _telegram_mode("TELEGRAM_EVENTS_MODE")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
+# Defaults to Telegram's own cloud API -- can be pointed at a self-hosted Local Bot API server
+# (github.com/tdlib/telegram-bot-api, the optional telegram-bot-api Compose service/profile in
+# docker-compose.yml) instead, for lower latency (LAN/Docker-network hop instead of the public
+# internet) and a much higher upload cap (2000MB vs. the cloud API's 50MB, which this project's
+# 4K-record-stream video clips -- STORE_VIDEO/STORE_VIDEO_ALERTS -- can realistically exceed).
+# Same request shape either way (still POSTs to /bot<token>/<method>), so telegram.py needs no
+# other change. Trailing slash stripped so callers can always do f"{base}/bot...".
+TELEGRAM_API_BASE_URL = _env("TELEGRAM_API_BASE_URL", "https://api.telegram.org").rstrip("/")
 # Independent mode for the alerts/visits flow -- "image" sends the single per-visit summary
 # (preview GIF/photo + caption), "video" sends the visit's own stored clip as a reply to that
 # summary, fired once when a Frigate review closes. Separate from TELEGRAM_EVENTS_MODE above,

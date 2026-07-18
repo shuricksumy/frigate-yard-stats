@@ -403,6 +403,36 @@ are otherwise fully independent (one can be on
 without the other; a visit clip download failure/retry never blocks or delays the summary
 message, and vice versa) -- this reply-threading is the one place they connect.
 
+#### `TELEGRAM_API_BASE_URL` -- optional self-hosted Local Bot API server
+
+Every Telegram request in `telegram.py` (`send_photo`/`send_visit_summary`/`_post_video`) builds
+its URL as `f"{config.TELEGRAM_API_BASE_URL}/bot{config.TELEGRAM_BOT_TOKEN}/<method>"` rather than
+a hardcoded `https://api.telegram.org` -- `TELEGRAM_API_BASE_URL` defaults to that same cloud API,
+so this is purely additive, but can instead point at a self-hosted Local Bot API server
+(`telegram-bot-api`, an optional Compose profile alongside `mqtt`, image
+`aiogram/telegram-bot-api:latest` -- a prebuilt wrapper around the official
+`github.com/tdlib/telegram-bot-api`) reachable over the Docker network at
+`http://telegram-bot-api:8081`. Same request/response shape either way (still one POST per
+`<method>`), so this is the only change `telegram.py` needed.
+
+Two independent reasons to turn it on, both about `STORE_VIDEO`/`STORE_VIDEO_ALERTS` clips
+specifically, since those are by far the largest payloads this project ever sends to Telegram
+(a cropped JPEG or composite-grid/GIF is comparatively tiny): lower latency (the request never
+leaves the Docker network/LAN, unlike a round trip to `api.telegram.org` over the public
+internet), and a much higher upload cap -- Telegram's cloud Bot API caps a bot's own file uploads
+at 50MB, while the Local Bot API server raises that to 2000MB. This project's clips come from a
+3840x2160 record stream, so a `STORE_VIDEO_ALERTS` clip spanning a longer visit can realistically
+exceed 50MB and simply fail to send (`_post_video`'s `except Exception` swallows it as a logged
+warning, same as any other Telegram failure -- there's no separate signal distinguishing
+"too large" from "network blip" today). The Local Bot API server needs its own `api_id`/`api_hash`
+from `https://my.telegram.org` (a Telegram *account* credential used to authenticate the server
+itself against Telegram's MTProto backend -- unrelated to, and not a replacement for, the bot
+token `TELEGRAM_BOT_TOKEN` already used in every request's URL) -- set as `TELEGRAM_API_ID`/
+`TELEGRAM_API_HASH` in `.env`. Bring it up with `docker compose --profile pipeline --profile
+telegram-bot-api up -d`, same fully-opt-in pattern the `mosquitto` profile already uses -- it
+never collides with plain `api.telegram.org` usage unless `TELEGRAM_API_BASE_URL` is deliberately
+pointed at it.
+
 `GET /events` also defaults `has_media=true` -- rows with neither `crop_image_base64` nor
 `video_path` (not yet `crop_status='done'`, including `'skipped'` rows) are hidden by default
 since there's nothing to show for them; pass `has_media=false` to see every row regardless. The

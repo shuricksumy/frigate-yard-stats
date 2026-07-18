@@ -7,8 +7,6 @@ import config
 
 logger = logging.getLogger(__name__)
 
-_API_BASE = "https://api.telegram.org"
-
 
 def build_caption(row: dict) -> str:
     objects = (row.get("objects") or "event").strip()
@@ -24,7 +22,7 @@ def send_photo(image_base64: str, caption: str) -> int | None:
         return None
     try:
         resp = requests.post(
-            f"{_API_BASE}/bot{config.TELEGRAM_BOT_TOKEN}/sendPhoto",
+            f"{config.TELEGRAM_API_BASE_URL}/bot{config.TELEGRAM_BOT_TOKEN}/sendPhoto",
             data={"chat_id": config.TELEGRAM_CHAT_ID, "parse_mode": "HTML", "caption": caption},
             files={"photo": ("crop.jpg", base64.b64decode(image_base64), "image/jpeg")},
             timeout=30,
@@ -61,21 +59,21 @@ def send_visit_summary(
     try:
         if gif_base64:
             resp = requests.post(
-                f"{_API_BASE}/bot{config.TELEGRAM_BOT_TOKEN}/sendAnimation",
+                f"{config.TELEGRAM_API_BASE_URL}/bot{config.TELEGRAM_BOT_TOKEN}/sendAnimation",
                 data={"chat_id": config.TELEGRAM_CHAT_ID, "parse_mode": "HTML", "caption": caption},
                 files={"animation": ("visit.gif", base64.b64decode(gif_base64), "image/gif")},
                 timeout=30,
             )
         elif image_base64:
             resp = requests.post(
-                f"{_API_BASE}/bot{config.TELEGRAM_BOT_TOKEN}/sendPhoto",
+                f"{config.TELEGRAM_API_BASE_URL}/bot{config.TELEGRAM_BOT_TOKEN}/sendPhoto",
                 data={"chat_id": config.TELEGRAM_CHAT_ID, "parse_mode": "HTML", "caption": caption},
                 files={"photo": ("visit.jpg", base64.b64decode(image_base64), "image/jpeg")},
                 timeout=30,
             )
         else:
             resp = requests.post(
-                f"{_API_BASE}/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage",
+                f"{config.TELEGRAM_API_BASE_URL}/bot{config.TELEGRAM_BOT_TOKEN}/sendMessage",
                 data={"chat_id": config.TELEGRAM_CHAT_ID, "parse_mode": "HTML", "text": caption},
                 timeout=30,
             )
@@ -94,7 +92,7 @@ def _post_video(video_path: str, caption: str, reply_to_message_id: int | None) 
             data["reply_to_message_id"] = reply_to_message_id
         with open(video_path, "rb") as f:
             resp = requests.post(
-                f"{_API_BASE}/bot{config.TELEGRAM_BOT_TOKEN}/sendVideo",
+                f"{config.TELEGRAM_API_BASE_URL}/bot{config.TELEGRAM_BOT_TOKEN}/sendVideo",
                 data=data,
                 files={"video": (video_path.rsplit("/", 1)[-1], f, "video/mp4")},
                 timeout=120,
