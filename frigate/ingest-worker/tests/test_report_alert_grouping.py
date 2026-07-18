@@ -20,6 +20,20 @@ import pytest  # noqa: E402
 import db  # noqa: E402
 import report  # noqa: E402
 
+# A real, tiny (4x4) decodable JPEG -- needed wherever _img_cell actually reaches
+# crop.scale_image_base64 (its ffmpeg call fails on a fake non-image string like "grid-image-b64").
+_TINY_JPEG_BASE64 = (
+    "/9j/4AAQSkZJRgABAQAAAQABAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsLDBkSEw8UHRofHh0aHBwgJC4nICIsIxwcKDcp"
+    "LDAxNDQ0Hyc5PTgyPC4zNDL/2wBDAQkJCQwLDBgNDRgyIRwhMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy"
+    "MjIyMjIyMjIyMjIyMjL/wAARCAAEAAQDASIAAhEBAxEB/8QAHwAAAQUBAQEBAQEAAAAAAAAAAAECAwQFBgcICQoL/8QAtRAA"
+    "AgEDAwIEAwUFBAQAAAF9AQIDAAQRBRIhMUEGE1FhByJxFDKBkaEII0KxwRVS0fAkM2JyggkKFhcYGRolJicoKSo0NTY3ODk6"
+    "Q0RFRkdISUpTVFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqDhIWGh4iJipKTlJWWl5iZmqKjpKWmp6ipqrKztLW2t7i5usLDxMXG"
+    "x8jJytLT1NXW19jZ2uHi4+Tl5ufo6erx8vP09fb3+Pn6/8QAHwEAAwEBAQEBAQEBAQAAAAAAAAECAwQFBgcICQoL/8QAtREA"
+    "AgECBAQDBAcFBAQAAQJ3AAECAxEEBSExBhJBUQdhcRMiMoEIFEKRobHBCSMzUvAVYnLRChYkNOEl8RcYGRomJygpKjU2Nzg5"
+    "OkNERUZHSElKU1RVVldYWVpjZGVmZ2hpanN0dXZ3eHl6goOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPE"
+    "xcbHyMnK0tPU1dbX2Nna4uPk5ebn6Onq8vP09fb3+Pn6/9oADAMBAAIRAxEAPwDi6KKK+ZP3E//Z"
+)
+
 
 def test_vehicle_summary_combines_available_fields():
     v = {
@@ -66,6 +80,37 @@ def test_group_by_visit_keeps_ungrouped_sightings_separate():
     b = {"visit_id": None, "raw_event_id": 2, "start_ts": t, "camera": "outside2", "crop_image_base64": "b"}
     groups = report._group_by_visit([a, b], [])
     assert len(groups) == 2
+
+
+def test_img_cell_prefers_gif_over_grid_image():
+    cell = report._img_cell(_TINY_JPEG_BASE64, [], [0], "preview-gif-b64")
+    assert "data:image/gif;base64,preview-gif-b64" in cell
+    assert _TINY_JPEG_BASE64 not in cell
+    # No lightbox for the GIF case -- embedding the same bytes a second time would reintroduce the
+    # double-embed bloat this report already avoids for the JPEG case.
+    assert cell.count("<img") == 1
+
+
+def test_img_cell_falls_back_to_grid_image_without_gif():
+    lightboxes = []
+    cell = report._img_cell(_TINY_JPEG_BASE64, lightboxes, [0])
+    assert f"data:image/jpeg;base64,{_TINY_JPEG_BASE64}" in lightboxes[0]
+    assert "image/gif" not in cell
+
+
+def test_group_by_visit_carries_preview_gif_from_earliest_sighting():
+    t0 = datetime(2026, 7, 17, 10, 0, 0)
+    t1 = datetime(2026, 7, 17, 10, 0, 5)
+    car = {
+        "visit_id": 42, "raw_event_id": 1, "start_ts": t1, "camera": "outside2",
+        "crop_image_base64": "car-crop", "preview_gif_base64": "visit-gif",
+    }
+    person = {
+        "visit_id": 42, "raw_event_id": 2, "start_ts": t0, "camera": "outside2",
+        "crop_image_base64": "person-crop", "preview_gif_base64": "visit-gif",
+    }
+    group = report._group_by_visit([car], [person])[0]
+    assert group["preview_gif_base64"] == "visit-gif"
 
 
 def test_build_alert_rows_orders_newest_first():

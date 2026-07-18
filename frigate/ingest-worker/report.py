@@ -14,7 +14,21 @@ def _fmt_time(ts: datetime) -> str:
     return ts.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _img_cell(image_base64: str | None, lightboxes: list, counter: list) -> str:
+def _img_cell(
+    image_base64: str | None, lightboxes: list, counter: list, gif_base64: str | None = None,
+) -> str:
+    if gif_base64:
+        # The visit's own animated preview GIF -- the richer artifact, preferred over the static
+        # composite grid whenever it's ready (see db.get_report_data's gif_image_expr). Embedded
+        # once, directly, CSS-constrained to the same on-screen size as the JPEG thumbnail below
+        # rather than also re-encoding a separate smaller copy: unlike a JPEG there's no cheap way
+        # to produce a second, smaller re-encoded GIF here, and a second lightbox <img> pointing at
+        # the exact same base64 bytes would reintroduce the identical double-embed bloat this
+        # report already fixed once for JPEGs (the old n8n version's 42MB report bug).
+        return (
+            f'<img src="data:image/gif;base64,{gif_base64}" alt="preview (animated)" '
+            'style="max-width:160px;max-height:160px;display:block;">'
+        )
     # Two different sizes, each embedded exactly once: a small on-the-fly thumbnail for the
     # inline preview (generated here, never touching the stored full-quality image), and the
     # original full-size crop only inside the lightbox overlay for the click-to-enlarge view --
@@ -63,6 +77,7 @@ def _group_by_visit(cars: list, persons: list) -> list[dict]:
             groups[key] = {
                 "start_ts": row["start_ts"], "camera": row["camera"],
                 "crop_image_base64": row["crop_image_base64"],
+                "preview_gif_base64": row.get("preview_gif_base64"),
                 "vehicles": [], "persons": [],
             }
             order.append(key)
@@ -73,6 +88,7 @@ def _group_by_visit(cars: list, persons: list) -> list[dict]:
             group["start_ts"] = row["start_ts"]
             group["camera"] = row["camera"]
             group["crop_image_base64"] = row["crop_image_base64"]
+            group["preview_gif_base64"] = row.get("preview_gif_base64")
         return group
 
     for c in cars:
@@ -92,7 +108,7 @@ def _build_alert_rows(cars: list, persons: list, lightboxes: list, counter: list
         vehicle_text = "; ".join(s for s in (_vehicle_summary(v) for v in g["vehicles"]) if s) or None
         person_text = "; ".join(s for s in (_person_summary(p) for p in g["persons"]) if s) or None
         rows.append(
-            f"<tr><td>{_img_cell(g['crop_image_base64'], lightboxes, counter)}</td>"
+            f"<tr><td>{_img_cell(g['crop_image_base64'], lightboxes, counter, g['preview_gif_base64'])}</td>"
             f"<td>{_fmt_time(g['start_ts'])}</td><td>{_esc(g['camera'])}</td>"
             f"<td>{_esc(vehicle_text)}</td><td>{_esc(person_text)}</td></tr>"
         )

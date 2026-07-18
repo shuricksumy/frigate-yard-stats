@@ -1410,6 +1410,7 @@ def get_report_data(start: datetime, end: datetime, source: str = "events") -> d
     visit_clause = ""
     visit_join = ""
     crop_image_expr = "re.crop_image_base64"
+    gif_image_expr = "NULL"
     if source == "visits":
         visit_clause = """
         AND (
@@ -1429,13 +1430,19 @@ def get_report_data(start: datetime, end: datetime, source: str = "events") -> d
         # there's no real latency cost to just always preferring it here.
         visit_join = "LEFT JOIN yard_stats.visits v ON v.id = re.visit_id AND v.thumb_crop_status = 'done'"
         crop_image_expr = "COALESCE(v.crop_image_base64, re.crop_image_base64)"
+        # The visit's own animated preview GIF (human preview only, never sent to the VLM -- see
+        # CLAUDE.md's "Visit preview") -- report.py prefers this over the static grid for the
+        # inline row preview, same "richer artifact when available" preference Telegram's visit
+        # summary already applies. NULL for a standalone (never visit-grouped) sighting, or while
+        # the preview hasn't finished building yet -- report.py falls back to the grid/crop there.
+        gif_image_expr = "v.preview_gif_base64"
     # visit_id is included so report.py can group a visit's vehicle + person sightings into one
     # combined alert entry (source="visits" only -- always NULL under source="events", where
     # there's no grouping concept and every sighting is its own entry).
     vehicles = _execute(
         f"""
         SELECT re.id AS raw_event_id, re.visit_id, re.camera, re.zone, re.start_ts,
-               {crop_image_expr} AS crop_image_base64,
+               {crop_image_expr} AS crop_image_base64, {gif_image_expr} AS preview_gif_base64,
                vs.color, vs.body_type, vs.make_guess, vs.make_confidence,
                vs.model_guess, vs.model_confidence, vs.notable_features,
                vs.plate_text_llm, vs.plate_text_frigate, vs.notes
@@ -1451,7 +1458,7 @@ def get_report_data(start: datetime, end: datetime, source: str = "events") -> d
     persons = _execute(
         f"""
         SELECT re.id AS raw_event_id, re.visit_id, re.camera, re.zone, re.start_ts,
-               {crop_image_expr} AS crop_image_base64,
+               {crop_image_expr} AS crop_image_base64, {gif_image_expr} AS preview_gif_base64,
                ps.description, ps.notes
         FROM yard_stats.person_sightings ps
         JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id

@@ -851,7 +851,18 @@ available yet," not what that image's internal structure is:
   yard_stats.visits v ON v.id = re.visit_id AND v.thumb_crop_status = 'done'`) -- unconditional,
   not opt-in, since a report runs well after the fact on a schedule, so unlike the AI queue there's
   no real latency cost to just always taking the better image when it exists. `source=events`
-  reports never apply this (matches the AI queue's own scoping decision).
+  reports never apply this (matches the AI queue's own scoping decision). The HTML report itself
+  (`report.py`'s `_img_cell`) goes one step further for the *display* choice: it prefers the
+  visit's own `preview_gif_base64` (also selected in `get_report_data`'s `gif_image_expr`, same
+  `source=visits`-only scoping) over that static grid whenever it's ready, same "richer artifact
+  when available" preference Telegram's visit summary already applies -- the static grid alone
+  used to read as a flat "puzzled" 2x2 image in the report even once the nicer animated preview
+  existed. Embedded once, directly, with no separate click-to-enlarge lightbox the way the JPEG
+  grid gets -- there's no cheap way to re-encode a second, smaller GIF the way `crop.
+  scale_image_base64` does for a JPEG, and duplicating the same GIF bytes in a lightbox `<img>`
+  would reintroduce the exact double-embed bloat this report already fixed once (the old n8n
+  version's 42MB report bug, see below). The grid is still what the AI queue actually analyzes
+  either way (see above) -- only this HTML report's own inline preview changed.
 - **`TELEGRAM_ALERTS_MODE`'s visit-summary message** (the `image`/`all` half): deferred, not edited after the fact.
   `mqtt_ingest._handle_review_message` only sends the summary immediately when
   `db.visit_thumb_crop_will_be_attempted(review)` is false (i.e. `VISIT_THUMB_CROP_ENABLED` is off)
@@ -863,8 +874,10 @@ available yet," not what that image's internal structure is:
   own crop as a plain photo (`image_base64` param, `sendPhoto`) or text-only, so a visit is never
   left without its notification just because the preview build never panned out. Deliberately the
   GIF, not the composite grid, for this one consumer -- Telegram is the human-facing notification,
-  where the animation is more informative than a single still; the AI queue/report still always
-  use the grid (see above), since that's what's actually sent for analysis. The immediate-send path
+  where the animation is more informative than a single still; the AI queue always analyzes the
+  grid (see above), since that's what's actually sent for analysis -- the HTML report's own inline
+  preview also now prefers the GIF the same way Telegram does (see above), independent of this. The
+  immediate-send path
   in `mqtt_ingest.py` (used when a deferred send won't happen at all) always passes `image_base64`
   only -- no GIF ever exists yet at that point, since `build_visit_preview` hasn't run.
   `mark_visit_thumb_crop_retry_or_failed` returns the resulting status specifically so the worker

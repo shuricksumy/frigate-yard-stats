@@ -217,6 +217,54 @@ def test_source_visits_includes_sighting_per_distinct_object_type(conn_ok):
         _cleanup(car_id, person_id, car_dup_id, visit_id=visit_id)
 
 
+def test_source_visits_includes_preview_gif_when_done(conn_ok):
+    raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
+    _insert_vehicle_sighting(raw_id)
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    db.mark_visit_thumb_crop_done(visit_id, "visit-crop", "visit-gif")
+    try:
+        start, end = _window()
+        data = db.get_report_data(start, end, source="visits")
+        match = next(v for v in data["vehicles"] if v["raw_event_id"] == raw_id)
+        assert match["preview_gif_base64"] == "visit-gif"
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
+
+
+def test_source_visits_preview_gif_null_when_not_done(conn_ok):
+    ungrouped_id, _ = _insert_raw_event()
+    _insert_vehicle_sighting(ungrouped_id)
+    try:
+        start, end = _window()
+        data = db.get_report_data(start, end, source="visits")
+        match = next(v for v in data["vehicles"] if v["raw_event_id"] == ungrouped_id)
+        assert match["preview_gif_base64"] is None
+    finally:
+        _cleanup(ungrouped_id)
+
+
+def test_source_events_never_includes_preview_gif(conn_ok):
+    # source="events" (the default) never applies the visit-crop/GIF preference at all -- matches
+    # the crop preference's own scoping decision (only source=visits substitutes either artifact).
+    raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
+    _insert_vehicle_sighting(raw_id)
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    db.mark_visit_thumb_crop_done(visit_id, "visit-crop", "visit-gif")
+    try:
+        start, end = _window()
+        data = db.get_report_data(start, end)
+        match = next(v for v in data["vehicles"] if v["raw_event_id"] == raw_id)
+        assert match["preview_gif_base64"] is None
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
+
+
 def test_source_events_never_uses_visit_thumb_crop(conn_ok):
     # source="events" (the default) never applies the visit-crop preference at all -- matches
     # claim_ai_batch's own scoping decision (only source=visits substitutes the crop).
