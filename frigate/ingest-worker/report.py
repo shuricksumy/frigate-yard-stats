@@ -121,12 +121,12 @@ def _build_alert_rows(cars: list, persons: list, lightboxes: list, counter: list
 
 
 def generate_report(
-    start: datetime, end: datetime, source: str = "events", include_preview: bool = True,
+    start: datetime, end: datetime, source: str = "events", include_preview: str = "gif",
 ) -> dict:
-    # include_preview=False is a lightweight-report opt-out (see db.get_report_data) -- the GIF's
-    # base64 text is never even fetched from Postgres, so every group's preview_gif_base64 is
-    # already None here; _img_cell falls back to the static grid/crop exactly as it does for a
-    # visit whose preview genuinely isn't ready yet, no separate code path needed.
+    # include_preview is "gif" (default, today's original behavior)/"image"/"none" -- see
+    # db.get_report_data. Both narrower modes already come back with the corresponding field(s)
+    # NULL at the SQL level, so _img_cell's existing fallbacks (grid/crop when there's no GIF,
+    # "(no image)" when there's no image at all) apply with no separate rendering path needed.
     data = db.get_report_data(start, end, source, include_preview)
     cars = data["vehicles"]
     persons = data["persons"]

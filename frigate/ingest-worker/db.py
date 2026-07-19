@@ -1398,7 +1398,7 @@ def fail_ai_event(event_id: int, max_attempts: int) -> dict:
 
 
 def get_report_data(
-    start: datetime, end: datetime, source: str = "events", include_preview: bool = True,
+    start: datetime, end: datetime, source: str = "events", include_preview: str = "gif",
 ) -> dict:
     # Same joins daily-report.json's two query nodes used to run directly -- filtered by
     # created_at (when the AI stage produced the sighting), not start_ts, matching that behavior.
@@ -1438,13 +1438,18 @@ def get_report_data(
         # summary already applies. NULL for a standalone (never visit-grouped) sighting, or while
         # the preview hasn't finished building yet -- report.py falls back to the grid/crop there.
         gif_image_expr = "v.preview_gif_base64"
-    if not include_preview:
-        # A lightweight-report opt-out (e.g. an n8n workflow that wants a smaller payload) --
-        # skips fetching the GIF's base64 text at the SQL level entirely, not just hiding it in
-        # report.py's rendering, since it's typically the single largest field in this query
-        # (an animated multi-frame GIF vs. one flat JPEG grid). Only the GIF is dropped -- the
-        # static crop_image_expr/visit_join above are untouched, so report.py's fallback to the
-        # visit's composite grid (or the plain event crop) still works exactly as it does today.
+    # include_preview is a mode, not a bool, same shape as TELEGRAM_EVENTS_MODE -- "gif" (the
+    # default) is today's original behavior (prefer the visit's animated GIF, falling back to the
+    # static grid/crop); "image" drops only the GIF, at the SQL level, not just report.py's
+    # rendering, since it's typically the single largest field in this query (a multi-frame
+    # animated GIF vs. one flat JPEG); "none" drops the image entirely (crop included) for a
+    # caller that wants the smallest possible payload -- report.py's _img_cell already renders
+    # "(no image)" whenever crop_image_base64 comes back NULL, so no separate rendering path is
+    # needed for that case.
+    if include_preview == "none":
+        crop_image_expr = "NULL"
+        gif_image_expr = "NULL"
+    elif include_preview == "image":
         gif_image_expr = "NULL"
     # visit_id is included so report.py can group a visit's vehicle + person sightings into one
     # combined alert entry (source="visits" only -- always NULL under source="events", where

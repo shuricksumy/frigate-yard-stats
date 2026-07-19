@@ -246,10 +246,10 @@ def test_source_visits_preview_gif_null_when_not_done(conn_ok):
         _cleanup(ungrouped_id)
 
 
-def test_include_preview_false_drops_gif_but_keeps_visit_crop(conn_ok):
+def test_include_preview_image_drops_gif_but_keeps_visit_crop(conn_ok):
     # A lightweight-report opt-out (e.g. n8n wanting a smaller payload) -- only the GIF is
     # dropped; the visit's own composite grid crop (crop_image_expr, unrelated to gif_image_expr)
-    # still comes through exactly as it does with include_preview=True.
+    # still comes through exactly as it does with include_preview="gif" (the default).
     raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
     _insert_vehicle_sighting(raw_id)
     visit_id = db.record_visit({
@@ -259,10 +259,31 @@ def test_include_preview_false_drops_gif_but_keeps_visit_crop(conn_ok):
     db.mark_visit_thumb_crop_done(visit_id, "visit-crop", "visit-gif")
     try:
         start, end = _window()
-        data = db.get_report_data(start, end, source="visits", include_preview=False)
+        data = db.get_report_data(start, end, source="visits", include_preview="image")
         match = next(v for v in data["vehicles"] if v["raw_event_id"] == raw_id)
         assert match["preview_gif_base64"] is None
         assert match["crop_image_base64"] == "visit-crop"
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
+
+
+def test_include_preview_none_drops_both_image_and_gif(conn_ok):
+    # The smallest-payload mode -- drops the row image entirely (crop included, not just the
+    # GIF), for either source. report.py's _img_cell already renders "(no image)" whenever
+    # crop_image_base64 comes back NULL, so this needs no separate rendering path.
+    raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
+    _insert_vehicle_sighting(raw_id)
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    db.mark_visit_thumb_crop_done(visit_id, "visit-crop", "visit-gif")
+    try:
+        start, end = _window()
+        data = db.get_report_data(start, end, source="visits", include_preview="none")
+        match = next(v for v in data["vehicles"] if v["raw_event_id"] == raw_id)
+        assert match["preview_gif_base64"] is None
+        assert match["crop_image_base64"] is None
     finally:
         _cleanup(raw_id, visit_id=visit_id)
 

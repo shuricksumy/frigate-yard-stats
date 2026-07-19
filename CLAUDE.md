@@ -894,18 +894,21 @@ available yet," not what that image's internal structure is:
   version's 42MB report bug, see below). The grid is still what the AI queue actually analyzes
   either way (see above) -- only this HTML report's own inline preview changed.
 
-  `/reports/generate`'s optional `include_preview` param (default `true`, only meaningful
-  alongside `source=visits`) is a lightweight-report opt-out: `false` makes `get_report_data`
-  force `gif_image_expr` to `NULL` regardless of `thumb_crop_status`, so the GIF's base64 text
-  is never even fetched from Postgres, not just hidden by `report.py`'s rendering -- it's
-  typically the single largest field in this query (a multi-frame animated GIF vs. one flat
-  JPEG grid), so this is a real payload-size reduction, not a cosmetic one. Only the GIF is
-  dropped -- `crop_image_expr`/`visit_join` above are untouched, so `_img_cell` falls back to
-  the visit's own static composite grid exactly as it already does for a visit whose preview
-  genuinely isn't ready yet, no separate rendering path needed. Exists for a caller like an n8n
-  workflow that emails/messages the report and wants a smaller result -- `n8n/alerts-report.json`
-  itself is unchanged (still omits the param, i.e. `true`), since that's just one example caller,
-  not the only one.
+  `/reports/generate`'s optional `include_preview` param is a mode, not a bool (same shape as
+  `TELEGRAM_EVENTS_MODE`): `"gif"` (the default) is today's original behavior described above;
+  `"image"` drops only the GIF -- `get_report_data` forces `gif_image_expr` to `NULL` regardless
+  of `thumb_crop_status`, at the SQL level, not just hidden by `report.py`'s rendering, since it's
+  typically the single largest field in this query (a multi-frame animated GIF vs. one flat JPEG
+  grid) -- falling back to the visit's own static composite grid exactly as `_img_cell` already
+  does for a visit whose preview genuinely isn't ready yet; `"none"` goes further and forces
+  `crop_image_expr` to `NULL` too, dropping the row image entirely (for either `source=events` or
+  `source=visits`) -- `_img_cell` already renders `"(no image)"` whenever `crop_image_base64`
+  comes back NULL, so neither narrower mode needs a separate rendering path, only the SQL-level
+  field selection changes. Each mode past the default is a real payload-size reduction, not a
+  cosmetic one -- the dropped field(s) are never fetched from Postgres at all. Exists for a
+  caller like an n8n workflow that emails/messages the report and wants a smaller result --
+  `n8n/alerts-report.json` itself is unchanged (still omits the param, i.e. `"gif"`), since
+  that's just one example caller, not the only one.
 - **`TELEGRAM_ALERTS_MODE`'s visit-summary message** (the `image`/`all` half): deferred, not edited after the fact.
   `mqtt_ingest._handle_review_message` only sends the summary immediately when
   `db.visit_thumb_crop_will_be_attempted(review)` is false (i.e. `VISIT_THUMB_CROP_ENABLED` is off)

@@ -222,7 +222,7 @@ def test_generate_report_visits_combines_car_and_person_into_one_alert(conn_ok):
         _cleanup(car_id, person_id, visit_id=visit_id)
 
 
-def test_generate_report_include_preview_false_omits_gif(conn_ok):
+def test_generate_report_include_preview_image_omits_gif(conn_ok):
     raw_id, det_id = _insert_raw_event(objects="car")
     _insert_vehicle_sighting(raw_id)
     visit_id = db.record_visit({
@@ -233,12 +233,17 @@ def test_generate_report_include_preview_false_omits_gif(conn_ok):
     try:
         now = datetime.now(timezone.utc)
         window = (now - timedelta(hours=1), now + timedelta(hours=1))
-        with_preview = report.generate_report(*window, source="visits", include_preview=True)
-        without_preview = report.generate_report(*window, source="visits", include_preview=False)
-        assert "image/gif" in with_preview["html"]
-        assert "image/gif" not in without_preview["html"]
-        # Falls back to the visit's own static grid crop, not "(no image)" -- only the GIF is
-        # dropped, not the crop preference source=visits already applies.
-        assert _TINY_JPEG_BASE64 in without_preview["html"]
+        with_gif = report.generate_report(*window, source="visits", include_preview="gif")
+        image_only = report.generate_report(*window, source="visits", include_preview="image")
+        none_mode = report.generate_report(*window, source="visits", include_preview="none")
+        assert "image/gif" in with_gif["html"]
+        assert "image/gif" not in image_only["html"]
+        # Falls back to the visit's own static grid crop, not "(no image)" -- "image" mode only
+        # drops the GIF, not the crop preference source=visits already applies.
+        assert _TINY_JPEG_BASE64 in image_only["html"]
+        # "none" drops the image entirely -- neither the GIF nor the static crop appear.
+        assert "image/gif" not in none_mode["html"]
+        assert _TINY_JPEG_BASE64 not in none_mode["html"]
+        assert "(no image)" in none_mode["html"]
     finally:
         _cleanup(raw_id, visit_id=visit_id)
