@@ -220,3 +220,25 @@ def test_generate_report_visits_combines_car_and_person_into_one_alert(conn_ok):
         assert result["person_count"] == 1
     finally:
         _cleanup(car_id, person_id, visit_id=visit_id)
+
+
+def test_generate_report_include_preview_false_omits_gif(conn_ok):
+    raw_id, det_id = _insert_raw_event(objects="car")
+    _insert_vehicle_sighting(raw_id)
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    db.mark_visit_thumb_crop_done(visit_id, _TINY_JPEG_BASE64, "visit-gif")
+    try:
+        now = datetime.now(timezone.utc)
+        window = (now - timedelta(hours=1), now + timedelta(hours=1))
+        with_preview = report.generate_report(*window, source="visits", include_preview=True)
+        without_preview = report.generate_report(*window, source="visits", include_preview=False)
+        assert "image/gif" in with_preview["html"]
+        assert "image/gif" not in without_preview["html"]
+        # Falls back to the visit's own static grid crop, not "(no image)" -- only the GIF is
+        # dropped, not the crop preference source=visits already applies.
+        assert _TINY_JPEG_BASE64 in without_preview["html"]
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)

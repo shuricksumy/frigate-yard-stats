@@ -120,8 +120,14 @@ def _build_alert_rows(cars: list, persons: list, lightboxes: list, counter: list
     return "\n".join(rows)
 
 
-def generate_report(start: datetime, end: datetime, source: str = "events") -> dict:
-    data = db.get_report_data(start, end, source)
+def generate_report(
+    start: datetime, end: datetime, source: str = "events", include_preview: bool = True,
+) -> dict:
+    # include_preview=False is a lightweight-report opt-out (see db.get_report_data) -- the GIF's
+    # base64 text is never even fetched from Postgres, so every group's preview_gif_base64 is
+    # already None here; _img_cell falls back to the static grid/crop exactly as it does for a
+    # visit whose preview genuinely isn't ready yet, no separate code path needed.
+    data = db.get_report_data(start, end, source, include_preview)
     cars = data["vehicles"]
     persons = data["persons"]
 
