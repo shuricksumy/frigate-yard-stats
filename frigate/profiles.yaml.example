@@ -110,12 +110,53 @@
 # doesn't set its own for that same key (sitting between the per-type overrides above and their
 # hardcoded fallback), PLUS the sole location for the technical tuning knobs just described. Leave
 # it out entirely (or omit individual keys) to fall straight through to the hardcoded fallback,
-# exactly as if this section didn't exist.
+# exactly as if this section didn't exist. Every key below is fully optional -- this lists ALL of
+# them at once (with each one's hardcoded fallback as the commented-out value) purely so the whole
+# surface is visible in one place; a real deployment typically only sets the handful that actually
+# differ from the fallback (see CLAUDE.md's "Per-object-type overrides" section for a real
+# example -- one production deployment only needed ~11 of these).
 # defaults:
+#   # Per-object-type settings (also overridable per type below -- see object_types.car's own
+#   # commented-out block for the identical list in that context).
+#   telegram_events_mode: none
+#   telegram_alerts_mode: none
+#   ai_events_stage_enabled: false
+#   ai_alerts_enabled: false
+#   crop_disabled: false
+#   crop_frame_offset_pct: 0.5
+#   crop_padding_pct: 0.2
+#   frigate_snapshot_enabled: true
 #   store_video: false
-#   crop_padding_pct: 0.3
-#   parallel_limit: 4
-#   retention_months: 6
+#   store_video_alerts: false
+#   visit_thumb_crop_enabled: false
+#   visit_preview_frame_percentages: [0, 25, 50, 100]
+#   # Plain technical tuning knobs -- defaults: ONLY, never per-type (see the block above).
+#   parallel_limit: 2
+#   stale_minutes: 5
+#   max_attempts: 3
+#   crop_initial_wait_seconds: 5
+#   max_crop_dimension: 1280
+#   thumbnail_max_dimension: 240
+#   poll_interval_seconds: 5
+#   retention_months: 12
+#   retention_check_interval_seconds: 86400
+#   video_parallel_limit: 1
+#   video_initial_wait_seconds: 10
+#   video_min_valid_bytes: 1000
+#   video_max_attempts: 5
+#   video_retry_wait_seconds: 5
+#   video_max_age_hours: null   # null = no limit
+#   visit_thumb_crop_parallel_limit: 1
+#   visit_thumb_crop_initial_wait_seconds: 5
+#   visit_thumb_crop_max_attempts: 3
+#   visit_thumb_crop_retry_wait_seconds: 5
+#   ai_stage_parallel_limit: 2
+#   ai_stage_stale_minutes: 5
+#   ai_stage_max_attempts: 3
+#   ai_stage_max_age_hours: null   # null = no limit
+#   ai_stage_poll_interval_seconds: 5
+#   ai_stage_default_timeout_seconds: 180
+#   ai_stage_embed_timeout_seconds: 60
 object_types:
   car: &vehicle_profile
     chat_path: /REPLACE_WITH_VEHICLE_SLOT/v1/chat/completions
@@ -169,3 +210,22 @@ object_types:
       the sequence -- e.g. walking toward the door, carrying something, getting in/out of a
       vehicle -- in one short sentence covering both. No speculation about identity. Do not
       mention that the image is a grid.
+  # A fourth type, added purely by adding an entry here -- no schema/code change (see the
+  # object_types comment at the top). Demonstrates a real per-type override in context: this one
+  # deployment wants dog *event* notifications (a photo per sighting) even though every other type
+  # stays silent on events via `defaults:` above -- everything else about dog inherits from
+  # `defaults:` like car/truck/person do, since it sets no other key here.
+  dog:
+    chat_path: /REPLACE_WITH_VEHICLE_SLOT/v1/chat/completions
+    timeout_seconds: 180
+    telegram_events_mode: image
+    event_prompt: >-
+      This image shows a single moment of one dog. Describe their breed and what they appear to be
+      doing in this one frame, in one short sentence. No speculation about identity.
+    alert_prompt: >-
+      This image is a 2x2 grid of 4 frames of the SAME dog captured moments apart during one visit
+      (not 4 different dogs) -- use all 4 panels together, since a detail unclear in one may be
+      visible in another. Describe this dog's breed (a static detail, most reliable from whichever
+      panel shows it most clearly) and what they appear to be doing across the sequence -- e.g.
+      walking toward the door, playing, being walked on a leash -- in one short sentence covering
+      both. No speculation about identity. Do not mention that the image is a grid.
