@@ -468,19 +468,18 @@ function eventsApp() {
             const data = await sightingsResp.json();
             // Prefer the visit's own alert-stage analysis (AI_ALERTS_ENABLED, the 2x2 grid) when
             // it's ready -- it's the richer, change-aware result this whole view exists for.
-            // Falls back to the per-event vehicles/persons (AI_EVENTS_STAGE_ENABLED) when the
-            // alert stage is off or hasn't finished this visit yet, so the lightbox never shows
-            // nothing just because one specific stage is still catching up.
+            // Falls back to the per-event sightings (AI_EVENTS_STAGE_ENABLED) when the alert
+            // stage is off or hasn't finished this visit yet, so the lightbox never shows nothing
+            // just because one specific stage is still catching up.
             if (data.alert_sighting) {
-              const title = data.alert_sighting.sighting_type === "vehicle" ? "Vehicle (alert analysis)" : "Person (alert analysis)";
-              const fields = data.alert_sighting.sighting_type === "vehicle"
-                ? this.vehicleFields(data.alert_sighting) : this.personFields(data.alert_sighting);
-              this.lightboxGroups = [{ title, fields }];
+              this.lightboxGroups = [{
+                title: `${this.titleCase(data.alert_sighting.object_label)} (alert analysis)`,
+                fields: this.sightingFields(data.alert_sighting),
+              }];
             } else {
-              this.lightboxGroups = [
-                ...data.vehicles.map((vs) => ({ title: "Vehicle", fields: this.vehicleFields(vs) })),
-                ...data.persons.map((ps) => ({ title: "Person", fields: this.personFields(ps) })),
-              ];
+              this.lightboxGroups = data.sightings.map((s) => ({
+                title: this.titleCase(s.object_label), fields: this.sightingFields(s),
+              }));
             }
           }
           if (eventsResp.ok) {
@@ -493,8 +492,11 @@ function eventsApp() {
           const resp = await fetch(`/events/${event.id}`, { headers: { "X-API-Key": this.apiKey } });
           if (resp.ok) {
             const d = await resp.json();
-            if (d.vehicle_sighting) this.lightboxGroups.push({ title: "Vehicle", fields: this.vehicleFields(d.vehicle_sighting) });
-            if (d.person_sighting) this.lightboxGroups.push({ title: "Person", fields: this.personFields(d.person_sighting) });
+            if (d.sighting) {
+              this.lightboxGroups.push({
+                title: this.titleCase(d.sighting.object_label), fields: this.sightingFields(d.sighting),
+              });
+            }
           }
         }
       } catch (err) {
@@ -510,21 +512,16 @@ function eventsApp() {
       this.lightboxConnectedEvents = [];
     },
 
-    // One combined descriptive line instead of a Color/Body type/Make/Model/... table -- reads
-    // like the Person side's Description rather than a spreadsheet of individual fields. Same
-    // combination logic as report.py's _vehicle_summary, kept in sync deliberately.
-    vehicleFields(vs) {
-      const bits = [vs.color, vs.body_type, vs.make_guess, vs.model_guess].filter(Boolean);
-      const summary = bits.length ? bits.join(" ") : null;
-      const plate = vs.plate_text_llm || vs.plate_text_frigate;
-      const parts = [summary, vs.notable_features].filter(Boolean);
-      if (plate) parts.push(`plate ${plate}`);
-      const description = parts.length ? parts.join(" -- ") : null;
-      return [["Description", description], ["Notes", vs.notes]].filter(([, value]) => value);
+    // A sighting is just {object_label, description} in this universal model -- no per-type
+    // field table to build (color/body_type/make/model/... no longer exist as separate columns),
+    // the model's own free-text answer already is the one-line "Description" to show.
+    sightingFields(s) {
+      return [["Description", s.description]].filter(([, value]) => value);
     },
 
-    personFields(ps) {
-      return [["Description", ps.description], ["Notes", ps.notes]].filter(([, value]) => value);
+    titleCase(label) {
+      if (!label) return "Sighting";
+      return label.charAt(0).toUpperCase() + label.slice(1);
     },
 
     formatTs(iso) {
