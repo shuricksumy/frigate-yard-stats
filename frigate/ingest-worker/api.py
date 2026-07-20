@@ -74,18 +74,30 @@ def run_retention_now():
 
 @app.post("/retention/purge", tags=["retention"], dependencies=[Depends(require_api_key)])
 def purge_old_records(
-    older_than_days: int = Query(..., ge=1, description="Delete raw_events (and their dependent sightings/visits) with start_ts older than this many days"),
+    older_than_days: int = Query(..., ge=1, description="Delete/clear data with start_ts older than this many days"),
     confirm: bool = Query(False, description="Must be true to actually delete. Omitted/false previews counts only -- no rows are removed"),
+    only_media: bool = Query(True, description="Default true: keeps every row and all its text/structured AI analysis (including embeddings) -- only deletes stored video files off disk and clears stored images/GIFs (crop_image_base64/preview_gif_base64), so old data stays searchable with just the media gone. false: deletes the rows entirely (raw_events, visits, and their dependent sightings) -- today's original full purge -- and rebuilds the vector search index afterward against whatever data remains."),
 ):
     """Ad-hoc bulk purge with a caller-chosen cutoff, independent of the scheduled
-    RETENTION_MONTHS sweep -- e.g. to clear out a backlog of old test data or reclaim space sooner
-    than the configured retention window. Unlike /retention/run, the cutoff here is
-    caller-controlled and the delete has no undo, so this requires X-API-Key and defaults to a
-    dry run: call once without confirm=true to see how many rows of each type would be deleted,
-    then again with confirm=true to actually delete them."""
+    RETENTION_MONTHS sweep -- e.g. to clear out a backlog of old test data, reclaim space sooner
+    than the configured retention window, or (only_media=true, the default) strip old
+    video/image/GIF payloads while keeping every row's AI analysis text and plate reads
+    searchable indefinitely. Unlike /retention/run, the cutoff here is caller-controlled and the
+    delete has no undo, so this requires X-API-Key and defaults to a dry run: call once without
+    confirm=true to see how many rows/files would be affected, then again with confirm=true to
+    actually apply it."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
+    if only_media:
+        counts = db.purge_media_older_than(cutoff, execute=confirm)
+        return {"cutoff": cutoff, "dry_run": not confirm, "only_media": True, "counts": counts}
     counts = db.purge_older_than(cutoff, execute=confirm)
-    return {"cutoff": cutoff, "dry_run": not confirm, "counts": counts}
+    result = {"cutoff": cutoff, "dry_run": not confirm, "only_media": False, "counts": counts}
+    if confirm:
+        # A full purge can remove a large fraction of the embedded rows the HNSW index was built
+        # over -- rebuilding it against whatever survives keeps the index accurate/compact rather
+        # than leaving it sized for data that's now gone.
+        result["reindexed"] = db.reindex_vector_indexes()
+    return result
 
 
 @app.post("/embeddings/backfill", tags=["sightings"], dependencies=[Depends(require_api_key)])

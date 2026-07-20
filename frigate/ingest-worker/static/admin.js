@@ -56,6 +56,7 @@ function adminApp() {
     requeueResult: {},
 
     purgeDays: 60,
+    purgeOnlyMedia: true,
     purging: false,
     purgePreview: null,
     purgeResult: "",
@@ -239,7 +240,7 @@ function adminApp() {
       this.purging = true;
       this.purgeResult = "";
       try {
-        const r = await fetch(`/retention/purge?older_than_days=${this.purgeDays}&confirm=false`, {
+        const r = await fetch(`/retention/purge?older_than_days=${this.purgeDays}&confirm=false&only_media=${this.purgeOnlyMedia}`, {
           method: "POST", headers: this._headers(),
         });
         this.purgePreview = await r.json();
@@ -253,19 +254,28 @@ function adminApp() {
     async confirmPurge() {
       if (!this.purgePreview) return;
       const c = this.purgePreview.counts;
-      const ok = confirm(
-        `This will PERMANENTLY delete ${c.raw_events} events, ${c.visits} visits, ` +
-        `${c.vehicle_sightings} vehicle sightings, ${c.person_sightings} person sightings, ` +
-        `and ${c.video_files} video files older than ${this.purgeDays} days. This cannot be undone. Continue?`
-      );
+      const ok = this.purgeOnlyMedia
+        ? confirm(
+            `This will clear ${c.raw_events_video_files + c.visits_video_files} stored video files and ` +
+            `${c.raw_events_images + c.visits_images_or_gifs} stored images/GIFs older than ${this.purgeDays} days. ` +
+            `Rows and all AI analysis text are kept. This cannot be undone. Continue?`
+          )
+        : confirm(
+            `This will PERMANENTLY delete ${c.raw_events} events, ${c.visits} visits, ` +
+            `${c.vehicle_sightings} vehicle sightings, ${c.person_sightings} person sightings, ` +
+            `${c.visit_vehicle_sightings} alert vehicle sightings, and ${c.visit_person_sightings} alert person ` +
+            `sightings older than ${this.purgeDays} days, then rebuild the vector search index. This cannot be undone. Continue?`
+          );
       if (!ok) return;
       this.purging = true;
       try {
-        const r = await fetch(`/retention/purge?older_than_days=${this.purgeDays}&confirm=true`, {
+        const r = await fetch(`/retention/purge?older_than_days=${this.purgeDays}&confirm=true&only_media=${this.purgeOnlyMedia}`, {
           method: "POST", headers: this._headers(),
         });
         const d = await r.json();
-        this.purgeResult = `Deleted: ${JSON.stringify(d.counts)}`;
+        this.purgeResult = this.purgeOnlyMedia
+          ? `Cleared: ${JSON.stringify(d.counts)}`
+          : `Deleted: ${JSON.stringify(d.counts)}` + (d.reindexed ? ` -- reindexed: ${d.reindexed.join(", ")}` : "");
         this.purgePreview = null;
         await this.refreshAll();
       } catch (e) {

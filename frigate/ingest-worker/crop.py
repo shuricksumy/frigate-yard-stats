@@ -344,6 +344,15 @@ def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, s
     return grid_base64, gif_base64
 
 
+def fetch_frigate_snapshot_base64(det_id: str) -> str:
+    # Frigate's own already-rendered best-detection-score frame -- no ffmpeg involved at all, just
+    # the raw JPEG bytes Frigate itself already produced. See FRIGATE_SNAPSHOT_ENABLED's comment in
+    # config.py for the resolution/overlay trade-off this accepts in exchange for better framing.
+    resp = requests.get(f"{config.FRIGATE_API_BASE}/api/events/{det_id}/snapshot.jpg", timeout=10)
+    resp.raise_for_status()
+    return base64.b64encode(resp.content).decode()
+
+
 def crop_event(raw_event: dict) -> dict:
     # sub_label/score come from this same Frigate API fetch (not the live MQTT "end" payload)
     # because LPR/sub_label resolution can settle after the event first fires -- this is the
@@ -352,12 +361,15 @@ def crop_event(raw_event: dict) -> dict:
     det_id = raw_event["det_id"]
     event = fetch_frigate_event(det_id)
     data = event.get("data") or {}
-    box = compute_full_res_box(event)
-    offset = compute_frame_offset_seconds(
-        raw_event["start_ts"], raw_event["end_ts"], config.CROP_FRAME_OFFSET_PCT,
-    )
-    clip_url = f"{config.FRIGATE_API_BASE}/api/events/{det_id}/clip.mp4"
-    crop_image_base64 = crop_and_scale(clip_url, offset, box)
+    if config.FRIGATE_SNAPSHOT_ENABLED:
+        crop_image_base64 = fetch_frigate_snapshot_base64(det_id)
+    else:
+        box = compute_full_res_box(event)
+        offset = compute_frame_offset_seconds(
+            raw_event["start_ts"], raw_event["end_ts"], config.CROP_FRAME_OFFSET_PCT,
+        )
+        clip_url = f"{config.FRIGATE_API_BASE}/api/events/{det_id}/clip.mp4"
+        crop_image_base64 = crop_and_scale(clip_url, offset, box)
     return {
         "crop_image_base64": crop_image_base64,
         "sub_label": event.get("sub_label"),

@@ -436,3 +436,56 @@ def test_build_visit_preview_raises_on_invalid_box_when_crop_enabled(monkeypatch
         assert False, "expected ValueError"
     except ValueError:
         pass
+
+
+# ---- fetch_frigate_snapshot_base64 / crop_event's FRIGATE_SNAPSHOT_ENABLED branch ----
+
+def test_fetch_frigate_snapshot_base64_returns_encoded_bytes(monkeypatch):
+    class FakeResponse:
+        content = b"fake-jpeg-bytes"
+
+        def raise_for_status(self):
+            pass
+
+    captured_url = []
+    monkeypatch.setattr(crop.requests, "get", lambda url, **k: captured_url.append(url) or FakeResponse())
+
+    result = crop.fetch_frigate_snapshot_base64("1784554838.654667-xag8k1")
+
+    assert result == base64.b64encode(b"fake-jpeg-bytes").decode()
+    assert captured_url[0] == f"{config.FRIGATE_API_BASE}/api/events/1784554838.654667-xag8k1/snapshot.jpg"
+
+
+def test_crop_event_uses_frigate_snapshot_when_enabled(monkeypatch):
+    monkeypatch.setattr(config, "FRIGATE_SNAPSHOT_ENABLED", True)
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
+        "data": {"region": [0.1, 0.1, 0.2, 0.2], "score": 0.91}, "sub_label": "10MG407",
+    })
+    monkeypatch.setattr(crop, "fetch_frigate_snapshot_base64", lambda det_id: "snapshot-base64")
+
+    # crop_and_scale must never be called in this mode -- assert by making it raise if it is.
+    def _fail_if_called(*a, **k):
+        raise AssertionError("crop_and_scale should not run when FRIGATE_SNAPSHOT_ENABLED is true")
+    monkeypatch.setattr(crop, "crop_and_scale", _fail_if_called)
+
+    raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
+    result = crop.crop_event(raw_event)
+
+    assert result == {"crop_image_base64": "snapshot-base64", "sub_label": "10MG407", "score": 0.91}
+
+
+def test_crop_event_uses_record_stream_crop_when_snapshot_disabled(monkeypatch):
+    monkeypatch.setattr(config, "FRIGATE_SNAPSHOT_ENABLED", False)
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
+        "data": {"region": [0.1, 0.1, 0.2, 0.2], "score": 0.5}, "sub_label": None,
+    })
+
+    def _fail_if_called(det_id):
+        raise AssertionError("fetch_frigate_snapshot_base64 should not run when FRIGATE_SNAPSHOT_ENABLED is false")
+    monkeypatch.setattr(crop, "fetch_frigate_snapshot_base64", _fail_if_called)
+    monkeypatch.setattr(crop, "crop_and_scale", lambda clip_url, offset, box: "record-stream-crop-base64")
+
+    raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
+    result = crop.crop_event(raw_event)
+
+    assert result == {"crop_image_base64": "record-stream-crop-base64", "sub_label": None, "score": 0.5}

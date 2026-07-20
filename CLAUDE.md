@@ -165,12 +165,39 @@ AI-stage queue, or bulk-delete rows over the network. `ingest-worker` never call
 any of these — the write endpoints just execute the claim/insert/retry/delete mechanics; the VLM
 call and prompt still live entirely in n8n, which posts the result back.
 
-`POST /retention/purge` is an ad-hoc counterpart to the scheduled `RETENTION_MONTHS` sweep
-(`db.purge_older_than`, same FK-safe child-before-parent delete order as
-`db.run_retention_cleanup`) for when you want to purge on a caller-chosen cutoff rather than
-waiting on or reconfiguring the scheduled one -- e.g. clearing out old test data. Defaults to a
-dry run (`confirm` query param defaults to `false`): it always returns counts of matching rows
-per table, and only actually deletes when `confirm=true` is passed explicitly.
+`POST /retention/purge` is an ad-hoc counterpart to the scheduled `RETENTION_MONTHS` sweep for
+when you want to purge on a caller-chosen cutoff rather than waiting on or reconfiguring the
+scheduled one. Defaults to a dry run (`confirm` query param defaults to `false`): it always
+returns counts of matching rows/files, and only actually acts when `confirm=true` is passed
+explicitly. A second mode, `only_media` (defaults to `true`), decides *what* gets purged:
+
+- **`only_media=true`** (default) -- `db.purge_media_older_than`: deletes stored video files off
+  disk and clears the stored image/GIF columns (`crop_image_base64`/`preview_gif_base64` on both
+  `raw_events` and `visits`) for rows older than the cutoff, but keeps every row and all its
+  text/structured fields (AI analysis, plate reads, descriptions, embeddings) -- old data stays
+  fully searchable via `/events`'/`/visits`' `q` filter and `/search/semantic`, just with the media
+  payload gone. Never touches `vehicle_sightings`/`person_sightings`/`visit_vehicle_sightings`/
+  `visit_person_sightings` at all -- none of those tables carry media columns of their own.
+- **`only_media=false`** -- `db.purge_older_than` (today's original behavior): deletes the rows
+  entirely -- same FK-safe child-before-parent delete order as `db.run_retention_cleanup`, extended
+  to also delete `visit_vehicle_sightings`/`visit_person_sightings` before `visits` (added
+  alongside the alert AI stage -- see below) and to decouple `raw_events.visit_id` from a
+  to-be-deleted `visit` *before* deleting that `visit`, not after. On a real `confirm=true` run,
+  the endpoint also rebuilds both HNSW indexes afterward (`db.reindex_vector_indexes`) -- a full
+  purge can remove a large fraction of the rows the index was built over, so this keeps it sized
+  and accurate for whatever data survives rather than leaving it bloated for data that's gone.
+
+**Bug found and fixed while adding this**: both `purge_older_than` and `run_retention_cleanup`
+deleted `visits` *before* `raw_events`, but `raw_events.visit_id` references `visits(id)` -- the
+opposite direction from that delete order. Reproduced live (a raw_event still linked to an
+about-to-be-deleted visit): `psycopg2.errors.ForeignKeyViolation` on the `visits` DELETE. This
+predates the alert AI stage entirely (the FK direction has always been `raw_events -> visits`) but
+had never been exercised in practice -- nothing in this codebase had integration test coverage for
+either purge function until this change. Fixed by nulling `raw_events.visit_id` for every row
+pointing at a to-be-deleted visit immediately before the `visits` DELETE in both functions, rather
+than relying on every visit's linked raw_events always being at least as old as the visit itself
+(a long-lived visit -- e.g. a car parked for 20+ minutes -- can have a later-linked event that
+individually isn't old enough to be purged in the same pass, so ordering alone wasn't sufficient).
 
 `POST /ai-queue/claim` folds reap-stale + count-in-progress + claim-next-batch into one call
 (`db.claim_ai_batch`), returning `{events: [...]}` -- n8n Split Out's that array into items before
@@ -856,19 +883,47 @@ confirmed live against production by comparing two real events' Frigate-side sna
 landed almost exactly at event *start*, another landed *past* the midpoint. Frigate doesn't expose
 this "best frame" timestamp anywhere in its API (checked both the events list and detail
 endpoints, including `data.path_data`), so there's no way to compute or sync to Frigate's exact
-choice programmatically. Switching to fetching Frigate's own snapshot directly (instead of
-seeking our own frame from the record-stream clip) was considered and rejected: it's from the
-lower-res detect stream (800x448 in testing, vs. this setup's 3840x2160 record stream) with a
-bounding-box/label/timestamp overlay baked in that this Frigate version's REST API doesn't expose
-a way to suppress -- a real regression for plate/attribute-reading quality, not a fix. `0.5`
-stays the default until real usage across your own cameras suggests a specific different value is
-consistently better -- there's no universally "more correct" number to guess at upfront.
+choice programmatically. `0.5` stays `CROP_FRAME_OFFSET_PCT`'s default until real usage across your
+own cameras suggests a specific different value is consistently better -- there's no universally
+"more correct" number to guess at upfront, for this project's *own* seek-based approach.
 
 `CROP_INITIAL_WAIT_SECONDS` (default 5s, same idea as `VIDEO_INITIAL_WAIT_SECONDS`) gives Frigate
 a head start to finalize the event/clip before the *first* crop attempt on a freshly claimed row
 -- confirmed in production that even an ordinary short event's crop can fail this way if attempted
 immediately after the "end" MQTT message, not just long events tripping the clip-duration fallback
-above. Only applies once per row (`crop_attempt_count == 0`), not on every retry pass.
+above. Only applies once per row (`crop_attempt_count == 0`), not on every retry pass. Still
+applies as a generic "give Frigate a moment" wait regardless of `FRIGATE_SNAPSHOT_ENABLED` below --
+its own timing concern (has the event settled at all) is orthogonal to which image source is used.
+
+#### `FRIGATE_SNAPSHOT_ENABLED` -- revisiting the earlier "use Frigate's own snapshot" rejection, for events only
+
+Fetching Frigate's own snapshot directly (`GET /api/events/<det_id>/snapshot.jpg`) instead of
+seeking our own frame from the record-stream clip was considered and rejected earlier in this
+project's history for exactly the reasons above: it's from the lower-res detect stream (800x448 in
+testing, vs. this setup's 3840x2160 record stream) with a bounding-box/label/timestamp overlay
+baked in that this Frigate version's REST API doesn't expose a way to suppress -- confirmed
+directly (not just assumed) by re-testing with `bbox=0&timestamp=0&h=720` query params appended to
+the snapshot URL: byte-identical response to the same request with no params at all, overlay still
+present, resolution still 800x448.
+
+That trade-off was true then and is still true now -- what changed is the *decision*, not the
+facts: this Frigate snapshot is Frigate's own best-detection-score frame judgment (the same
+content-dependent choice CROP_FRAME_OFFSET_PCT's own comment above says can't be replicated by any
+fixed offset), so for some deployments better framing/timing outweighs the resolution/overlay cost.
+`FRIGATE_SNAPSHOT_ENABLED` (default `false`, preserves all prior behavior) makes `crop.crop_event`
+call the new `crop.fetch_frigate_snapshot_base64` instead of `crop_and_scale` -- no ffmpeg
+involved at all for this path, just the raw JPEG bytes Frigate already rendered, base64-encoded
+directly. `sub_label`/`score` still come from the same `fetch_frigate_event` call either way, since
+those aren't image-related. `CROP_DISABLED`/`CROP_FRAME_OFFSET_PCT`/`CROP_PADDING_PCT` all stop
+applying to events once this is on -- there's no frame-seeking or region-cropping happening on our
+side anymore to tune.
+
+**Events only, deliberately** -- a visit's own composite grid (`VISIT_THUMB_CROP_ENABLED`,
+`crop.build_visit_preview`) is completely unaffected either way, kept on this project's own
+proportional-sampling-across-the-clip approach. A single Frigate snapshot has no "4 frames of
+change" equivalent to offer a visit's grid -- Frigate's snapshot is one frame, and the whole point
+of the visit-level grid is showing motion/change across a span, which this endpoint can't provide
+regardless of how good that one frame's framing is.
 
 ### Visit preview -- a composite grid + animated GIF sampled across the visit's own clip (fifth queue stage)
 
@@ -1385,12 +1440,16 @@ session's production incident (34 events failed on an embedding dimension mismat
 resolved by hand over SSH before this button existed.
 
 **Embeddings backfill and retention purge are exposed as buttons too, reusing the existing
-endpoints unchanged** (`POST /embeddings/backfill?confirm=true&limit=200`, `POST /retention/purge`)
--- no new backend logic, since both already had the right dry-run-by-default shape. The retention
-button specifically requires a native JS `confirm()` dialog spelling out exact row/file counts
-(from a mandatory preview call first) before the real `confirm=true` delete fires -- the same
-two-step preview-then-confirm flow the API itself already enforces, just made impossible to skip
-from the UI as well, since this is the one action on the page that's genuinely irreversible.
+endpoints** (`POST /embeddings/backfill?confirm=true&limit=200`, `POST /retention/purge`) -- both
+already had the right dry-run-by-default shape. The retention purge control adds a "Media only"
+checkbox (checked by default) mapping directly to the API's `only_media` param -- checked shows a
+media-focused preview (video/image/GIF counts) and its own lighter confirmation text ("rows and
+all AI analysis text are kept"); unchecked shows the full row-count preview and a starker
+PERMANENTLY-delete confirmation that also mentions the vector-index rebuild that follows. Either
+way, a native JS `confirm()` dialog spells out exact counts (from a mandatory preview call first)
+before the real `confirm=true` call fires -- the same two-step preview-then-confirm flow the API
+itself already enforces, just made impossible to skip from the UI as well, since both modes are
+irreversible once confirmed.
 
 ### Schema (`yard_stats`)
 

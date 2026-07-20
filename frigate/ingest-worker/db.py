@@ -932,6 +932,40 @@ def run_retention_cleanup(retention_months: int) -> None:
         """,
         (retention_months,),
     )
+    # visit_vehicle_sightings/visit_person_sightings reference visits(id) with no ON DELETE
+    # CASCADE -- must go before the visits DELETE below, same child-before-parent reasoning as
+    # vehicle_sightings/person_sightings above (raw_event_id -> raw_events(id)).
+    _execute(
+        """
+        DELETE FROM yard_stats.visit_vehicle_sightings WHERE visit_id IN (
+            SELECT id FROM yard_stats.visits WHERE start_ts < now() - (%s || ' months')::interval
+        )
+        """,
+        (retention_months,),
+    )
+    _execute(
+        """
+        DELETE FROM yard_stats.visit_person_sightings WHERE visit_id IN (
+            SELECT id FROM yard_stats.visits WHERE start_ts < now() - (%s || ' months')::interval
+        )
+        """,
+        (retention_months,),
+    )
+    # raw_events.visit_id references visits(id) -- the opposite direction from the delete order
+    # below (visits before raw_events), so a visit about to be deleted can't still have a
+    # raw_event pointing at it, deleted or not (a visit's start_ts is set from its earliest-linked
+    # event, but a long-lived visit -- e.g. a car parked for 20+ minutes -- can have later-linked
+    # events that individually aren't old enough to be purged in this same pass). Decoupling first
+    # makes the delete order below safe regardless of that edge case, rather than relying on every
+    # linked raw_event always being at least as old as its visit.
+    _execute(
+        """
+        UPDATE yard_stats.raw_events SET visit_id = NULL WHERE visit_id IN (
+            SELECT id FROM yard_stats.visits WHERE start_ts < now() - (%s || ' months')::interval
+        )
+        """,
+        (retention_months,),
+    )
     _execute(
         "DELETE FROM yard_stats.visits WHERE start_ts < now() - (%s || ' months')::interval",
         (retention_months,),
@@ -965,6 +999,22 @@ def purge_older_than(cutoff: datetime, execute: bool) -> dict:
             SELECT count(*)::int AS c FROM yard_stats.person_sightings ps
             JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
             WHERE re.start_ts < %s
+            """,
+            (cutoff,), fetch=True,
+        )[0]["c"],
+        "visit_vehicle_sightings": _execute(
+            """
+            SELECT count(*)::int AS c FROM yard_stats.visit_vehicle_sightings vvs
+            JOIN yard_stats.visits v ON v.id = vvs.visit_id
+            WHERE v.start_ts < %s
+            """,
+            (cutoff,), fetch=True,
+        )[0]["c"],
+        "visit_person_sightings": _execute(
+            """
+            SELECT count(*)::int AS c FROM yard_stats.visit_person_sightings vps
+            JOIN yard_stats.visits v ON v.id = vps.visit_id
+            WHERE v.start_ts < %s
             """,
             (cutoff,), fetch=True,
         )[0]["c"],
@@ -1010,9 +1060,102 @@ def purge_older_than(cutoff: datetime, execute: bool) -> dict:
             """,
             (cutoff,),
         )
+        # visit_vehicle_sightings/visit_person_sightings reference visits(id) with no ON DELETE
+        # CASCADE -- must go before the visits DELETE below, same reasoning as
+        # vehicle_sightings/person_sightings above.
+        _execute(
+            """
+            DELETE FROM yard_stats.visit_vehicle_sightings WHERE visit_id IN (
+                SELECT id FROM yard_stats.visits WHERE start_ts < %s
+            )
+            """,
+            (cutoff,),
+        )
+        _execute(
+            """
+            DELETE FROM yard_stats.visit_person_sightings WHERE visit_id IN (
+                SELECT id FROM yard_stats.visits WHERE start_ts < %s
+            )
+            """,
+            (cutoff,),
+        )
+        # raw_events.visit_id references visits(id) -- the opposite direction from the delete
+        # order below (visits before raw_events); decouple first so a visit about to be deleted
+        # can never still have a raw_event pointing at it, same reasoning as
+        # run_retention_cleanup's identical fix.
+        _execute(
+            """
+            UPDATE yard_stats.raw_events SET visit_id = NULL WHERE visit_id IN (
+                SELECT id FROM yard_stats.visits WHERE start_ts < %s
+            )
+            """,
+            (cutoff,),
+        )
         _execute("DELETE FROM yard_stats.visits WHERE start_ts < %s", (cutoff,))
         _execute("DELETE FROM yard_stats.raw_events WHERE start_ts < %s", (cutoff,))
         logger.info("Ad-hoc purge executed (cutoff=%s, counts=%s, video_files_deleted=%s)", cutoff, counts, deleted_files)
+
+    return counts
+
+
+def purge_media_older_than(cutoff: datetime, execute: bool) -> dict:
+    # POST /retention/purge's only_media=true mode (the default) -- deletes stored video files off
+    # disk and clears the stored image/GIF columns (crop_image_base64/preview_gif_base64) for rows
+    # older than cutoff, but keeps the rows themselves and every text/structured field on them
+    # (AI analysis, plate reads, embeddings) intact and searchable. Unlike purge_older_than, this
+    # never touches vehicle_sightings/person_sightings/visit_vehicle_sightings/
+    # visit_person_sightings at all -- those tables carry no media columns of their own, only text.
+    counts = {
+        "raw_events_video_files": _execute(
+            "SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE start_ts < %s AND video_path IS NOT NULL",
+            (cutoff,), fetch=True,
+        )[0]["c"],
+        "raw_events_images": _execute(
+            "SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE start_ts < %s AND crop_image_base64 IS NOT NULL",
+            (cutoff,), fetch=True,
+        )[0]["c"],
+        "visits_video_files": _execute(
+            "SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s AND video_path IS NOT NULL",
+            (cutoff,), fetch=True,
+        )[0]["c"],
+        "visits_images_or_gifs": _execute(
+            "SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s "
+            "AND (crop_image_base64 IS NOT NULL OR preview_gif_base64 IS NOT NULL)",
+            (cutoff,), fetch=True,
+        )[0]["c"],
+    }
+
+    if execute:
+        video_paths = [
+            row["video_path"] for row in _execute(
+                "SELECT video_path FROM yard_stats.raw_events WHERE start_ts < %s AND video_path IS NOT NULL",
+                (cutoff,), fetch=True,
+            )
+        ]
+        video_paths += [
+            row["video_path"] for row in _execute(
+                "SELECT video_path FROM yard_stats.visits WHERE start_ts < %s AND video_path IS NOT NULL",
+                (cutoff,), fetch=True,
+            )
+        ]
+        deleted_files = _delete_video_files(video_paths)
+        _execute(
+            """
+            UPDATE yard_stats.raw_events SET video_path = NULL, crop_image_base64 = NULL
+            WHERE start_ts < %s AND (video_path IS NOT NULL OR crop_image_base64 IS NOT NULL)
+            """,
+            (cutoff,),
+        )
+        _execute(
+            """
+            UPDATE yard_stats.visits SET video_path = NULL, crop_image_base64 = NULL, preview_gif_base64 = NULL
+            WHERE start_ts < %s
+              AND (video_path IS NOT NULL OR crop_image_base64 IS NOT NULL OR preview_gif_base64 IS NOT NULL)
+            """,
+            (cutoff,),
+        )
+        counts["video_files_deleted"] = deleted_files
+        logger.info("Media-only purge executed (cutoff=%s, counts=%s)", cutoff, counts)
 
     return counts
 

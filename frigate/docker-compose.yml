@@ -82,6 +82,13 @@ services:
       # VLM, since they share this one field. Off by default: the crop exists so the model can
       # read small detail (plates, notable features) a full wide frame makes illegible.
       CROP_DISABLED: ${CROP_DISABLED:-false}
+      # Uses Frigate's own already-rendered event snapshot (its own best-detection-score frame)
+      # instead of seeking+cropping a frame from the record-stream clip -- trades Frigate's fixed
+      # lower detect-stream resolution and a burned-in bbox/label/timestamp overlay (this Frigate
+      # version's API has no way to suppress it) for often-better framing/timing than our own
+      # fixed-offset guess. Ignores CROP_DISABLED/CROP_FRAME_OFFSET_PCT/CROP_PADDING_PCT when true.
+      # Events only -- a visit's own composite grid (VISIT_THUMB_CROP_ENABLED) is unaffected.
+      FRIGATE_SNAPSHOT_ENABLED: ${FRIGATE_SNAPSHOT_ENABLED:-false}
       # Queue tuning -- how many events may be crop_status='processing' at once, how long
       # before a stuck one is reclaimed, how many crop failures before giving up on an event,
       # and how often the poll loop checks for new work.

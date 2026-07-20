@@ -140,22 +140,42 @@
     <!-- ============ Retention purge ============ -->
     <section class="admin-card">
       <h2>Retention purge</h2>
-      <p class="status-line">Delete events (and their sightings/visits/video files) older than a chosen number of days. Always preview first -- nothing is deleted until you confirm.</p>
+      <p class="status-line">Clear out old data past a chosen cutoff. Always preview first -- nothing is deleted/cleared until you confirm.</p>
       <div class="admin-row">
         <label>
           Older than (days)
-          <input type="number" min="1" x-model.number="purgeDays" style="width:100px">
+          <input type="number" min="1" x-model.number="purgeDays" style="width:100px" @change="purgePreview = null">
+        </label>
+        <label class="checkbox-label">
+          <input type="checkbox" x-model="purgeOnlyMedia" @change="purgePreview = null">
+          Media only (keep rows &amp; AI analysis text -- only clear stored video/images/GIFs)
         </label>
         <button @click="previewPurge()" :disabled="purging">Preview</button>
-        <button class="btn-danger" x-show="purgePreview" @click="confirmPurge()" :disabled="purging">Delete now</button>
+        <button class="btn-danger" x-show="purgePreview" @click="confirmPurge()" :disabled="purging">
+          <span x-text="purgeOnlyMedia ? 'Clear media now' : 'Delete rows now'"></span>
+        </button>
       </div>
-      <div x-show="purgePreview" class="admin-row">
+      <p class="status-line" x-show="purgeOnlyMedia">
+        Rows, embeddings, and every text field (AI analysis, plate reads, descriptions) are kept and stay searchable -- only stored video files, crop images, and preview GIFs older than the cutoff are removed.
+      </p>
+      <p class="status-line" x-show="!purgeOnlyMedia">
+        Deletes matching events/visits (and their sightings) entirely. The vector search index is rebuilt afterward against whatever data remains.
+      </p>
+      <div x-show="purgePreview && purgeOnlyMedia" class="admin-row">
+        <span>Would clear:</span>
+        <span x-text="'event videos: ' + (purgePreview && purgePreview.counts.raw_events_video_files)"></span>
+        <span x-text="'event images: ' + (purgePreview && purgePreview.counts.raw_events_images)"></span>
+        <span x-text="'visit videos: ' + (purgePreview && purgePreview.counts.visits_video_files)"></span>
+        <span x-text="'visit images/GIFs: ' + (purgePreview && purgePreview.counts.visits_images_or_gifs)"></span>
+      </div>
+      <div x-show="purgePreview && !purgeOnlyMedia" class="admin-row">
         <span>Would delete:</span>
         <span x-text="'events: ' + (purgePreview && purgePreview.counts.raw_events)"></span>
         <span x-text="'visits: ' + (purgePreview && purgePreview.counts.visits)"></span>
         <span x-text="'vehicle sightings: ' + (purgePreview && purgePreview.counts.vehicle_sightings)"></span>
         <span x-text="'person sightings: ' + (purgePreview && purgePreview.counts.person_sightings)"></span>
-        <span x-text="'video files: ' + (purgePreview && purgePreview.counts.video_files)"></span>
+        <span x-text="'alert vehicle sightings: ' + (purgePreview && purgePreview.counts.visit_vehicle_sightings)"></span>
+        <span x-text="'alert person sightings: ' + (purgePreview && purgePreview.counts.visit_person_sightings)"></span>
       </div>
       <p x-show="purgeResult" x-text="purgeResult"></p>
     </section>

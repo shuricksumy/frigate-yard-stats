@@ -106,7 +106,13 @@ both pages). It shows:
   real button instead of requiring shell access.
 - **Storage** — disk usage for stored video (main and alerts), plus Postgres database size broken
   down per table.
-- **Retention purge** — pick a cutoff in days, hit Preview to see exactly what would be deleted
-  (row counts and video files), then Delete now, which asks for an explicit confirmation spelling
-  out those same numbers before anything is actually removed. Nothing is deleted from a single
-  click.
+- **Retention purge** — pick a cutoff in days, then hit Preview to see exactly what would happen,
+  and Delete/Clear now, which asks for an explicit confirmation spelling out those same numbers
+  before anything actually changes. Nothing happens from a single click. A "Media only" checkbox
+  (on by default) controls what "purge" actually means:
+  - **Checked (default)** — keeps every row and all its AI analysis text/plate reads searchable
+    forever; only deletes the stored video files and clears the stored crop images/preview GIFs
+    for anything older than the cutoff. Use this to reclaim disk/database space while keeping your
+    full history searchable.
+  - **Unchecked** — deletes the matching events/visits (and their sightings) entirely, the
+    original full purge, then rebuilds the semantic search index against whatever remains.

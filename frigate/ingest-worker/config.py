@@ -76,6 +76,19 @@ CROP_DISABLED = _env("CROP_DISABLED", "false").lower() == "true"
 # universal value that matches Frigate's per-event choice, so this stays a tunable rather than a
 # guessed new default. 0.5 (today's exact behavior) until you have reason to change it.
 CROP_FRAME_OFFSET_PCT = float(_env("CROP_FRAME_OFFSET_PCT", "0.5"))
+# Uses Frigate's own already-rendered event snapshot (GET /api/events/{det_id}/snapshot.jpg)
+# instead of seeking+cropping a frame from the record-stream clip ourselves -- Frigate picks this
+# frame by its own best-detection-score judgment (content-dependent, not a fixed offset guess like
+# CROP_FRAME_OFFSET_PCT above), so it's often better *framed/timed* than our own seek. Trade-off:
+# it's from the lower-res detect stream (800x448 in testing, vs. this setup's 3840x2160 record
+# stream) with a bounding-box/label/timestamp overlay burned in that this Frigate version's API
+# gives no way to suppress (confirmed empirically -- bbox=0/timestamp=0/h=<n> query params on the
+# snapshot endpoint have no effect at all, byte-identical response). When this is on,
+# CROP_DISABLED/CROP_FRAME_OFFSET_PCT/CROP_PADDING_PCT no longer apply to events at all -- there's
+# no frame-seeking or region-cropping happening on our side anymore, Frigate's own snapshot is used
+# as-is. Events only -- a visit's own composite grid (VISIT_THUMB_CROP_ENABLED) is unaffected
+# either way, since a single Frigate snapshot has no "4 frames of change" equivalent to offer it.
+FRIGATE_SNAPSHOT_ENABLED = _env("FRIGATE_SNAPSHOT_ENABLED", "false").lower() == "true"
 # A second, much smaller copy of the same crop -- for report/preview UIs that would otherwise
 # embed the full MAX_CROP_DIMENSION image inline per row (multiplied across every sighting, that's
 # what blew up a 2-hour daily report to 42MB and pushed up n8n's memory while building/emailing
