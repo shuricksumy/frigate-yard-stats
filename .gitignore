@@ -6,6 +6,10 @@ postgres-projects/
 .claude/
 .DS_Store
 
+# Real per-deployment profile config (chat_path/prompts/defaults) -- same reasoning as .env above,
+# never committed. frigate/profiles.yaml.example is the checked-in template/reference instead.
+frigate/profiles.yaml
+
 # Runtime data written by bind-mounted volumes -- keep the directories (via .gitkeep) but never
 # their contents: stored clips are semi-sensitive (see CLAUDE.md), and the mosquitto dirs are
 # just local broker state.

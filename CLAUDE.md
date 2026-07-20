@@ -609,14 +609,23 @@ ever applies to the Visits tab.
 
 ### Per-object-type overrides (`profile_config.py`)
 
-A number of settings that used to be global-only env vars can now be overridden per Frigate object
-type directly in `profiles.yaml`, via three tiers checked in order: a type's own
-`object_types.<label>` entry (highest), a profile-wide `defaults` section (a common override
-applied to every type that doesn't set its own -- for "change this everywhere except one or two
-exceptions"), then the matching global `config.py` env var (lowest, today's exact behavior when
-neither is set at all). Every resolver lives in `profile_config.py` -- a small, pure (no I/O, no
-caching) module built around one shared `_resolve(profile, object_label, key, global_default)`
-helper that walks the three tiers.
+A number of settings live entirely in `profiles.yaml`, not `.env` -- deliberately: these are all
+settings you'd realistically want different per Frigate object type, so this file (not a split
+between `.env` and here) is the one place to configure them. These settings were originally plain
+env vars, then grew a per-type-override capability on top while keeping the env var as the global
+default; that middle stage is gone now -- the env vars themselves were removed from `config.py`,
+`docker-compose.yml`, and `.env.example` entirely, since keeping the same setting configurable in
+two different files was confusing without adding real flexibility (a `profiles.yaml`-only
+`defaults:` section already covers "set it globally" just as well as an env var did). Two tiers,
+checked in order: a type's own `object_types.<label>` entry (highest), then a profile-wide
+`defaults` section (a common value applied to every type that doesn't set its own -- for "change
+this everywhere except one or two exceptions"). If neither tier sets a given key, resolution falls
+through to a plain Python constant in `config.py` -- a hardcoded last-resort default matching this
+project's original behavior, **not** a third configurable tier: nothing backs it with an env var
+any more, so changing it means editing `config.py` and building a new image, the same as changing
+any other hardcoded literal in this codebase would. Every resolver lives in `profile_config.py` --
+a small, pure (no I/O, no caching) module built around one shared `_resolve(profile, object_label,
+key, hardcoded_default)` helper that walks the two tiers.
 
 Two families of overridable settings:
 
@@ -639,11 +648,12 @@ Two families of overridable settings:
   entry in the first place), these three apply to *any* Frigate label by default -- so their
   resolvers (`profile_config.store_video_claim_filter`/etc.) deliberately return an
   **include-or-exclude split**, never a plain include-list checked against every "known" label:
-  if the effective base (the `defaults` section, else the global env var) is enabled, only the
-  explicit per-type opt-outs need excluding (or `(None, None)`, i.e. no filter at all, exactly the
-  unfiltered query this project ran before per-type overrides existed); if the base is disabled,
-  only the explicit per-type opt-ins are eligible. This avoids a real regression an include-list
-  approach would have introduced: `OBJECT_TYPES` (the env var powering the web UI's Type dropdown)
+  if the effective base (the `defaults` section, else `config.py`'s hardcoded fallback) is enabled,
+  only the explicit per-type opt-outs need excluding (or `(None, None)`, i.e. no filter at all,
+  exactly the unfiltered query this project ran before per-type overrides existed); if the base is
+  disabled, only the explicit per-type opt-ins are eligible. This avoids a real regression an
+  include-list approach would have introduced: `OBJECT_TYPES` (the env var powering the web UI's
+  Type dropdown)
   has always been cosmetic-only, never a pipeline allow-list, so filtering against it as a
   completeness enumeration would have silently stopped storing video for any real Frigate label
   that was never added to it. `claim_visit_video_batch`/`claim_visit_thumb_crop_batch` apply this
@@ -676,6 +686,43 @@ representative event whose type the composite grid/notification is actually fram
 `mqtt_ingest.py` stores the loaded profile in a module-level `_profile` (set once by
 `start(profile)`) rather than threading it through every MQTT callback argument, since paho-mqtt's
 `on_message` signature is fixed and leaves no room for an extra parameter.
+
+**A second, unrelated category also lives in `defaults:` now**: plain technical tuning knobs with
+no per-object-type meaning at all -- `parallel_limit`/`stale_minutes`/`max_attempts`/
+`crop_initial_wait_seconds`/`max_crop_dimension`/`thumbnail_max_dimension`/`poll_interval_seconds`,
+`retention_months`/`retention_check_interval_seconds`, the `video_*`/`visit_thumb_crop_*`/
+`ai_stage_*` queue-tuning equivalents, and `ai_stage_default_timeout_seconds`/
+`ai_stage_embed_timeout_seconds` (see `config.py`'s own comment for the exact list and each one's
+hardcoded fallback). These were plain env vars with no override capability at all until now; there
+was never a reason to make them *per-object-type* resolvable (there's no "`PARALLEL_LIMIT` for cars
+only"), but the user still wanted `.env` reserved for genuinely external facts (connection info,
+paths, tokens, URLs) and everything else centralized in `profiles.yaml`. Rather than inventing a
+second top-level YAML section for "global-only technical settings" alongside `defaults:` (which
+already means "the global tier" from the per-object-type reader's perspective), these reuse the
+exact same `defaults:` section -- just resolved differently under the hood:
+`config.apply_profile_defaults(profile)` (a new `config.py` function, driven by a
+`_PROFILE_DEFAULTS_MAP` of `{CONSTANT_NAME: "profiles.yaml key"}` pairs) overwrites the
+corresponding module-level constants **once**, called from `main.py` right after `profile` is
+loaded and before any worker thread starts -- not a per-call resolution like
+`profile_config.py`'s functions, since these settings can't vary by row/type anyway. This works
+because every reader of these constants elsewhere in the codebase (`crop_worker.py`, `db.py`,
+`retention.py`, `video.py`, `ai_worker.py`, etc.) does a plain `config.SOME_SETTING` module-attribute
+access rather than `from config import SOME_SETTING` (confirmed via grep -- the latter would freeze
+a stale copy at import time and silently ignore the override), so overwriting the attribute once at
+startup is sufficient for the new value to reach every caller with no signature threading needed
+anywhere. `EMBEDDING_DIMENSIONS` and `RECORD_WIDTH`/`RECORD_HEIGHT` deliberately stay plain env
+vars and were not swept into this migration: the former because `db.ensure_schema()` reads it
+*before* `profiles.yaml` is even loaded in `main.py` and changing it has real DB-migration
+implications (a backfill), the latter because they describe camera hardware, not a tunable
+behavior.
+
+**Migrating from the env-var era**: an existing deployment with, say, `STORE_VIDEO=true` in `.env`
+needs that moved into `profiles.yaml`'s `defaults:` section (`defaults: {store_video: true, ...}`)
+to keep behaving identically after upgrading -- the env var is silently ignored once this ships
+(`docker-compose.yml` no longer even passes it through), not an error, so double-check
+`profiles.yaml` actually has the equivalent `defaults:` entries before/immediately after upgrading
+rather than assuming the old `.env` values still apply. Same applies to any of the technical tuning
+knobs above that were previously set to a non-default value in `.env`.
 
 ### Video storage, Telegram notifications, and the web report UI
 
@@ -1534,11 +1581,14 @@ index's `indisvalid`/`indisready`), `get_retention_info()` (already existed, reu
 feature-flags summary (`AI_EVENTS_STAGE_ENABLED`/`AI_ALERTS_ENABLED`/`STORE_VIDEO`/
 `STORE_VIDEO_ALERTS`/`VISIT_THUMB_CROP_ENABLED`/`CROP_DISABLED`/`TELEGRAM_EVENTS_MODE`/
 `TELEGRAM_ALERTS_MODE`) so "what's currently turned on" is visible at a glance instead of having to
-check `.env` by hand. Everything in this call is cheap SQL -- deliberately excludes anything
-that's a real filesystem walk or network call, so the dashboard's main section always loads fast
-regardless of video backlog size or whether the VLM host is reachable. Note: this feature-flags
-summary only ever reflects the **global** env-var defaults -- it doesn't parse `profiles.yaml`, so
-a per-type override (see "Per-object-type overrides" above) won't show up here. The "By object
+check `profiles.yaml` by hand. Everything in this call is cheap SQL -- deliberately excludes
+anything that's a real filesystem walk or network call, so the dashboard's main section always
+loads fast regardless of video backlog size or whether the VLM host is reachable. Note: this
+feature-flags summary only ever reflects `config.py`'s hardcoded fallback defaults -- it doesn't
+parse `profiles.yaml`, so a `defaults:` section or per-type override (see "Per-object-type
+overrides" above) won't show up here, and since these settings no longer have a backing env var at
+all, the hardcoded fallback shown may not reflect what's actually configured for any real type. The
+"By object
 type" section's row counts (below) do reflect whatever actually happened, which is shaped by any
 per-type override already in effect.
 

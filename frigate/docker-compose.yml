@@ -68,94 +68,27 @@ services:
       # on the Frigate host (both outside/outside2 record streams are 3840x2160).
       RECORD_WIDTH: ${RECORD_WIDTH:-3840}
       RECORD_HEIGHT: ${RECORD_HEIGHT:-2160}
-      # Crop tuning -- MAX_CROP_DIMENSION caps the cropped JPEG's long side (VLMs downsample
-      # beyond this anyway); CROP_PADDING_PCT is extra margin around Frigate's `region` box;
-      # CROP_FRAME_OFFSET_PCT is where in the event's span to seek (0.5 = midpoint, the default).
-      # CROP_DISABLED/CROP_FRAME_OFFSET_PCT/CROP_PADDING_PCT/FRIGATE_SNAPSHOT_ENABLED below can all
-      # be overridden per Frigate object type in profiles.yaml (see profile_config.py) -- these
-      # env vars are just the global default a type falls back to when it doesn't set its own.
-      MAX_CROP_DIMENSION: ${MAX_CROP_DIMENSION:-1280}
-      # Smaller copy of the same crop for report/preview UIs (see report.py) -- not the same knob
-      # as MAX_CROP_DIMENSION, which VLM calls still use at full size.
-      THUMBNAIL_MAX_DIMENSION: ${THUMBNAIL_MAX_DIMENSION:-240}
-      CROP_PADDING_PCT: ${CROP_PADDING_PCT:-0.2}
-      CROP_FRAME_OFFSET_PCT: ${CROP_FRAME_OFFSET_PCT:-0.5}
-      # Skips the crop filter entirely (crop_image_base64 becomes the full original frame, still
-      # scaled to MAX_CROP_DIMENSION) -- affects both the web UI display and what gets sent to the
-      # VLM, since they share this one field. Off by default: the crop exists so the model can
-      # read small detail (plates, notable features) a full wide frame makes illegible.
-      CROP_DISABLED: ${CROP_DISABLED:-false}
-      # Default true: uses Frigate's own already-rendered event snapshot (its own
-      # best-detection-score frame) instead of seeking+cropping a frame from the record-stream clip
-      # -- trades Frigate's fixed lower detect-stream resolution and a burned-in
-      # bbox/label/timestamp overlay (this Frigate version's API has no way to suppress it) for
-      # often-better framing/timing than our own fixed-offset guess, a trade-off accepted as the
-      # default. Set to false to fall back to the original seek-based approach -- CROP_DISABLED/
-      # CROP_FRAME_OFFSET_PCT/CROP_PADDING_PCT above only apply when this is false. Events only --
-      # a visit's own composite grid (VISIT_THUMB_CROP_ENABLED) is unaffected either way.
-      FRIGATE_SNAPSHOT_ENABLED: ${FRIGATE_SNAPSHOT_ENABLED:-true}
-      # Queue tuning -- how many events may be crop_status='processing' at once, how long
-      # before a stuck one is reclaimed, how many crop failures before giving up on an event,
-      # and how often the poll loop checks for new work.
-      PARALLEL_LIMIT: ${PARALLEL_LIMIT:-2}
-      STALE_MINUTES: ${STALE_MINUTES:-5}
-      MAX_ATTEMPTS: ${MAX_ATTEMPTS:-3}
-      # Frigate is still finalizing the event/clip when "end" fires -- wait this long before the
-      # first crop attempt on a freshly claimed row (same idea as VIDEO_INITIAL_WAIT_SECONDS).
-      CROP_INITIAL_WAIT_SECONDS: ${CROP_INITIAL_WAIT_SECONDS:-5}
-      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-5}
-      # How long to keep data before it's deleted, and how often to check.
-      RETENTION_MONTHS: ${RETENTION_MONTHS:-12}
-      RETENTION_CHECK_INTERVAL_SECONDS: ${RETENTION_CHECK_INTERVAL_SECONDS:-86400}
+      # Crop tuning, queue tuning, retention, video storage, visit previews, Telegram, and the
+      # internal AI stages are ALL configured in profiles.yaml now, not here -- see that file's own
+      # comments and CLAUDE.md's "Per-object-type overrides" section. Two categories moved there:
+      # per-object-type settings (crop_disabled/crop_frame_offset_pct/crop_padding_pct/
+      # frigate_snapshot_enabled, store_video/store_video_alerts/visit_thumb_crop_enabled/
+      # visit_preview_frame_percentages, telegram_events_mode/telegram_alerts_mode/
+      # ai_events_stage_enabled/ai_alerts_enabled), each resolved fresh per row/type; and plain
+      # technical tuning knobs with no per-type meaning at all (parallel_limit/stale_minutes/
+      # max_attempts/crop_initial_wait_seconds/max_crop_dimension/thumbnail_max_dimension/
+      # poll_interval_seconds, retention_months/retention_check_interval_seconds, the video_*/
+      # visit_thumb_crop_*/ai_stage_* queue-tuning equivalents, ai_stage_default_timeout_seconds/
+      # ai_stage_embed_timeout_seconds), resolved once at startup by config.apply_profile_defaults().
+      # Both live under profiles.yaml's one `defaults:` section (plus object_types.<label> overrides
+      # for the first category) -- env vars here now cover only connection info, paths, tokens, and
+      # other genuinely external/per-host facts.
       API_PORT: ${INGEST_WORKER_API_PORT:-8080}
       # Required on /events, /sightings, /stats, /reports (X-API-Key header) -- NOT on
       # /health, /status, /crop/{id}, /retention/run, which stay unauthenticated.
       API_KEY: ${API_KEY}
-      # Video storage (third queue stage, video_status) -- see video.py/video_worker.py.
-      # Disabled by default; when on, clips are downloaded from Frigate's own clip.mp4 endpoint,
-      # stored under /data/video (bind-mounted below), and only the filesystem path lives in
-      # Postgres (video_path). Can be overridden per object type in profiles.yaml (store_video key)
-      # -- e.g. skip storing clips for one low-priority type while everything else still gets them.
-      STORE_VIDEO: ${STORE_VIDEO:-false}
       VIDEO_STORAGE_PATH: /data/video
-      VIDEO_PARALLEL_LIMIT: ${VIDEO_PARALLEL_LIMIT:-1}
-      VIDEO_INITIAL_WAIT_SECONDS: ${VIDEO_INITIAL_WAIT_SECONDS:-10}
-      VIDEO_MIN_VALID_BYTES: ${VIDEO_MIN_VALID_BYTES:-1000}
-      VIDEO_MAX_ATTEMPTS: ${VIDEO_MAX_ATTEMPTS:-5}
-      # Optional -- if set, never claim video for rows older than this many hours (Frigate's
-      # continuous-recording buffer that clips come from has a much shorter retention than its
-      # saved events, so a backlogged worker attempting a very old row just burns attempts on a
-      # clip that's very likely already gone). Unset/blank = no age limit.
-      VIDEO_MAX_AGE_HOURS: ${VIDEO_MAX_AGE_HOURS:-}
-      VIDEO_RETRY_WAIT_SECONDS: ${VIDEO_RETRY_WAIT_SECONDS:-5}
-      # Independent video-storage switch for the alerts/visits flow (frigate/reviews) -- one clip
-      # per visit's whole span, separate from STORE_VIDEO above. Shares the VIDEO_* tuning above,
-      # but stored under its own mount point (/data/video-alerts, bind-mounted below) so the two
-      # flows' disk usage can be measured/managed independently. Also overridable per object type
-      # in profiles.yaml (store_video_alerts key), same as STORE_VIDEO above.
-      STORE_VIDEO_ALERTS: ${STORE_VIDEO_ALERTS:-false}
       VIDEO_STORAGE_PATH_ALERTS: /data/video-alerts
-      # Independent visit-level preview -- a composite grid image sampling frames proportionally
-      # across the visit's own clip, plus a separate animated GIF for human preview, instead of
-      # seeking to one precise "best moment" (Frigate's thumb_time turned out unreliable to seek
-      # to -- see crop.build_visit_preview). Only known once the review closes, so this is a
-      # separate poll-loop stage/artifacts (visits.crop_image_base64/preview_gif_base64), not a
-      # replacement for the events-flow crop. Off by default. Both this flag and
-      # VISIT_PREVIEW_FRAME_PERCENTAGES below can be overridden per object type in profiles.yaml
-      # (visit_thumb_crop_enabled/visit_preview_frame_percentages keys).
-      VISIT_THUMB_CROP_ENABLED: ${VISIT_THUMB_CROP_ENABLED:-false}
-      VISIT_THUMB_CROP_PARALLEL_LIMIT: ${VISIT_THUMB_CROP_PARALLEL_LIMIT:-1}
-      VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS: ${VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS:-5}
-      VISIT_THUMB_CROP_MAX_ATTEMPTS: ${VISIT_THUMB_CROP_MAX_ATTEMPTS:-3}
-      VISIT_THUMB_CROP_RETRY_WAIT_SECONDS: ${VISIT_THUMB_CROP_RETRY_WAIT_SECONDS:-5}
-      # Which 4 points of the visit's own clip duration to sample for the preview grid/GIF, as
-      # percentages (0=clip start, 100=clip end) -- e.g. "5,35,65,90" to stay clear of both edges.
-      VISIT_PREVIEW_FRAME_PERCENTAGES: ${VISIT_PREVIEW_FRAME_PERCENTAGES:-0,25,50,100}
-      # Telegram notifications -- none/image/video/all, not a bool (see telegram.py). "none" by
-      # default; TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID only need to be set when either mode below
-      # isn't "none". Both TELEGRAM_EVENTS_MODE and TELEGRAM_ALERTS_MODE below can be overridden
-      # per object type in profiles.yaml (telegram_events_mode/telegram_alerts_mode keys).
-      TELEGRAM_EVENTS_MODE: ${TELEGRAM_EVENTS_MODE:-none}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
       # Defaults to Telegram's own cloud API. Point at the optional telegram-bot-api service
@@ -163,46 +96,21 @@ services:
       # latency and a 2000MB upload cap instead of the cloud API's 50MB -- see that service's
       # own comment for when this is worth turning on.
       TELEGRAM_API_BASE_URL: ${TELEGRAM_API_BASE_URL:-https://api.telegram.org}
-      # Independent mode for the alerts/visits flow -- one summary notification per visit ("image")
-      # and/or the visit's own clip as a reply ("video"), instead of the per-event photo/video
-      # messages TELEGRAM_EVENTS_MODE controls.
-      TELEGRAM_ALERTS_MODE: ${TELEGRAM_ALERTS_MODE:-none}
       # Object labels your Frigate config actually produces -- drives the web UI's Type filter
       # dropdown (GET /object-types) so it doesn't need a frontend change to pick up a new label.
       OBJECT_TYPES: ${OBJECT_TYPES:-car,truck,person,dog}
-      # Internal AI stages (ai_worker.py / alert_ai_worker.py) -- an alternative to
-      # n8n/metadata-processor.json, not a replacement for it (that workflow still works, just
-      # needs to stay deactivated in n8n while AI_EVENTS_STAGE_ENABLED is on, since both claim from
-      # the same ai_status queue). Both off by default -- see CLAUDE.md's "Internal AI stage"
-      # section before enabling. Independent switches: AI_EVENTS_STAGE_ENABLED analyzes each
-      # event's own crop with profiles.yaml's event_prompt; AI_ALERTS_ENABLED analyzes a visit's
-      # composite grid (needs VISIT_THUMB_CROP_ENABLED=true to have anything to claim) with
-      # alert_prompt, storing results separately in visit_sightings. Both flags can be overridden
-      # per object type in profiles.yaml (ai_events_stage_enabled/ai_alerts_enabled keys) -- setting
-      # either true for at least one type starts that stage's poll thread even if the global flag
-      # here stays false.
-      AI_EVENTS_STAGE_ENABLED: ${AI_EVENTS_STAGE_ENABLED:-false}
-      AI_ALERTS_ENABLED: ${AI_ALERTS_ENABLED:-false}
       AI_STAGE_PROFILE_PATH: ${AI_STAGE_PROFILE_PATH:-/app/profiles.yaml}
-      AI_STAGE_PARALLEL_LIMIT: ${AI_STAGE_PARALLEL_LIMIT:-2}
-      AI_STAGE_STALE_MINUTES: ${AI_STAGE_STALE_MINUTES:-5}
-      AI_STAGE_MAX_ATTEMPTS: ${AI_STAGE_MAX_ATTEMPTS:-3}
-      AI_STAGE_MAX_AGE_HOURS: ${AI_STAGE_MAX_AGE_HOURS:-}
-      AI_STAGE_POLL_INTERVAL_SECONDS: ${AI_STAGE_POLL_INTERVAL_SECONDS:-5}
       # llama_slot_proxy's own base URL/token, called directly instead of going through n8n --
-      # only required when AI_EVENTS_STAGE_ENABLED or AI_ALERTS_ENABLED is true. LLAMA_PROXY_TOKEN
-      # is optional (blank = no Authorization header sent -- llama_slot_proxy is unauthenticated on
-      # the LAN today).
+      # only required when ai_events_stage_enabled or ai_alerts_enabled is true for at least one
+      # type in profiles.yaml. LLAMA_PROXY_TOKEN is optional (blank = no Authorization header sent
+      # -- llama_slot_proxy is unauthenticated on the LAN today).
       LLAMA_PROXY_BASE_URL: ${LLAMA_PROXY_BASE_URL:-}
       LLAMA_PROXY_TOKEN: ${LLAMA_PROXY_TOKEN:-}
       LLAMA_PROXY_EMBED_PATH: ${LLAMA_PROXY_EMBED_PATH:-/REPLACE_WITH_EMBED_SLOT/v1/embeddings}
-      # Fallback chat-completion timeout for a profiles.yaml entry that doesn't set its own
-      # timeout_seconds -- a local model can genuinely take minutes; the real per-type value lives
-      # in profiles.yaml, this is only the fallback. Embeddings get their own, shorter default.
-      AI_STAGE_DEFAULT_TIMEOUT_SECONDS: ${AI_STAGE_DEFAULT_TIMEOUT_SECONDS:-180}
-      AI_STAGE_EMBED_TIMEOUT_SECONDS: ${AI_STAGE_EMBED_TIMEOUT_SECONDS:-60}
       # Must match the output size of whatever model is loaded behind LLAMA_PROXY_EMBED_PATH --
-      # sizes the pgvector embedding columns; see .env.example for the full explanation.
+      # sizes the pgvector embedding columns; see .env.example for the full explanation. Stays a
+      # plain env var (unlike the technical tuning knobs above) -- db.ensure_schema() reads this
+      # before profiles.yaml is even loaded, and changing it has real DB-migration implications.
       EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
     ports:
       # Admin/debug endpoints (unauthenticated) plus the read/query/report API (X-API-Key

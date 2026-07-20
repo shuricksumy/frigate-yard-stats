@@ -24,6 +24,11 @@ def main():
     # Telegram mode or AI-stage enable flag (profile_config.py) -- avoids each thread re-reading
     # profiles.yaml off disk independently.
     profile = ai_worker.load_profile(config.AI_STAGE_PROFILE_PATH)
+    # Applies profiles.yaml's `defaults:` section to config.py's technical-tuning constants (queue
+    # parallel limits, retry counts, timeouts, retention schedule -- see config.py's own comment)
+    # once, before any worker starts -- these have no per-object-type meaning, unlike the settings
+    # profile_config.py resolves per-call.
+    config.apply_profile_defaults(profile)
     mqtt_ingest.start(profile)
     # The pipeline itself (MQTT ingest + crop poll loop) runs regardless of the API -- it's a
     # background thread so uvicorn can own the main thread for the admin/test API below.

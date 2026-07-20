@@ -1,14 +1,18 @@
-"""Per-object-type setting resolution over profiles.yaml, with config.py as the fallback default.
+"""Per-object-type setting resolution, entirely within profiles.yaml.
 
-Three tiers, checked in order: a type's own entry under object_types.<label> (highest), then a
-profile-wide `defaults` section (common overrides applied to every type that doesn't set its own),
-then the matching global env var from config.py (lowest, today's exact behavior when profiles.yaml
-doesn't touch a setting at all). Every resolver here follows this same shape -- no I/O, no caching
--- so callers (crop.py, crop_worker.py, video_worker.py, alert_video_worker.py, visit_thumb_worker.
-py, mqtt_ingest.py, ai_worker.py, alert_ai_worker.py, main.py) pass in whatever profile they already
+Every setting resolved here is deliberately NOT an env var -- these are all settings you'd
+realistically want different per Frigate object type, so profiles.yaml is the one place to
+configure them rather than splitting them across .env and here. Two tiers, checked in order: a
+type's own entry under object_types.<label> (highest), then a profile-wide `defaults` section
+(common values applied to every type that doesn't set its own). If neither tier sets a given key,
+resolution falls through to a plain Python constant in config.py -- a hardcoded last-resort default
+matching this project's original behavior, not a third configurable tier (there's no env var
+backing it). Every resolver here follows this same shape -- no I/O, no caching -- so callers
+(crop.py, crop_worker.py, video_worker.py, alert_video_worker.py, visit_thumb_worker.py,
+mqtt_ingest.py, ai_worker.py, alert_ai_worker.py, main.py) pass in whatever profile they already
 loaded once at startup (ai_worker.load_profile). A missing/None profile or object_label is treated
-the same as "no override for this type" -- every resolver falls back to the global default rather
-than raising.
+the same as "no override for this type" -- every resolver falls back to the hardcoded default
+rather than raising.
 
 Two families of settings:
   - Plain per-row settings (telegram_events_mode/telegram_alerts_mode/ai_events_stage_enabled/
@@ -91,8 +95,8 @@ def visit_preview_frame_percentages(profile: dict | None, object_label: str | No
 
 def any_ai_events_stage_enabled(profile: dict | None) -> bool:
     # Gates whether ai_worker's whole poll thread starts at all (main.py) -- true if the effective
-    # base (profile-wide `defaults`, else the global env default) is on, or at least one object
-    # type opts in despite that base being off.
+    # base (profile-wide `defaults`, else config.py's hardcoded fallback) is on, or at least one
+    # object type opts in despite that base being off.
     if _resolve(profile, None, "ai_events_stage_enabled", config.AI_EVENTS_STAGE_ENABLED):
         return True
     if not profile:

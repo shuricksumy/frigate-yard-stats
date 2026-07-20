@@ -1,9 +1,12 @@
 # Configuring `ingest-worker`, explained for this project
 
-Every setting below lives in `frigate/.env` (copied from `frigate/.env.example`) and is read by
+Most settings below live in `frigate/.env` (copied from `frigate/.env.example`) and are read by
 `ingest-worker` on container start — see [`docker.md`](docker.md) if you haven't set that up yet.
-This page groups them by *feature* and explains what each one actually does in plain language;
-`.env.example` itself has the exact variable names and defaults.
+A specific subset — anything you'd realistically want different per Frigate object type (crop
+framing, video storage, visit previews, Telegram modes, the internal AI stages) — instead lives
+entirely in `frigate/profiles.yaml`; see "Per-object-type overrides" below for the full list and
+why. This page groups everything by *feature* and explains what each setting actually does in
+plain language; `.env.example`/`profiles.yaml` themselves have the exact names and defaults.
 
 ## Suggested rollout order
 
@@ -13,19 +16,19 @@ once — bring it up in stages so if something looks wrong, you know which piece
 1. **Just the core pipeline first.** Fill in the required settings below, leave everything else at
    its default (off), start `ingest-worker`, and confirm real events show up cropped at
    `http://<host>:8080/ui` or via `/events` in Swagger.
-2. **Turn on video storage** (`STORE_VIDEO`) once step 1 looks right, if you want stored clips
-   alongside the crops.
-3. **Turn on the alerts/visits flow** (`STORE_VIDEO_ALERTS`, `VISIT_THUMB_CROP_ENABLED`) once
-   you're comfortable with the events flow — these group multiple detections into one real-world
-   "visit" and are a separate, independently-toggleable layer on top (see
+2. **Turn on video storage** (`store_video` in `profiles.yaml`) once step 1 looks right, if you
+   want stored clips alongside the crops.
+3. **Turn on the alerts/visits flow** (`store_video_alerts`, `visit_thumb_crop_enabled`, both in
+   `profiles.yaml`) once you're comfortable with the events flow — these group multiple detections
+   into one real-world "visit" and are a separate, independently-toggleable layer on top (see
    [`frigate.md`](frigate.md) for why the visit-preview feature specifically depends on your
    Frigate recording retention settings).
 4. **Turn on Telegram** whenever you want notifications — independent of everything else.
 5. **Semantic search and the internal AI stages are both separate, later opt-ins** — neither is
    needed to get the core pipeline or n8n's `metadata-processor.json` working. Turn on pgvector
    embeddings once you're already running `metadata-processor.json` successfully; only consider
-   the internal AI stages (`AI_EVENTS_STAGE_ENABLED`, `AI_ALERTS_ENABLED`) once you're comfortable
-   letting them replace or supplement that n8n workflow.
+   the internal AI stages (`ai_events_stage_enabled`, `ai_alerts_enabled`, both in
+   `profiles.yaml`) once you're comfortable letting them replace or supplement that n8n workflow.
 
 ## Required settings
 
@@ -45,43 +48,46 @@ You must set these — `ingest-worker` won't start without them:
 ## Crop tuning
 
 Controls how `ingest-worker` turns a Frigate event into the still image that gets displayed and
-analyzed:
+analyzed. `RECORD_WIDTH`/`RECORD_HEIGHT` stay plain `.env` settings (they describe your camera
+hardware, not a tunable behavior); everything else here is configured entirely in `profiles.yaml`
+instead — see "Per-object-type overrides" below for the full mechanism.
 
 - `RECORD_WIDTH` / `RECORD_HEIGHT` — your cameras' actual full-resolution record-stream size (see
   [`frigate.md`](frigate.md)'s "detect vs record" section) — needed to correctly scale Frigate's
   normalized bounding-box coordinates.
-- `MAX_CROP_DIMENSION` (default `1280`) — the cropped JPEG's long side is capped here. VLMs
+- `max_crop_dimension` (default `1280`, a plain technical knob in `profiles.yaml`'s `defaults:`,
+  not a per-type setting or an env var) — the cropped JPEG's long side is capped here. VLMs
   downsample beyond this internally anyway, so a bigger value only adds load, not analysis quality.
-- `CROP_PADDING_PCT` (default `0.2`) — extra margin added around Frigate's own detected region, so
-  the crop isn't razor-tight around the object.
-- `CROP_FRAME_OFFSET_PCT` (default `0.5`) — *where* in the event's timespan to grab the frame
-  (`0.0` = right at the start, `0.5` = midpoint, `1.0` = right at the end). There's no universally
-  "correct" value — Frigate picks its own best-scoring frame per event using logic it doesn't
-  expose, so this is a starting point to tune against your own footage if `0.5` consistently looks
-  off.
-- `CROP_DISABLED` (default `false`) — skips cropping entirely; the full original camera frame
-  (still scaled to `MAX_CROP_DIMENSION`) is used instead of a region around the object. This is a
-  real trade-off, not a strict improvement: a full wide frame gives more context but makes small
-  detail (plates, notable features) harder for the VLM to read. The same image is what's displayed
-  in the web UI *and* sent to the VLM — there's no separate "wide for humans, cropped for the
-  model" mode. Only applies for events when `FRIGATE_SNAPSHOT_ENABLED` below is `false`.
-- `FRIGATE_SNAPSHOT_ENABLED` (default **`true`**) — for **events only**, uses Frigate's own
-  already-rendered event snapshot instead of seeking+cropping a frame from the record-stream clip
-  yourself. Frigate picks this frame by its own best-detection-score judgment, so in practice it
-  beats the fixed-offset guess `CROP_FRAME_OFFSET_PCT` makes often enough to be the default —
-  accepted trade-off: Frigate's snapshot is from the lower-res detect stream (typically much
-  smaller than your record stream) with a burned-in bounding-box/label/timestamp overlay this
-  Frigate version's API gives no way to turn off (confirmed directly — `bbox=0`/`timestamp=0`/`h=`
-  query params on the snapshot endpoint have no effect at all). Set to `false` to fall back to
-  this project's original seek-based approach if that trade-off doesn't work for your footage —
-  `CROP_DISABLED`/`CROP_FRAME_OFFSET_PCT`/`CROP_PADDING_PCT` only take effect once you do. A
-  visit's own composite grid (`VISIT_THUMB_CROP_ENABLED`) is unaffected either way — a single
-  Frigate snapshot has no multi-frame equivalent to offer it.
+- `crop_padding_pct` (default `0.2`, in `profiles.yaml`) — extra margin added around Frigate's own
+  detected region, so the crop isn't razor-tight around the object.
+- `crop_frame_offset_pct` (default `0.5`, in `profiles.yaml`) — *where* in the event's timespan to
+  grab the frame (`0.0` = right at the start, `0.5` = midpoint, `1.0` = right at the end). There's
+  no universally "correct" value — Frigate picks its own best-scoring frame per event using logic
+  it doesn't expose, so this is a starting point to tune against your own footage if `0.5`
+  consistently looks off.
+- `crop_disabled` (default `false`, in `profiles.yaml`) — skips cropping entirely; the full
+  original camera frame (still scaled to `max_crop_dimension`) is used instead of a region around
+  the object. This is a real trade-off, not a strict improvement: a full wide frame gives more
+  context but makes small detail (plates, notable features) harder for the VLM to read. The same
+  image is what's displayed in the web UI *and* sent to the VLM — there's no separate "wide for
+  humans, cropped for the model" mode. Only applies for events when `frigate_snapshot_enabled`
+  below is `false`.
+- `frigate_snapshot_enabled` (default **`true`**, in `profiles.yaml`) — for **events only**, uses
+  Frigate's own already-rendered event snapshot instead of seeking+cropping a frame from the
+  record-stream clip yourself. Frigate picks this frame by its own best-detection-score judgment,
+  so in practice it beats the fixed-offset guess `crop_frame_offset_pct` makes often enough to be
+  the default — accepted trade-off: Frigate's snapshot is from the lower-res detect stream
+  (typically much smaller than your record stream) with a burned-in bounding-box/label/timestamp
+  overlay this Frigate version's API gives no way to turn off (confirmed directly —
+  `bbox=0`/`timestamp=0`/`h=` query params on the snapshot endpoint have no effect at all). Set to
+  `false` to fall back to this project's original seek-based approach if that trade-off doesn't
+  work for your footage — `crop_disabled`/`crop_frame_offset_pct`/`crop_padding_pct` only take
+  effect once you do. A visit's own composite grid (`visit_thumb_crop_enabled`) is unaffected
+  either way — a single Frigate snapshot has no multi-frame equivalent to offer it.
 
-All four of these (`crop_disabled`/`crop_frame_offset_pct`/`crop_padding_pct`/
-`frigate_snapshot_enabled`) can be overridden **per object type** in `profiles.yaml`, e.g. to have
-`car` use a seek-based crop with extra padding for plate legibility while everything else keeps
-using Frigate's own snapshot. See "Per-object-type overrides" below for how the override tiers work.
+All four can be set globally via `profiles.yaml`'s `defaults:` section, or per object type, e.g. to
+have `car` use a seek-based crop with extra padding for plate legibility while everything else
+keeps using Frigate's own snapshot. See "Per-object-type overrides" below for how the tiers work.
 
 ## Camera allow-list
 
@@ -92,69 +98,75 @@ ingest time. Leave unset (default) to process every camera Frigate has.
 ## Queue tuning
 
 How aggressively `ingest-worker`'s own crop stage works through events — defaults are reasonable
-starting points, not something you need to touch immediately:
+starting points, not something you need to touch immediately. These are plain technical tuning
+knobs with no per-object-type meaning (see "Per-object-type overrides" below) — set them in
+`profiles.yaml`'s `defaults:` section, not `.env`:
 
-- `PARALLEL_LIMIT` (default `2`) — how many events can be mid-crop at once.
-- `STALE_MINUTES` (default `5`) — how long a stuck claim (e.g. the service crashed mid-crop) sits
+- `parallel_limit` (default `2`) — how many events can be mid-crop at once.
+- `stale_minutes` (default `5`) — how long a stuck claim (e.g. the service crashed mid-crop) sits
   before it's automatically retried.
-- `MAX_ATTEMPTS` (default `3`) — how many failures before an event is given up on (marked
+- `max_attempts` (default `3`) — how many failures before an event is given up on (marked
   `failed`, not retried further).
-- `POLL_INTERVAL_SECONDS` (default `5`) — how often the crop poll loop checks for new work.
+- `poll_interval_seconds` (default `5`) — how often the crop poll loop checks for new work.
 
 ## Video storage
 
-Two **independent** switches — either, both, or neither can be on:
+Two **independent** switches, both configured in `profiles.yaml` (not `.env` — see "Per-object-type
+overrides" below), each defaulting to `false` (off) unless set in `profiles.yaml`'s `defaults:`
+section or per type:
 
-- `STORE_VIDEO` (default `false`) — downloads and keeps the clip for every individual event,
-  alongside its crop. Stored under `VIDEO_STORAGE_HOST_PATH` (default `./video-storage` on the
-  host).
-- `STORE_VIDEO_ALERTS` (default `false`) — same idea, but one clip per *visit* (a whole grouped
-  real-world activity) instead of per raw event. Stored completely separately, under
-  `VIDEO_STORAGE_ALERTS_HOST_PATH` (default `./video-storage-alerts`), so you can measure/manage
-  the two flows' disk usage independently.
+- `store_video` — downloads and keeps the clip for every individual event, alongside its crop.
+  Stored under `VIDEO_STORAGE_HOST_PATH` (default `./video-storage` on the host).
+- `store_video_alerts` — same idea, but one clip per *visit* (a whole grouped real-world activity)
+  instead of per raw event. Stored completely separately, under `VIDEO_STORAGE_ALERTS_HOST_PATH`
+  (default `./video-storage-alerts`), so you can measure/manage the two flows' disk usage
+  independently.
 
-Both share the same download-retry tuning (`VIDEO_INITIAL_WAIT_SECONDS`, `VIDEO_MIN_VALID_BYTES`,
-`VIDEO_MAX_ATTEMPTS`, `VIDEO_RETRY_WAIT_SECONDS`, `VIDEO_MAX_AGE_HOURS`) — the defaults account for
-Frigate needing a few seconds to finish writing a clip before it's downloadable, and skip a clip
-that's very likely already rolled off Frigate's recording buffer rather than retrying forever.
+Both share the same download-retry tuning (technical knobs in `profiles.yaml`'s `defaults:`, no
+per-type meaning — see "Per-object-type overrides" below): `video_initial_wait_seconds`,
+`video_min_valid_bytes`, `video_max_attempts`, `video_retry_wait_seconds`, `video_max_age_hours` —
+the defaults account for Frigate needing a few seconds to finish writing a clip before it's
+downloadable, and skip a clip that's very likely already rolled off Frigate's recording buffer
+rather than retrying forever.
 
-`STORE_VIDEO`/`STORE_VIDEO_ALERTS` can each be overridden **per object type** in `profiles.yaml`
-(`store_video`/`store_video_alerts` keys) — e.g. skip storing clips for `person` while `car` still
-gets them. Setting either override `true` for at least one type starts that stage's poll thread
-even if the matching global env var is `false` (same precedent the AI stages below use). See
-"Per-object-type overrides" below.
+`store_video`/`store_video_alerts` can each be set globally via `defaults:`, or per object type —
+e.g. skip storing clips for `person` while `car` still gets them. Setting either `true` for at
+least one type is enough to start that stage's poll thread even if nothing else enables it (same
+precedent the AI stages below use).
 
 ## Visit previews (composite grid + GIF)
 
-`VISIT_THUMB_CROP_ENABLED` (default `false`) turns on a fifth artifact: once a visit (a Frigate
-review/alert closes), `ingest-worker` samples 4 frames proportionally across that visit's own span
-and combines them into one composite grid image (what actually gets analyzed and shown) plus a
-separate animated GIF (human preview only, in the web UI). `VISIT_PREVIEW_FRAME_PERCENTAGES`
-(default `0,25,50,100`) controls exactly which 4 points get sampled — e.g. `5,35,65,90` to stay a
-little clear of both edges. See [`frigate.md`](frigate.md) for why this feature's reliability
-depends on your `record.continuous.days` setting.
+`visit_thumb_crop_enabled` (default `false`, in `profiles.yaml` — see "Per-object-type overrides"
+below) turns on a fifth artifact: once a visit (a Frigate review/alert) closes, `ingest-worker`
+samples 4 frames proportionally across that visit's own span and combines them into one composite
+grid image (what actually gets analyzed and shown) plus a separate animated GIF (human preview
+only, in the web UI). `visit_preview_frame_percentages` (default `[0, 25, 50, 100]`, a real YAML
+list in `profiles.yaml`, not a comma-separated string) controls exactly which 4 points get sampled
+— e.g. `[5, 35, 65, 90]` to stay a little clear of both edges. See [`frigate.md`](frigate.md) for
+why this feature's reliability depends on your `record.continuous.days` setting.
 
-Both `visit_thumb_crop_enabled` and `visit_preview_frame_percentages` (as a real YAML list, not a
-comma-separated string) can be overridden **per object type** in `profiles.yaml` too — e.g. a
-slower-moving `car` visit might want frames spread wider than a `person` visit that's over quickly.
+Both can be set globally via `defaults:`, or per object type — e.g. a slower-moving `car` visit
+might want frames spread wider than a `person` visit that's over quickly.
 
 ## Telegram notifications
 
 Two more **independent** settings, each a *mode* (`none` / `image` / `video` / `all`), not a bool
-— `none` by default:
+— `none` by default, both configured in `profiles.yaml` (not `.env` — see "Per-object-type
+overrides" below):
 
-- `TELEGRAM_EVENTS_MODE` — per-event notifications. `image` sends a photo right after cropping;
-  `video` sends the clip once it's stored (`STORE_VIDEO`), standalone rather than threaded onto a
+- `telegram_events_mode` — per-event notifications. `image` sends a photo right after cropping;
+  `video` sends the clip once it's stored (`store_video`), standalone rather than threaded onto a
   photo that was never sent; `all` sends both (the video as a reply to the earlier photo).
-- `TELEGRAM_ALERTS_MODE` — per-*visit* notifications instead. `image` sends one summary message
+- `telegram_alerts_mode` — per-*visit* notifications instead. `image` sends one summary message
   per visit (photo/GIF once the preview is ready, or text-only immediately if
-  `VISIT_THUMB_CROP_ENABLED` is off); `video` sends the visit's own clip (`STORE_VIDEO_ALERTS`) as
+  `visit_thumb_crop_enabled` is off); `video` sends the visit's own clip (`store_video_alerts`) as
   a reply to that summary; `all` sends both.
 
 `image` and `video` are independent halves within each mode, not a ladder — setting `video` alone
 does *not* also send the photo/summary; only `all` sends both.
 
-To use either, you need a Telegram bot and your own chat ID:
+To use either, you need a Telegram bot and your own chat ID (these two stay plain `.env` settings
+— a bot token isn't something you'd ever want different per object type):
 
 1. Message [@BotFather](https://t.me/BotFather) on Telegram, `/newbot`, follow the prompts — it
    gives you a bot token. That's `TELEGRAM_BOT_TOKEN`.
@@ -162,19 +174,20 @@ To use either, you need a Telegram bot and your own chat ID:
    `https://api.telegram.org/bot<your-token>/getUpdates` in a browser — your numeric chat ID is in
    the JSON response under `message.chat.id`. That's `TELEGRAM_CHAT_ID`.
 
-`TELEGRAM_EVENTS_MODE` and `TELEGRAM_ALERTS_MODE` can be set to any combination independently —
-this is deliberately a place to A/B which granularity (and which of photo vs. video) is actually
-useful for your traffic rather than a choice you're expected to get right upfront.
-
-Both can be overridden **per object type** in `profiles.yaml` (`telegram_events_mode`/
-`telegram_alerts_mode` keys), e.g. to silence a noisy low-priority type's notifications without
-changing the mode for everything else. See "Per-object-type overrides" below.
+`telegram_events_mode` and `telegram_alerts_mode` can be set to any combination independently, and
+both globally via `defaults:` or per object type (e.g. to silence a noisy low-priority type's
+notifications without changing the mode for everything else) — this is deliberately a place to A/B
+which granularity (and which of photo vs. video) is actually useful for your traffic rather than a
+choice you're expected to get right upfront. See "Per-object-type overrides" below.
 
 ## Retention
 
-- `RETENTION_MONTHS` (default `12`) — how long data (DB rows, and any stored video files) is kept
+Technical tuning knobs, no per-object-type meaning — set in `profiles.yaml`'s `defaults:` section,
+not `.env` (see "Per-object-type overrides" below):
+
+- `retention_months` (default `12`) — how long data (DB rows, and any stored video files) is kept
   before an automatic sweep deletes it.
-- `RETENTION_CHECK_INTERVAL_SECONDS` (default `86400`, once a day) — how often that sweep runs.
+- `retention_check_interval_seconds` (default `86400`, once a day) — how often that sweep runs.
 
 `POST /retention/purge` (Swagger UI, or the "Media only" checkbox on `/ui/admin`) is a separate,
 ad-hoc counterpart if you want to purge on a cutoff of your own choosing right now rather than
@@ -191,9 +204,11 @@ distinct object types in one row) are never touched by a type-scoped purge; omit
 
 ## Per-object-type overrides
 
-A number of settings above have a plain global `.env` default but can also be tuned per Frigate
-object type (`car`, `truck`, `person`, `dog`, or any label you've added) directly in
-`frigate/profiles.yaml`, without touching `.env` at all:
+A number of settings live entirely in `frigate/profiles.yaml`, not `.env` at all. Two categories:
+
+**Per-object-type settings** — things you'd realistically want different per Frigate object type
+(`car`, `truck`, `person`, `dog`, or any label you've added), resolved fresh for whatever row is
+currently being processed:
 
 - `telegram_events_mode` / `telegram_alerts_mode`
 - `ai_events_stage_enabled` / `ai_alerts_enabled`
@@ -201,17 +216,39 @@ object type (`car`, `truck`, `person`, `dog`, or any label you've added) directl
 - `store_video` / `store_video_alerts` / `visit_thumb_crop_enabled`
 - `visit_preview_frame_percentages` (a real YAML list of 4 numbers here, not a comma-separated string)
 
-Three tiers, checked in this order:
+Two tiers, checked in this order:
 
 1. That type's own `object_types.<label>` entry in `profiles.yaml` — highest priority.
 2. A profile-wide `defaults` section (optional, sits alongside `object_types` in the same file) —
    applied to every type that doesn't set its own value for that key. Useful for "change this
    everywhere except one or two exceptions" instead of repeating the same override on every type.
-3. The matching global `.env` var — the plain fallback, exactly as if none of the above existed.
+
+**Plain technical tuning knobs** — queue parallel limits, retry counts, timeouts, poll intervals,
+retention schedule, image-size caps. These have no per-object-type meaning at all (there's no
+"`parallel_limit` for cars only"), so they can *only* be set in `defaults:`, resolved once at
+startup rather than per-call:
+
+- `parallel_limit` / `stale_minutes` / `max_attempts` / `crop_initial_wait_seconds` /
+  `max_crop_dimension` / `thumbnail_max_dimension` / `poll_interval_seconds` (crop-stage queue tuning)
+- `retention_months` / `retention_check_interval_seconds`
+- `video_parallel_limit` / `video_initial_wait_seconds` / `video_min_valid_bytes` /
+  `video_max_attempts` / `video_retry_wait_seconds` / `video_max_age_hours`
+- `visit_thumb_crop_parallel_limit` / `visit_thumb_crop_initial_wait_seconds` /
+  `visit_thumb_crop_max_attempts` / `visit_thumb_crop_retry_wait_seconds`
+- `ai_stage_parallel_limit` / `ai_stage_stale_minutes` / `ai_stage_max_attempts` /
+  `ai_stage_max_age_hours` / `ai_stage_poll_interval_seconds`
+- `ai_stage_default_timeout_seconds` / `ai_stage_embed_timeout_seconds`
+
+For *either* category, if a key is set nowhere, `ingest-worker` falls back to a plain hardcoded
+default in `config.py` (matching this project's original behavior) — there's no third `.env`-backed
+tier here, unlike most other settings in this doc. An empty/missing `profiles.yaml` (or one with no
+`defaults:` section and no per-type overrides) is a perfectly valid, fully-working configuration,
+not a half-finished one.
 
 ```yaml
 defaults:
   store_video: false        # off for everything...
+  parallel_limit: 4         # a plain technical knob, defaults: is the only place it can go
 object_types:
   car:
     store_video: true        # ...except cars
@@ -220,9 +257,18 @@ object_types:
     telegram_events_mode: none
 ```
 
-Omit any of these entirely and every type just inherits the global `.env` default, unchanged from
-before this feature existed. `frigate/profiles.yaml`'s own comments have the full list with
-examples; `profile_config.py` is the actual resolver code if you want the exact tie-break logic.
+`frigate/profiles.yaml.example`'s own comments have the full list with examples (including each
+key's hardcoded fallback value); `profile_config.py` (per-object-type settings) and
+`config.apply_profile_defaults` (the technical tuning knobs) are the actual resolver code if you
+want the exact tie-break logic.
+
+**Upgrading from an older version**: these settings used to be plain `.env` vars (`STORE_VIDEO`,
+`TELEGRAM_EVENTS_MODE`, `AI_EVENTS_STAGE_ENABLED`, `PARALLEL_LIMIT`, `RETENTION_MONTHS`,
+`AI_STAGE_MAX_ATTEMPTS`, etc.) — some grew a per-type-override capability in `profiles.yaml` on top
+first, all of them ended up here eventually. That env-var tier is gone now — if your `.env`
+currently sets any of these, copy the equivalent value into `profiles.yaml`'s `defaults:` section
+*before* upgrading, or the setting silently reverts to its hardcoded default (`docker-compose.yml`
+no longer even passes the old env var through, so it's not an error, just ignored).
 
 ## Web UI
 
@@ -253,26 +299,25 @@ that stage for anything else — it's the only thing this endpoint needs from th
 
 ## Internal AI stages (alternative to n8n's metadata-processor.json)
 
-Two independent stages, both off by default — n8n's `metadata-processor.json` is the AI stage
-until you deliberately opt into one or both instead:
+Two independent stages, both configured in `profiles.yaml` (not `.env` — see "Per-object-type
+overrides" below) and off by default unless enabled there — n8n's `metadata-processor.json` is the
+AI stage until you deliberately opt into one or both instead:
 
-- **`AI_EVENTS_STAGE_ENABLED=false`** — analyzes each event's own single-frame crop with
+- **`ai_events_stage_enabled`** — analyzes each event's own single-frame crop with
   `profiles.yaml`'s `event_prompt`. Don't run alongside n8n's `metadata-processor.json` against
   the same queue at once (see CLAUDE.md's "Internal AI stage" section for why that's wasteful,
   though not unsafe).
-- **`AI_ALERTS_ENABLED=false`** — analyzes a visit's own composite grid (4 frames sampled across
+- **`ai_alerts_enabled`** — analyzes a visit's own composite grid (4 frames sampled across
   its span) with `profiles.yaml`'s `alert_prompt`, storing results separately in
-  `visit_sightings`. Requires `VISIT_THUMB_CROP_ENABLED=true` —
+  `visit_sightings`. Requires `visit_thumb_crop_enabled` to be on for that type —
   without it, no visit ever has a grid ready to analyze, so this stage just stays idle. Can run
-  alongside or instead of `AI_EVENTS_STAGE_ENABLED` — the two are fully independent queues.
+  alongside or instead of `ai_events_stage_enabled` — the two are fully independent queues.
 
-Both can be overridden **per object type** in `profiles.yaml` (`ai_events_stage_enabled`/
-`ai_alerts_enabled` keys), e.g. to run the events stage for `car`/`person` only while `dog` sits
-out, or to enable a stage for just one type even while the global flag stays `false`. Setting
-either override `true` for at least one type is enough to start that stage's poll thread even if
-its global env var is `false` — the thread then only claims the type(s) that resolve to enabled
-(their own override, or the global default when they don't set one), never every mapped type
-unconditionally. See "Per-object-type overrides" below.
+Both can be set globally via `profiles.yaml`'s `defaults:` section, or per object type — e.g. to
+run the events stage for `car`/`person` only while `dog` sits out, or to enable a stage for just
+one type even while everything else stays off. Setting either `true` for at least one type is
+enough to start that stage's poll thread — the thread then only claims the type(s) that resolve to
+enabled, never every mapped type unconditionally. See "Per-object-type overrides" below.
 
 - Object types + prompts + per-type model slot/timeout live in **`frigate/profiles.yaml`** (repo
   root, alongside `docker-compose.yml`), not env vars — that's genuinely a lot of config to cram
@@ -287,23 +332,27 @@ unconditionally. See "Per-object-type overrides" below.
   object type is purely a `profiles.yaml` edit, never a code change. Labels that should share one
   model/prompt (e.g. `car` and `truck`) can point at the same YAML anchor instead of duplicating the
   block. A Frigate object label with no entry in this file is simply never analyzed by either stage.
-- `AI_STAGE_PARALLEL_LIMIT`/`AI_STAGE_STALE_MINUTES`/`AI_STAGE_MAX_ATTEMPTS`/
-  `AI_STAGE_MAX_AGE_HOURS`/`AI_STAGE_POLL_INTERVAL_SECONDS` — same queue-tuning shape as the crop
+- `ai_stage_parallel_limit`/`ai_stage_stale_minutes`/`ai_stage_max_attempts`/
+  `ai_stage_max_age_hours`/`ai_stage_poll_interval_seconds` — same queue-tuning shape as the crop
   stage above, shared between both stages (each claims from its own separate queue, so this
-  doesn't mean they compete for capacity).
+  doesn't mean they compete for capacity). Plain technical knobs, `profiles.yaml`'s `defaults:`
+  only (see "Per-object-type overrides" above), not env vars.
 - `LLAMA_PROXY_BASE_URL` (required once either stage is enabled) — your
   [`llama_slot_proxy`](https://github.com/shuricksumy/llama-slot-proxy)'s own base URL, called
   directly instead of going through n8n. `LLAMA_PROXY_TOKEN` is optional (blank = no
   `Authorization` header — `llama_slot_proxy` is unauthenticated on the LAN in most setups today).
   `LLAMA_PROXY_EMBED_PATH` is the embedding model's own URL path segment (same one-path-per-slot
-  convention `profiles.yaml`'s `chat_path` uses).
+  convention `profiles.yaml`'s `chat_path` uses). All three stay plain `.env` settings (connection
+  info, not tunable behavior).
 - `EMBEDDING_DIMENSIONS` (default `1024`) — must match the output size of whatever model is loaded
   behind `LLAMA_PROXY_EMBED_PATH` (e.g. `1024` for Qwen3-Embedding-0.6B-GGUF, `768` for
   nomic-embed-text-v1.5). Sizes the pgvector `embedding` columns on `sightings`/
   `visit_sightings`. Changing this after sightings already have embeddings stored clears them (a
   different model's vectors are an incomparable vector space regardless of dimension) — re-run
-  `POST /embeddings/backfill?confirm=true` afterwards.
-- `AI_STAGE_DEFAULT_TIMEOUT_SECONDS` (default `180`)/`AI_STAGE_EMBED_TIMEOUT_SECONDS` (default
-  `60`) — fallback timeouts; the real per-type chat timeout belongs in `profiles.yaml` itself
+  `POST /embeddings/backfill?confirm=true` afterwards. Stays a plain `.env` setting even though it's
+  arguably "technical" — `db.ensure_schema()` reads it before `profiles.yaml` is even loaded, and
+  changing it has real DB-migration implications, unlike a queue timeout.
+- `ai_stage_default_timeout_seconds`/`ai_stage_embed_timeout_seconds` (defaults `180`/`60`) —
+  fallback timeouts; the real per-type chat timeout belongs in `profiles.yaml` itself
   (`timeout_seconds`), since a local model's response time genuinely depends on which model/prompt
-  you've picked for that type.
+  you've picked for that type. Plain technical knobs, `profiles.yaml`'s `defaults:` only.

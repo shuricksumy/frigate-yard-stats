@@ -1,8 +1,11 @@
-# This copy is baked into the image (Dockerfile's COPY . .) as the fallback default -- in normal
-# deployment via docker-compose.yml, frigate/profiles.yaml (repo root, alongside docker-compose.yml)
-# is bind-mounted over this same path (/app/profiles.yaml) instead, so that's the one that actually
-# takes effect; this copy only matters if that bind mount is ever removed. Keep the two in sync
-# yourself if you edit one.
+# This is the EXAMPLE/TEMPLATE copy -- committed to git, same idea as .env.example. Copy this file
+# to profiles.yaml (repo root, alongside docker-compose.yml) and fill in your own chat_path/
+# prompts/defaults -- that copy is gitignored (never committed), since it's real per-deployment
+# config, not something to share. docker-compose.yml bind-mounts profiles.yaml (not this file)
+# straight into the ingest-worker container (at /app/profiles.yaml, the same path
+# AI_STAGE_PROFILE_PATH already defaults to), so editing your real copy and restarting the
+# container is enough; no image rebuild needed. frigate/ingest-worker/profiles.yaml is a separate
+# copy baked into the image as the fallback default (used only if the bind mount is ever removed).
 #
 # Configures both internal AI stages -- ai_worker.py (ai_events_stage_enabled below) and
 # alert_ai_worker.py (ai_alerts_enabled below), alternatives to n8n/metadata-processor.json, not a
@@ -73,13 +76,46 @@
 #     e.g. a slow-moving `car` visit might want frames spread wider ([0, 30, 65, 100]) than a
 #     `person` visit that's over quickly. Hardcoded fallback: [0, 25, 50, 100].
 #
-# defaults: (optional) -- common values applied to every object type that doesn't set its own for
-# that same key, sitting between the per-type overrides above and the hardcoded fallback. Leave it
-# out entirely (or omit individual keys) to fall straight through to the hardcoded fallback,
+# `defaults:` ALSO holds a second, unrelated category: plain technical tuning knobs with no
+# per-object-type meaning at all -- queue parallel limits, retry counts, timeouts, poll intervals,
+# retention schedule. These can ONLY be set in `defaults:` (never per-type -- there's no
+# "PARALLEL_LIMIT for cars only"), resolved once at startup by config.apply_profile_defaults(), not
+# per-call like the per-type settings above. Every key below is optional; omit any of them to keep
+# this project's original hardcoded default (shown after each), same "empty defaults: is a
+# perfectly valid config" idea as above:
+#   parallel_limit (2) / stale_minutes (5) / max_attempts (3) / crop_initial_wait_seconds (5) --
+#     crop-stage queue tuning: how many events may be crop_status='processing' at once, how long
+#     before a stuck claim is reclaimed, how many failures before giving up, how long to wait
+#     before the first crop attempt on a freshly claimed row.
+#   max_crop_dimension (1280) / thumbnail_max_dimension (240) -- image-size caps: the full crop's
+#     long side (VLMs downsample beyond this anyway) and the much smaller copy used for
+#     report/preview UIs.
+#   poll_interval_seconds (5) -- how often the crop poll loop checks for new work.
+#   retention_months (12) / retention_check_interval_seconds (86400) -- how long data is kept
+#     before an automatic sweep deletes it, and how often that sweep runs.
+#   video_parallel_limit (1) / video_initial_wait_seconds (10) / video_min_valid_bytes (1000) /
+#     video_max_attempts (5) / video_retry_wait_seconds (5) / video_max_age_hours (null, no limit)
+#     -- video-download queue tuning, shared by both the events (store_video) and alerts
+#     (store_video_alerts) flows.
+#   visit_thumb_crop_parallel_limit (1) / visit_thumb_crop_initial_wait_seconds (5) /
+#     visit_thumb_crop_max_attempts (3) / visit_thumb_crop_retry_wait_seconds (5) -- visit
+#     preview (composite grid/GIF) queue tuning.
+#   ai_stage_parallel_limit (2) / ai_stage_stale_minutes (5) / ai_stage_max_attempts (3) /
+#     ai_stage_max_age_hours (null, no limit) / ai_stage_poll_interval_seconds (5) -- internal
+#     AI-stage queue tuning, shared between the events and alerts AI stages.
+#   ai_stage_default_timeout_seconds (180) / ai_stage_embed_timeout_seconds (60) -- fallback
+#     chat-completion/embedding-call timeouts for a type that doesn't set its own `timeout_seconds`.
+#
+# defaults: (optional overall) -- common per-type-setting values applied to every object type that
+# doesn't set its own for that same key (sitting between the per-type overrides above and their
+# hardcoded fallback), PLUS the sole location for the technical tuning knobs just described. Leave
+# it out entirely (or omit individual keys) to fall straight through to the hardcoded fallback,
 # exactly as if this section didn't exist.
 # defaults:
 #   store_video: false
 #   crop_padding_pct: 0.3
+#   parallel_limit: 4
+#   retention_months: 6
 object_types:
   car: &vehicle_profile
     chat_path: /REPLACE_WITH_VEHICLE_SLOT/v1/chat/completions

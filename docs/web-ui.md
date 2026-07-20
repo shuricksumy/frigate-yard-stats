@@ -104,11 +104,13 @@ both pages). It shows:
 - **Health** — feature flags currently on (AI stage, video storage, Telegram modes, etc.), pgvector
   extension/index status, and an on-demand "Check now" button that live-tests your embedding
   backend (`LLAMA_PROXY_EMBED_PATH`) and reports whether it's reachable and returning the right
-  vector size. This flags summary only ever reflects the **global** `.env` defaults — it doesn't
-  parse `profiles.yaml`, so a per-object-type override (see "Per-object-type overrides" in
-  [`configuration.md`](configuration.md)) won't show up here even though it's actually in effect
-  for that type. The "By object type" row counts below do reflect whatever actually happened, since
-  those come from real data, not the static flag summary.
+  vector size. This flags summary only ever reflects `ingest-worker`'s hardcoded fallback defaults
+  — it doesn't parse `profiles.yaml` at all, so it won't show a `defaults:` section value or any
+  per-object-type override (see "Per-object-type overrides" in [`configuration.md`](configuration.md))
+  even though it's actually in effect for that type. For AI stage/video storage/Telegram/crop
+  settings specifically, treat this summary as unreliable — check `profiles.yaml` directly instead.
+  The "By object type" row counts below do reflect whatever actually happened, since those come
+  from real data, not the static flag summary.
 - **Counts** — total events, visits, sightings (any object type), and retention info (how many months
   you're keeping, and the oldest event still in the database).
 - **By object type** — one row per Frigate object label (car/truck/person/dog/...) showing its own
