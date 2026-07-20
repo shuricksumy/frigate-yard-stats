@@ -46,6 +46,7 @@ def test_insert_raw_event_has_snapshot_true_starts_crop_new(conn_ok):
     try:
         row = _fetch_by_det_id(event["det_id"])
         assert row["crop_status"] == "new"
+        assert row["ai_status"] == "new"
     finally:
         db._execute("DELETE FROM yard_stats.raw_events WHERE det_id = %s", (event["det_id"],))
 
@@ -56,6 +57,10 @@ def test_insert_raw_event_has_snapshot_false_starts_crop_skipped(conn_ok):
     try:
         row = _fetch_by_det_id(event["det_id"])
         assert row["crop_status"] == "skipped"
+        # ai_status gets the identical treatment -- a row that can never get a crop can never
+        # satisfy claim_ai_batch's crop_status='done' requirement either, so it must not sit at
+        # ai_status='new' forever (see insert_raw_event's own comment).
+        assert row["ai_status"] == "skipped"
     finally:
         db._execute("DELETE FROM yard_stats.raw_events WHERE det_id = %s", (event["det_id"],))
 
@@ -75,5 +80,45 @@ def test_insert_raw_event_crop_skipped_rows_excluded_from_claim_where_clause(con
             (event["det_id"],), fetch=True,
         )
         assert matches == []
+    finally:
+        db._execute("DELETE FROM yard_stats.raw_events WHERE det_id = %s", (event["det_id"],))
+
+
+def test_insert_raw_event_ai_skipped_rows_excluded_from_claim_where_clause(conn_ok):
+    # Same read-only check as the crop-stage test above, for claim_ai_batch's own WHERE clause --
+    # confirms a row that starts ai_status='skipped' was never claimable to begin with, not just
+    # that it happens not to be 'new'/'retry' by coincidence.
+    event = _event(has_snapshot=False)
+    db.insert_raw_event(event)
+    try:
+        matches = db._execute(
+            """
+            SELECT id FROM yard_stats.raw_events
+            WHERE det_id = %s AND crop_status = 'done' AND ai_status IN ('new', 'retry')
+            """,
+            (event["det_id"],), fetch=True,
+        )
+        assert matches == []
+    finally:
+        db._execute("DELETE FROM yard_stats.raw_events WHERE det_id = %s", (event["det_id"],))
+
+
+def test_ensure_schema_backfills_stale_ai_new_rows_with_skipped_crop(conn_ok):
+    # Simulates a row inserted under the old code (before ai_status='skipped' existed) -- crop_
+    # status='skipped' but ai_status left at 'new' forever. ensure_schema's backfill UPDATE should
+    # catch these on every startup, not just for newly-inserted rows.
+    event = _event(has_snapshot=False)
+    db.insert_raw_event(event)
+    db._execute(
+        "UPDATE yard_stats.raw_events SET ai_status = 'new' WHERE det_id = %s", (event["det_id"],),
+    )
+    try:
+        row = _fetch_by_det_id(event["det_id"])
+        assert row["ai_status"] == "new"  # confirm the simulated pre-fix state took effect
+
+        db.ensure_schema()
+
+        row = _fetch_by_det_id(event["det_id"])
+        assert row["ai_status"] == "skipped"
     finally:
         db._execute("DELETE FROM yard_stats.raw_events WHERE det_id = %s", (event["det_id"],))

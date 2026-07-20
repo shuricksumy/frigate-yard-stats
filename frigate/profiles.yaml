@@ -36,18 +36,50 @@
 # captured (plate text, breed, collar color, whatever), ask for it directly in the prompt's own
 # wording -- the model's own sentence is the record, not a set of columns.
 #
-# Four more settings, ALL OPTIONAL, can be overridden per type here -- see profile_config.py.
-# Omit any of them and that type just inherits the matching global .env default; only set one when
-# a specific type genuinely needs to behave differently from everything else:
+# A bunch of settings, ALL OPTIONAL, can be overridden per type here -- see profile_config.py.
+# Three tiers, checked in this order: a type's own object_types.<label> entry (below), then the
+# `defaults` section right below this comment (a common override applied to every type that
+# doesn't set its own -- for a setting you want changed everywhere except one or two exceptions),
+# then the matching global .env var (today's exact behavior when neither is set at all). Only set
+# one when a type (or everything, via `defaults`) genuinely needs to behave differently:
 #   telegram_events_mode / telegram_alerts_mode -- same none/image/video/all values as the global
-#     TELEGRAM_EVENTS_MODE/TELEGRAM_ALERTS_MODE env vars, just scoped to this one type. e.g. a
-#     `dog` entry could set telegram_events_mode: none to silence noisy dog-only notifications
-#     while cars/people still notify normally.
+#     TELEGRAM_EVENTS_MODE/TELEGRAM_ALERTS_MODE env vars. e.g. a `dog` entry could set
+#     telegram_events_mode: none to silence noisy dog-only notifications while cars/people still
+#     notify normally.
 #   ai_events_stage_enabled / ai_alerts_enabled -- same true/false as the global
-#     AI_EVENTS_STAGE_ENABLED/AI_ALERTS_ENABLED env vars, scoped to this one type. Setting either
-#     true for at least one type is enough to start that stage's poll thread even if the matching
-#     global env var is false -- see profile_config.any_ai_events_stage_enabled/
-#     any_ai_alerts_enabled, used by main.py's thread-startup check.
+#     AI_EVENTS_STAGE_ENABLED/AI_ALERTS_ENABLED env vars. Setting either true for at least one type
+#     (or in `defaults`) is enough to start that stage's poll thread even if the matching global
+#     env var is false -- see profile_config.any_ai_events_stage_enabled/any_ai_alerts_enabled,
+#     used by main.py's thread-startup check.
+#   crop_disabled / crop_frame_offset_pct / crop_padding_pct / frigate_snapshot_enabled -- same
+#     values as CROP_DISABLED/CROP_FRAME_OFFSET_PCT/CROP_PADDING_PCT/FRIGATE_SNAPSHOT_ENABLED.
+#     Resolved fresh for every event's own crop, since crop_worker already processes every type
+#     regardless -- no queue/thread implications, just which image ends up on the row. e.g. a `car`
+#     entry could set frigate_snapshot_enabled: false plus its own crop_frame_offset_pct to use a
+#     seek-based crop with more control over framing for plate legibility, while other types keep
+#     using Frigate's own snapshot.
+#   store_video / store_video_alerts / visit_thumb_crop_enabled -- same true/false as
+#     STORE_VIDEO/STORE_VIDEO_ALERTS/VISIT_THUMB_CROP_ENABLED. Unlike the AI-stage flags above,
+#     these apply to *any* Frigate label by default (not just ones with a profiles.yaml prompt
+#     entry), so a type can get its own entry here purely to carry one of these three keys, with no
+#     chat_path/prompt at all. Setting any of them true for at least one type (or in `defaults`) is
+#     enough to start that stage's poll thread even if the matching global env var is false -- see
+#     profile_config.any_store_video_enabled/any_store_video_alerts_enabled/
+#     any_visit_thumb_crop_enabled. e.g. a `person` entry could set store_video: false to skip
+#     storing clips for people while cars still get them.
+#   visit_preview_frame_percentages -- same comma-would-be-list as VISIT_PREVIEW_FRAME_PERCENTAGES
+#     (here, a real YAML list of exactly 4 numbers, not a comma-separated string) -- which 4 points
+#     of a visit's own clip to sample for that type's composite grid/GIF. e.g. a slow-moving `car`
+#     visit might want frames spread wider ([0, 30, 65, 100]) than a `person` visit that's over
+#     quickly.
+#
+# defaults: (optional) -- common overrides applied to every object type that doesn't set its own
+# value for that same key, sitting between the per-type overrides above and the global .env
+# defaults. Leave it out entirely (or omit individual keys) to fall through to the plain global
+# env vars, exactly as if this section didn't exist.
+# defaults:
+#   store_video: false
+#   crop_padding_pct: 0.3
 object_types:
   car: &vehicle_profile
     chat_path: /REPLACE_WITH_VEHICLE_SLOT/v1/chat/completions
@@ -60,6 +92,14 @@ object_types:
     # telegram_alerts_mode: all
     # ai_events_stage_enabled: true
     # ai_alerts_enabled: true
+    # crop_disabled: false
+    # crop_frame_offset_pct: 0.5
+    # crop_padding_pct: 0.2
+    # frigate_snapshot_enabled: true
+    # store_video: true
+    # store_video_alerts: true
+    # visit_thumb_crop_enabled: true
+    # visit_preview_frame_percentages: [0, 25, 50, 100]
     event_prompt: >-
       This image shows a single moment from one vehicle sighting. In one or two short sentences,
       describe the vehicle's color, body type (sedan/suv/truck/van/pickup/minivan/etc.), make and

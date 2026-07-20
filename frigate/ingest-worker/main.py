@@ -28,16 +28,19 @@ def main():
     # The pipeline itself (MQTT ingest + crop poll loop) runs regardless of the API -- it's a
     # background thread so uvicorn can own the main thread for the admin/test API below.
     threading.Thread(target=crop_worker.run_forever, args=(profile,), name="crop_worker", daemon=True).start()
-    # Only spins up a thread at all when video storage is turned on -- no polling overhead when
-    # STORE_VIDEO=false, rather than a thread that runs and no-ops forever.
-    if config.STORE_VIDEO:
+    # Only spins up a thread at all when video storage is turned on for at least one object type --
+    # no polling overhead when nothing needs it, rather than a thread that runs and no-ops forever.
+    # Checks profile_config.any_store_video_enabled rather than the bare global flag -- a
+    # profiles.yaml per-type override can start this thread even when the global default is off.
+    if profile_config.any_store_video_enabled(profile):
         threading.Thread(target=video_worker.run_forever, args=(profile,), name="video_worker", daemon=True).start()
     # Independent switch, independent thread -- STORE_VIDEO_ALERTS can be on/off regardless of
-    # STORE_VIDEO, so the two flows can be A/B'd separately.
-    if config.STORE_VIDEO_ALERTS:
+    # STORE_VIDEO, so the two flows can be A/B'd separately. Same per-type-override-can-start-it
+    # check as above.
+    if profile_config.any_store_video_alerts_enabled(profile):
         threading.Thread(target=alert_video_worker.run_forever, args=(profile,), name="alert_video_worker", daemon=True).start()
     # Independent switch, independent thread -- same reasoning as STORE_VIDEO_ALERTS above.
-    if config.VISIT_THUMB_CROP_ENABLED:
+    if profile_config.any_visit_thumb_crop_enabled(profile):
         threading.Thread(target=visit_thumb_worker.run_forever, args=(profile,), name="visit_thumb_worker", daemon=True).start()
     # Alternative to n8n/metadata-processor.json (see CLAUDE.md) -- off by default so a fresh
     # deploy still needs n8n for the AI stage until this is deliberately opted into. Checks

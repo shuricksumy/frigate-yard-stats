@@ -142,6 +142,28 @@ def test_reap_stale_video_processing_only_reaps_past_stale_minutes(conn_ok, monk
         _cleanup(stale, fresh)
 
 
+def test_claim_video_batch_object_types_include_filter(conn_ok):
+    car = _insert_row(objects="car", crop_status="done", video_status="new")
+    person = _insert_row(objects="person", crop_status="done", video_status="new")
+    try:
+        claimed_ids = {row["id"] for row in db.claim_video_batch(limit=10, object_types=["car"])}
+        assert car in claimed_ids
+        assert person not in claimed_ids
+    finally:
+        _cleanup(car, person)
+
+
+def test_claim_video_batch_exclude_object_types_filter(conn_ok):
+    car = _insert_row(objects="car", crop_status="done", video_status="new")
+    person = _insert_row(objects="person", crop_status="done", video_status="new")
+    try:
+        claimed_ids = {row["id"] for row in db.claim_video_batch(limit=10, exclude_object_types=["person"])}
+        assert car in claimed_ids
+        assert person not in claimed_ids
+    finally:
+        _cleanup(car, person)
+
+
 def test_count_video_in_progress(conn_ok):
     a = _insert_row(crop_status="done", video_status="processing")
     b = _insert_row(crop_status="done", video_status="new")

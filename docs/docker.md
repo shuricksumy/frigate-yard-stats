@@ -121,5 +121,10 @@ ingest-worker` instead — see [`configuration.md`](configuration.md) for more o
 - **Changed `.env` but nothing changed** — most settings only take effect on container start, not
   live. Run `docker compose --profile pipeline up -d` again after editing `.env` (Compose only
   recreates containers whose config actually changed, so this is safe to re-run any time).
+- **Changed `profiles.yaml` but nothing changed** — this is a *different* gotcha from the one
+  above: `profiles.yaml` is bind-mounted, not a Compose-level env var, so Compose has no way to
+  tell its content changed and `docker compose up -d` is a no-op here. Use `docker compose
+  --profile pipeline restart ingest-worker` instead (or `up -d --force-recreate ingest-worker`) to
+  actually pick up the edit.
 - **Started fresh and want to wipe the database** — see
   [`troubleshooting.md`](troubleshooting.md#starting-over) for how to safely reset Postgres.

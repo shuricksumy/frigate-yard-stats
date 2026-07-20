@@ -77,7 +77,9 @@ A download button next to the close button grabs whichever of video/image is cur
 
 - **`ai: <status>`** — `new` (not analyzed yet), `processing` (an n8n run has claimed it right
   now), `retry` (a previous attempt didn't finish cleanly, will be picked up again), `failed`
-  (gave up after repeated errors), `done` (a sighting exists — click the card to see it).
+  (gave up after repeated errors), `done` (a sighting exists — click the card to see it), `skipped`
+  (this event never had a snapshot to crop in the first place — Frigate detected it but never
+  persisted a real event for it, so there's nothing to analyze regardless of how long you wait).
 - **`video`** — this row has a stored clip available.
 - **`N events grouped`** (Visits view only) — how many individual detections Frigate's tracker
   bundled into this one visit.
@@ -102,7 +104,11 @@ both pages). It shows:
 - **Health** — feature flags currently on (AI stage, video storage, Telegram modes, etc.), pgvector
   extension/index status, and an on-demand "Check now" button that live-tests your embedding
   backend (`LLAMA_PROXY_EMBED_PATH`) and reports whether it's reachable and returning the right
-  vector size.
+  vector size. This flags summary only ever reflects the **global** `.env` defaults — it doesn't
+  parse `profiles.yaml`, so a per-object-type override (see "Per-object-type overrides" in
+  [`configuration.md`](configuration.md)) won't show up here even though it's actually in effect
+  for that type. The "By object type" row counts below do reflect whatever actually happened, since
+  those come from real data, not the static flag summary.
 - **Counts** — total events, visits, sightings (any object type), and retention info (how many months
   you're keeping, and the oldest event still in the database).
 - **By object type** — one row per Frigate object label (car/truck/person/dog/...) showing its own

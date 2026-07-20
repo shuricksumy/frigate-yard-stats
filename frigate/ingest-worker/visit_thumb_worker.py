@@ -51,7 +51,12 @@ def process_claimed_visit(visit: dict, profile: dict | None = None) -> None:
         if representative is None or not representative.get("det_id"):
             raise ValueError(f"No representative raw_event with det_id for visit id={visit_id}")
 
-        crop_image_base64, preview_gif_base64 = crop.build_visit_preview(visit, representative)
+        crop_image_base64, preview_gif_base64 = crop.build_visit_preview(
+            visit, representative,
+            frame_percentages=profile_config.visit_preview_frame_percentages(profile, object_label),
+            crop_disabled=profile_config.crop_disabled(profile, object_label),
+            crop_padding_pct=profile_config.crop_padding_pct(profile, object_label),
+        )
         db.mark_visit_thumb_crop_done(visit_id, crop_image_base64, preview_gif_base64)
         logger.info(
             "Cropped visit thumbnail for visit id=%s camera=%s thumb_time=%s",
@@ -82,7 +87,13 @@ def run_once(profile: dict | None = None) -> None:
     if available_capacity <= 0:
         return
 
-    for visit in db.claim_visit_thumb_crop_batch(available_capacity):
+    object_types, exclude_object_types = profile_config.visit_thumb_crop_claim_filter(profile)
+    if object_types == []:
+        # Base disabled, nothing opted in per-type -- nothing for this stage to do at all.
+        return
+    for visit in db.claim_visit_thumb_crop_batch(
+        available_capacity, object_types=object_types, exclude_object_types=exclude_object_types,
+    ):
         process_claimed_visit(visit, profile)
 
 

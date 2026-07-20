@@ -7,6 +7,7 @@ Requires a reachable Postgres with schema.sql applied -- see test_db_video_queue
 docstring for setup notes. Only run against a local/throwaway Postgres.
 """
 import os
+import uuid
 
 os.environ.setdefault("MQTT_HOST", "localhost")
 os.environ.setdefault("POSTGRES_PASSWORD", "test")
@@ -16,6 +17,20 @@ os.environ.setdefault("API_KEY", "test-key")
 import pytest  # noqa: E402
 
 import db  # noqa: E402
+
+
+def _insert_raw_event(objects="car"):
+    det_id = f"pytest-{uuid.uuid4()}"
+    rows = db._execute(
+        """
+        INSERT INTO yard_stats.raw_events
+            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot, crop_status)
+        VALUES ('pytest-cam', 'pytest-zone', %s, now(), now(), %s, true, true, 'done')
+        RETURNING id
+        """,
+        (objects, det_id), fetch=True,
+    )
+    return rows[0]["id"], det_id
 
 
 def _insert_visit(video_status="new", start_ts_expr="now()"):
@@ -96,6 +111,56 @@ def test_mark_visit_video_retry_or_failed_retries_below_cap(conn_ok):
         assert row["video_attempt_count"] == 1
     finally:
         _cleanup(visit_id)
+
+
+def test_claim_visit_video_batch_object_types_include_filter(conn_ok):
+    car_id, car_det = _insert_raw_event(objects="car")
+    person_id, person_det = _insert_raw_event(objects="person")
+    car_visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [car_det],
+    })
+    person_visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "person",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [person_det],
+    })
+    db._execute(
+        "UPDATE yard_stats.visits SET video_status = 'new' WHERE id = ANY(%s)",
+        ([car_visit_id, person_visit_id],),
+    )
+    try:
+        claimed_ids = {r["id"] for r in db.claim_visit_video_batch(limit=10, object_types=["car"])}
+        assert car_visit_id in claimed_ids
+        assert person_visit_id not in claimed_ids
+    finally:
+        db._execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", ([car_id, person_id],))
+        _cleanup(car_visit_id, person_visit_id)
+
+
+def test_claim_visit_video_batch_exclude_object_types_filter(conn_ok):
+    car_id, car_det = _insert_raw_event(objects="car")
+    person_id, person_det = _insert_raw_event(objects="person")
+    car_visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [car_det],
+    })
+    person_visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "person",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [person_det],
+    })
+    db._execute(
+        "UPDATE yard_stats.visits SET video_status = 'new' WHERE id = ANY(%s)",
+        ([car_visit_id, person_visit_id],),
+    )
+    try:
+        claimed_ids = {
+            r["id"] for r in db.claim_visit_video_batch(limit=10, exclude_object_types=["person"])
+        }
+        assert car_visit_id in claimed_ids
+        assert person_visit_id not in claimed_ids
+    finally:
+        db._execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", ([car_id, person_id],))
+        _cleanup(car_visit_id, person_visit_id)
 
 
 def test_mark_visit_video_retry_or_failed_fails_at_cap(conn_ok):

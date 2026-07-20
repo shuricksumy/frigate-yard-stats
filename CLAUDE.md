@@ -110,13 +110,22 @@ replaced rather than added to n8n.
 
 All three stages use the same shape: `new` (not picked up) → `processing` (claimed, work in flight) →
 `retry` (crashed/reaped, or errored below that stage's attempt cap) → `failed` (errored at/above
-the cap, terminal) → `done`. Both `video_status` and `crop_status` additionally have `skipped`, set
-at ingest time -- `video_status` when `STORE_VIDEO=false`, `crop_status` when the MQTT payload's
-`has_snapshot` is false. The latter matters because Frigate can emit a full `new`→`end` MQTT
-lifecycle for a tracked object it never actually persists as a real event (confirmed in production:
-such rows' `det_id` 404s against Frigate's own `/api/events/<id>`) -- cropping those can never
-succeed regardless of retries or queue throughput, so they're marked `skipped` immediately rather
-than piling up as an eternally-unprocessed `new`. `FOR UPDATE SKIP LOCKED` is what makes claiming
+the cap, terminal) → `done`. `video_status`, `crop_status`, and `ai_status` all additionally have
+`skipped`, set at ingest time -- `video_status` when `STORE_VIDEO=false`, `crop_status` **and**
+`ai_status` both when the MQTT payload's `has_snapshot` is false. The latter matters because
+Frigate can emit a full `new`→`end` MQTT lifecycle for a tracked object it never actually persists
+as a real event (confirmed in production: such rows' `det_id` 404s against Frigate's own
+`/api/events/<id>`) -- cropping those can never succeed regardless of retries or queue throughput,
+so they're marked `skipped` immediately rather than piling up as an eternally-unprocessed `new`.
+`ai_status` gets the identical treatment for the identical reason: `claim_ai_batch` hard-requires
+`crop_status='done'` (an image is always guaranteed on every claimed row -- see below), so a row
+that can never get a crop can also never be claimed for AI analysis; without marking it `skipped`
+too, it would sit at `ai_status='new'` forever, indistinguishable on the admin dashboard from a row
+genuinely waiting on capacity (confirmed live: this was the large majority -- 1048 of ~1140 -- of a
+reported `ai_status='new'` backlog on one production instance). Rows inserted before this existed
+are backfilled by a one-time-ish `UPDATE ... WHERE ai_status = 'new' AND crop_status = 'skipped'`
+in `schema.sql`, safe to leave in permanently since it's a no-op once caught up. `FOR UPDATE SKIP
+LOCKED` is what makes claiming
 race-safe against overlapping runs (multiple n8n executions, or this service's own poll loops) --
 but only when paired with a CTE, not a plain `WHERE id IN (SELECT ... LIMIT %s FOR UPDATE SKIP
 LOCKED)` subquery: confirmed in practice (reproduced directly in psql) that the subquery form,
@@ -600,26 +609,57 @@ ever applies to the Visits tab.
 
 ### Per-object-type overrides (`profile_config.py`)
 
-Four settings that used to be global-only env vars can now be overridden per Frigate object type
-directly in `profiles.yaml`'s `object_types.<label>` entry: `telegram_events_mode`,
-`telegram_alerts_mode`, `ai_events_stage_enabled`, `ai_alerts_enabled`. Every resolver lives in
-`profile_config.py` -- a small, pure (`no I/O, no caching`) module: a type's own override wins
-when present, otherwise the matching global `config.py` default applies
-(`_type_config(profile, object_label).get(key, config.THE_GLOBAL_DEFAULT)`). This lets one type
-(e.g. a low-priority `dog`) opt out of Telegram/AI-stage participation, or opt IN despite the
-global default being off, without a pipeline-wide switch -- every type that doesn't set an
-override behaves exactly as it did before this existed.
+A number of settings that used to be global-only env vars can now be overridden per Frigate object
+type directly in `profiles.yaml`, via three tiers checked in order: a type's own
+`object_types.<label>` entry (highest), a profile-wide `defaults` section (a common override
+applied to every type that doesn't set its own -- for "change this everywhere except one or two
+exceptions"), then the matching global `config.py` env var (lowest, today's exact behavior when
+neither is set at all). Every resolver lives in `profile_config.py` -- a small, pure (no I/O, no
+caching) module built around one shared `_resolve(profile, object_label, key, global_default)`
+helper that walks the three tiers.
+
+Two families of overridable settings:
+
+- **Plain per-row settings**, resolved fresh for whatever row is currently being processed:
+  `telegram_events_mode`, `telegram_alerts_mode`, `ai_events_stage_enabled`, `ai_alerts_enabled`
+  (the original four), plus `crop_disabled`, `crop_frame_offset_pct`, `crop_padding_pct`,
+  `frigate_snapshot_enabled` (the crop-family settings `crop.py`'s `crop_event`/`crop_and_scale`/
+  `build_visit_preview` now accept as optional overrides instead of only ever reading
+  `config.CROP_DISABLED`/etc. directly -- `None` still means "use the global config value", so
+  every other caller is unaffected), and `visit_preview_frame_percentages`. None of these have any
+  claim-time/thread implications -- `crop_worker.py` already processes every object type
+  regardless, so resolving per-row is enough.
+- **`store_video` / `store_video_alerts` / `visit_thumb_crop_enabled`** -- these gate a whole poll
+  thread (`main.py`, via `profile_config.any_store_video_enabled`/`any_store_video_alerts_enabled`/
+  `any_visit_thumb_crop_enabled`, same "per-type override can start it even when the global default
+  is off" precedent the two AI-stage flags already established) *and* narrow which rows their claim
+  function is even allowed to look at (`claim_video_batch`/`claim_visit_video_batch`/
+  `claim_visit_thumb_crop_batch`, each now taking optional `object_types`/`exclude_object_types`
+  params). Unlike the AI-stage flags (which only ever apply to types with a `profiles.yaml` prompt
+  entry in the first place), these three apply to *any* Frigate label by default -- so their
+  resolvers (`profile_config.store_video_claim_filter`/etc.) deliberately return an
+  **include-or-exclude split**, never a plain include-list checked against every "known" label:
+  if the effective base (the `defaults` section, else the global env var) is enabled, only the
+  explicit per-type opt-outs need excluding (or `(None, None)`, i.e. no filter at all, exactly the
+  unfiltered query this project ran before per-type overrides existed); if the base is disabled,
+  only the explicit per-type opt-ins are eligible. This avoids a real regression an include-list
+  approach would have introduced: `OBJECT_TYPES` (the env var powering the web UI's Type dropdown)
+  has always been cosmetic-only, never a pipeline allow-list, so filtering against it as a
+  completeness enumeration would have silently stopped storing video for any real Frigate label
+  that was never added to it. `claim_visit_video_batch`/`claim_visit_thumb_crop_batch` apply this
+  filter via a `LATERAL`-joined representative event (same convention `claim_alert_ai_batch`
+  already uses), not `visits.objects`, for the same multi-type-per-visit reason described
+  elsewhere in this doc.
 
 `main.py` loads `profiles.yaml` once at startup and threads that same dict down to every worker
 that needs it (`crop_worker`/`video_worker`/`mqtt_ingest`/`visit_thumb_worker`/
 `alert_video_worker`/`ai_worker`/`alert_ai_worker`) rather than each thread re-reading the file
-independently. Thread-startup gating for the two AI stages now checks
-`profile_config.any_ai_events_stage_enabled`/`any_ai_alerts_enabled` instead of the bare global
-flag -- a per-type override can start that stage's poll thread even when the global env var is
-`false`, as long as at least one object type opts in; `ai_worker.run_once`/`alert_ai_worker.
-run_once` then further filter which types actually get claimed (`profile_config.
-ai_events_stage_enabled`/`ai_alerts_enabled` per label), so a type that doesn't want this stage
-never gets claimed even while the thread itself is running for other types.
+independently. `ai_worker.run_once`/`alert_ai_worker.run_once` filter which types actually get
+claimed via `profile_config.ai_events_stage_enabled`/`ai_alerts_enabled` per label, so a type that
+doesn't want this stage never gets claimed even while the thread itself is running for other
+types; `video_worker.run_once`/`alert_video_worker.run_once`/`visit_thumb_worker.run_once` do the
+analogous thing via their own `*_claim_filter` functions, additionally skipping the claim call
+entirely (rather than calling it with an always-empty filter) whenever nothing at all is enabled.
 
 Telegram's four send functions (`telegram.send_photo`/`send_video`/`send_visit_summary`/
 `send_visit_video`) each gained an optional `mode: str | None = None` parameter -- when a caller

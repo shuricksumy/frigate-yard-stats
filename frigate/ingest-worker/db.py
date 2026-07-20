@@ -434,17 +434,24 @@ def insert_raw_event(event: dict) -> None:
     # never succeed for these regardless of retries. Skipping at ingest keeps the row (accurate
     # yard-activity counts) without it piling up as an eternally-unprocessed 'new'.
     initial_crop_status = "new" if event["has_snapshot"] else "skipped"
+    # ai_status gets the identical treatment, for the identical reason: claim_ai_batch hard-requires
+    # crop_status='done' (an image is always guaranteed on every claimed row, never configurable),
+    # so a row that can never get a crop can also never be claimed for AI analysis -- without this,
+    # such a row would sit at ai_status='new' forever, indistinguishable from one genuinely waiting
+    # on capacity (confirmed live: this was the majority of a reported ai_status='new' backlog).
+    initial_ai_status = "new" if event["has_snapshot"] else "skipped"
     _execute(
         """
         INSERT INTO yard_stats.raw_events
             (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot,
-             crop_status, video_status)
-        VALUES (%s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s, %s, %s, %s, %s)
+             crop_status, video_status, ai_status)
+        VALUES (%s, %s, %s, to_timestamp(%s), to_timestamp(%s), %s, %s, %s, %s, %s, %s)
         """,
         (
             event["camera"], event["zone"], event["objects"],
             event["start_time"], event["end_time"], event["det_id"],
             event["has_clip"], event["has_snapshot"], initial_crop_status, initial_video_status,
+            initial_ai_status,
         ),
     )
 
@@ -579,24 +586,55 @@ def count_visit_video_in_progress() -> int:
     return rows[0]["c"] if rows else 0
 
 
-def claim_visit_video_batch(limit: int, max_age_hours: float | None = None) -> list:
+def claim_visit_video_batch(
+    limit: int,
+    max_age_hours: float | None = None,
+    object_types: list[str] | None = None,
+    exclude_object_types: list[str] | None = None,
+) -> list:
     # Mirrors claim_video_batch exactly (CTE form for the same FOR UPDATE SKIP LOCKED reason, and
     # the same newest-first + max_age_hours safety valve), just against visits instead of
     # raw_events -- one clip per visit's whole start_ts->end_ts span, independent of any per-event
     # video. See alert_video_worker.py.
+    #
+    # object_types/exclude_object_types match against the visit's own *representative* event's
+    # objects (via a LATERAL join, same convention claim_alert_ai_batch already uses) rather than
+    # visits.objects, since a visit's objects column can span more than one distinct type -- see
+    # claim_alert_ai_batch's own comment for why. Only joined in at all when a filter is actually
+    # requested, so the unfiltered default case (both None) runs the exact same query as before
+    # per-type overrides existed.
     age_clause = ""
+    type_clause = ""
+    join_clause = ""
     params: list = []
+    if object_types is not None or exclude_object_types is not None:
+        join_clause = """
+            JOIN LATERAL (
+                SELECT re.objects FROM yard_stats.raw_events re
+                WHERE re.visit_id = v.id
+                ORDER BY re.start_ts ASC, re.id ASC
+                LIMIT 1
+            ) rep ON true
+        """
+        if object_types is not None:
+            type_clause = "AND rep.objects = ANY(%s)"
+            params.append(object_types)
+        else:
+            type_clause = "AND NOT (rep.objects = ANY(%s))"
+            params.append(exclude_object_types)
     if max_age_hours is not None:
-        age_clause = "AND start_ts >= now() - (%s * interval '1 hour')"
+        age_clause = "AND v.start_ts >= now() - (%s * interval '1 hour')"
         params.append(max_age_hours)
     params.append(limit)
     return _execute(
         f"""
         WITH claimable AS (
-            SELECT id FROM yard_stats.visits
-            WHERE video_status IN ('new', 'retry')
+            SELECT v.id FROM yard_stats.visits v
+            {join_clause}
+            WHERE v.video_status IN ('new', 'retry')
+            {type_clause}
             {age_clause}
-            ORDER BY start_ts DESC
+            ORDER BY v.start_ts DESC
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         )
@@ -655,15 +693,43 @@ def count_visit_thumb_crop_in_progress() -> int:
     return rows[0]["c"] if rows else 0
 
 
-def claim_visit_thumb_crop_batch(limit: int) -> list:
+def claim_visit_thumb_crop_batch(
+    limit: int,
+    object_types: list[str] | None = None,
+    exclude_object_types: list[str] | None = None,
+) -> list:
     # Mirrors claim_visit_video_batch's CTE-claim shape (same FOR UPDATE SKIP LOCKED reason,
     # newest-first) -- fifth queue stage, on visits.thumb_crop_status. See visit_thumb_worker.py.
-    return _execute(
+    # object_types/exclude_object_types: same representative-event LATERAL-join include/exclude
+    # filter as claim_visit_video_batch -- see its comment for why this isn't a plain include-list
+    # against every known label.
+    type_clause = ""
+    join_clause = ""
+    params: list = []
+    if object_types is not None or exclude_object_types is not None:
+        join_clause = """
+            JOIN LATERAL (
+                SELECT re.objects FROM yard_stats.raw_events re
+                WHERE re.visit_id = v.id
+                ORDER BY re.start_ts ASC, re.id ASC
+                LIMIT 1
+            ) rep ON true
         """
+        if object_types is not None:
+            type_clause = "AND rep.objects = ANY(%s)"
+            params.append(object_types)
+        else:
+            type_clause = "AND NOT (rep.objects = ANY(%s))"
+            params.append(exclude_object_types)
+    params.append(limit)
+    return _execute(
+        f"""
         WITH claimable AS (
-            SELECT id FROM yard_stats.visits
-            WHERE thumb_crop_status IN ('new', 'retry')
-            ORDER BY start_ts DESC
+            SELECT v.id FROM yard_stats.visits v
+            {join_clause}
+            WHERE v.thumb_crop_status IN ('new', 'retry')
+            {type_clause}
+            ORDER BY v.start_ts DESC
             LIMIT %s
             FOR UPDATE SKIP LOCKED
         )
@@ -673,7 +739,7 @@ def claim_visit_thumb_crop_batch(limit: int) -> list:
         WHERE yard_stats.visits.id = claimable.id
         RETURNING yard_stats.visits.*
         """,
-        (limit,),
+        params,
         fetch=True,
     )
 
@@ -825,7 +891,12 @@ def count_video_in_progress() -> int:
     return rows[0]["in_progress_count"] if rows else 0
 
 
-def claim_video_batch(limit: int, max_age_hours: float | None = None) -> list:
+def claim_video_batch(
+    limit: int,
+    max_age_hours: float | None = None,
+    object_types: list[str] | None = None,
+    exclude_object_types: list[str] | None = None,
+) -> list:
     # Only claims rows the crop stage has already finished with -- video download uses the same
     # camera/start/end window regardless of crop_status, but there's no reason to spend download
     # bandwidth on a row that might still fail crop-stage validation upstream, and this keeps the
@@ -843,8 +914,23 @@ def claim_video_batch(limit: int, max_age_hours: float | None = None) -> list:
     # max_age_hours -- same throughput safety valve as claim_ai_batch's: past this cutoff, a row
     # just stays video_status='new'/'retry' indefinitely rather than spending an attempt on a clip
     # that's very likely already rolled off Frigate's continuous-recording buffer.
+    #
+    # object_types/exclude_object_types -- an include-or-exclude pair (at most one set, see
+    # profile_config.store_video_claim_filter), not a plain include-list against every known label:
+    # STORE_VIDEO applies to any Frigate label by default, and OBJECT_TYPES is otherwise a cosmetic
+    # list (just the web UI's Type dropdown source) -- an include-only filter against it would
+    # silently stop storing video for any real label that isn't in that list. Both None (the
+    # default) means no per-type filtering at all, identical to this function's behavior before
+    # per-type overrides existed.
     age_clause = ""
+    type_clause = ""
     params: list = []
+    if object_types is not None:
+        type_clause = "AND objects = ANY(%s)"
+        params.append(object_types)
+    elif exclude_object_types is not None:
+        type_clause = "AND NOT (objects = ANY(%s))"
+        params.append(exclude_object_types)
     if max_age_hours is not None:
         age_clause = "AND created_at >= now() - (%s * interval '1 hour')"
         params.append(max_age_hours)
@@ -854,6 +940,7 @@ def claim_video_batch(limit: int, max_age_hours: float | None = None) -> list:
         WITH claimable AS (
             SELECT id FROM yard_stats.raw_events
             WHERE crop_status = 'done' AND video_status IN ('new', 'retry')
+            {type_clause}
             {age_clause}
             ORDER BY created_at DESC
             LIMIT %s

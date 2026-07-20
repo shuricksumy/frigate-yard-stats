@@ -46,6 +46,11 @@ n8n_projects -d home_automation`) when the API-level view isn't enough.
 - A row stuck on `crop_status = 'skipped'` forever is usually correct, not a bug — Frigate can emit
   a full event lifecycle for an object it never actually persisted a snapshot for; there's nothing
   to crop for these no matter how long you wait.
+- If crops look wrong for just *one* object type (full frame instead of cropped, or vice versa;
+  wrong offset/framing) while others look fine, check that type's own entry in `profiles.yaml` —
+  `crop_disabled`/`crop_frame_offset_pct`/`crop_padding_pct`/`frigate_snapshot_enabled` can all be
+  overridden per type there, so a type-specific override (or a profile-wide `defaults:` entry) can
+  be the actual cause even when the `.env` values look right.
 
 ## Events are cropped but never analyzed (`ai_status` stuck on `new`)
 
@@ -58,11 +63,18 @@ This stage is owned by n8n, not `ingest-worker` — see [`n8n.md`](n8n.md):
   `max_age_hours` query param is excluding a backlog that's older than expected.
 - If that node succeeds but a later VLM call node fails, the issue is your VLM endpoint
   (`REPLACE_WITH_VLM_HOST`/`PORT`), not this project.
+- If you're using the internal AI stage instead (`AI_EVENTS_STAGE_ENABLED`/`AI_ALERTS_ENABLED`) and
+  one object type never gets analyzed while others do, check that type's `profiles.yaml` entry for
+  an `ai_events_stage_enabled`/`ai_alerts_enabled` override — or that it has an entry in
+  `profiles.yaml` at all; a label with no entry is never claimed by either stage, by design.
 
 ## Video never gets stored
 
 - Confirm `STORE_VIDEO` (per-event) or `STORE_VIDEO_ALERTS` (per-visit) is actually `true` in
   `.env`, and that you restarted the container after changing it.
+- If it's only missing for one object type, check that type's `profiles.yaml` entry (and any
+  profile-wide `defaults:` section) for a `store_video`/`store_video_alerts` override — either can
+  disable it for that one type even while the `.env` default is `true`.
 - Check the relevant bind-mount directory actually exists and is writable
   (`VIDEO_STORAGE_HOST_PATH`/`VIDEO_STORAGE_ALERTS_HOST_PATH` on the host).
 - A row permanently stuck on `video_status = 'failed'` after using up its retry attempts is often
@@ -87,6 +99,9 @@ is almost always why.
   waiting for (`video` alone does not also send the photo/summary; only `all` sends both). Also
   confirm `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID` are both real values, not the `changeme`
   placeholder.
+- If it's silent for just one object type, check that type's `profiles.yaml` entry (and any
+  profile-wide `defaults:` section) for a `telegram_events_mode`/`telegram_alerts_mode` override —
+  a type can be silenced (or enabled) independently of the global `.env` mode.
 - Message your bot at least once first — Telegram bots can't message a chat that's never
   messaged them (see [`configuration.md`](configuration.md#telegram-notifications) for the
   bot-creation steps).

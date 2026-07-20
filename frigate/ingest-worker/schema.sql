@@ -78,7 +78,10 @@ CREATE INDEX IF NOT EXISTS idx_visits_alert_ai_status ON yard_stats.visits (aler
 -- section for the full write-up of who owns which and why. All three share the same shape:
 -- new -> processing -> retry/failed -> done, plus 'skipped' for a state a row can start in but
 -- never needs to leave (crop_status: has_snapshot=false at ingest time; video_status:
--- STORE_VIDEO=false).
+-- STORE_VIDEO=false; ai_status: also has_snapshot=false at ingest time -- a row that can never get
+-- a crop can never satisfy claim_ai_batch's crop_status='done' requirement either, so it would
+-- otherwise sit at ai_status='new' forever, indistinguishable from a row genuinely waiting on
+-- capacity).
 CREATE TABLE IF NOT EXISTS yard_stats.raw_events (
   id SERIAL PRIMARY KEY,
   camera TEXT NOT NULL,
@@ -94,7 +97,7 @@ CREATE TABLE IF NOT EXISTS yard_stats.raw_events (
   crop_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   crop_attempt_count INTEGER NOT NULL DEFAULT 0,
   ai_status TEXT NOT NULL DEFAULT 'new'
-    CHECK (ai_status IN ('new', 'processing', 'retry', 'failed', 'done')),
+    CHECK (ai_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped')),
   ai_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   ai_attempt_count INTEGER NOT NULL DEFAULT 0,
   video_status TEXT NOT NULL DEFAULT 'new'
@@ -130,6 +133,28 @@ CREATE INDEX IF NOT EXISTS idx_raw_events_crop_status ON yard_stats.raw_events (
 CREATE INDEX IF NOT EXISTS idx_raw_events_ai_status ON yard_stats.raw_events (ai_status);
 CREATE INDEX IF NOT EXISTS idx_raw_events_video_status ON yard_stats.raw_events (video_status);
 CREATE INDEX IF NOT EXISTS idx_raw_events_visit_id ON yard_stats.raw_events (visit_id);
+
+-- Widens ai_status's CHECK constraint to allow 'skipped' -- CREATE TABLE IF NOT EXISTS above only
+-- takes effect for a brand new table, so an already-deployed database's constraint (added before
+-- 'skipped' was a valid ai_status) needs this explicit widen. Safe to re-run every startup: DROP
+-- IF EXISTS is a no-op once the constraint is already named as below, and re-adding an identical
+-- CHECK is idempotent (Postgres re-validates existing rows against it, cheap at this project's
+-- scale). The auto-generated name for an inline CHECK on a freshly-created table would already be
+-- this same "<table>_<column>_check" form, so this also matches what CREATE TABLE would have named
+-- it on a brand new database -- nothing to drop there, ADD CONSTRAINT just succeeds directly.
+ALTER TABLE yard_stats.raw_events DROP CONSTRAINT IF EXISTS raw_events_ai_status_check;
+ALTER TABLE yard_stats.raw_events ADD CONSTRAINT raw_events_ai_status_check
+  CHECK (ai_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
+
+-- One-time-ish backfill for rows inserted before ai_status='skipped' existed -- a row whose crop
+-- was never possible (has_snapshot=false at ingest) but was inserted under the old code sits at
+-- ai_status='new' forever (claim_ai_batch's crop_status='done' requirement can never be satisfied
+-- for it), indistinguishable on the admin dashboard from a row genuinely waiting on capacity.
+-- Confirmed live: crop_status='skipped' rows accounted for the large majority of a reported
+-- ai_status='new' backlog. Safe to re-run every startup -- it's a no-op once caught up, since new
+-- rows are now inserted with the correct initial ai_status directly (see insert_raw_event).
+UPDATE yard_stats.raw_events SET ai_status = 'skipped', ai_status_changed_at = now()
+  WHERE ai_status = 'new' AND crop_status = 'skipped';
 
 -- One row per AI-analyzed event, ANY object type (car/truck/person/dog/whatever profiles.yaml has
 -- a prompt for) -- deliberately universal, no per-type columns/tables. object_label carries the

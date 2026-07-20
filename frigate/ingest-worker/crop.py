@@ -83,12 +83,19 @@ def _grab_frame(clip_url: str, timestamp_offset: float, frame_path: str) -> None
 _FALLBACK_FRAME_OFFSET_SECONDS = 1.0
 
 
-def _build_vf_filter(box: list[float], max_dimension: int) -> str:
+def _build_vf_filter(
+    box: list[float], max_dimension: int,
+    crop_disabled: bool | None = None, crop_padding_pct: float | None = None,
+) -> str:
+    if crop_disabled is None:
+        crop_disabled = config.CROP_DISABLED
+    if crop_padding_pct is None:
+        crop_padding_pct = config.CROP_PADDING_PCT
     scale_filter = (
         f"scale='min({max_dimension},iw)':'min({max_dimension},ih)':"
         "force_original_aspect_ratio=decrease"
     )
-    if config.CROP_DISABLED:
+    if crop_disabled:
         # box is unused in this mode -- no validation needed, since it never affects the result
         # (the frame is scaled down but never cropped to a region).
         return scale_filter
@@ -96,7 +103,7 @@ def _build_vf_filter(box: list[float], max_dimension: int) -> str:
     w, h = x2 - x1, y2 - y1
     if w <= 0 or h <= 0:
         raise ValueError(f"Invalid box {box}: width={w}, height={h} must both be positive")
-    pad_x, pad_y = w * config.CROP_PADDING_PCT, h * config.CROP_PADDING_PCT
+    pad_x, pad_y = w * crop_padding_pct, h * crop_padding_pct
     crop_x1 = max(0, x1 - pad_x)
     crop_y1 = max(0, y1 - pad_y)
     crop_x2 = min(config.RECORD_WIDTH, x2 + pad_x)
@@ -105,8 +112,11 @@ def _build_vf_filter(box: list[float], max_dimension: int) -> str:
     return f"{crop_filter},{scale_filter}"
 
 
-def crop_and_scale(clip_url: str, timestamp_offset: float, box: list[float]) -> str:
-    vf = _build_vf_filter(box, config.MAX_CROP_DIMENSION)
+def crop_and_scale(
+    clip_url: str, timestamp_offset: float, box: list[float],
+    crop_disabled: bool | None = None, crop_padding_pct: float | None = None,
+) -> str:
+    vf = _build_vf_filter(box, config.MAX_CROP_DIMENSION, crop_disabled, crop_padding_pct)
 
     with tempfile.TemporaryDirectory() as tmp:
         frame_path = os.path.join(tmp, "frame.jpg")
@@ -158,7 +168,7 @@ _VISIT_PREVIEW_EDGE_MARGIN_SECONDS = 0.3
 _MIN_DURATION_RATIO = 0.5
 
 
-def _panels_from_clip(clip_url: str, visit: dict, tmp: str) -> list[str]:
+def _panels_from_clip(clip_url: str, visit: dict, tmp: str, frame_percentages: list[float] | None = None) -> list[str]:
     # Used when a visit video is already downloaded (alert_video_worker) -- a single known-good
     # file, so probing its real duration and sampling proportionally across it is trustworthy (no
     # race left to guard against once the whole clip is sitting on disk). Returns the 4 raw
@@ -178,10 +188,12 @@ def _panels_from_clip(clip_url: str, visit: dict, tmp: str) -> list[str]:
             f"finished writing this recording segment yet"
         )
 
+    if frame_percentages is None:
+        frame_percentages = config.VISIT_PREVIEW_FRAME_PERCENTAGES
     usable = max(duration - 2 * _VISIT_PREVIEW_EDGE_MARGIN_SECONDS, 0.0)
     offsets = [
         _VISIT_PREVIEW_EDGE_MARGIN_SECONDS + (pct / 100) * usable
-        for pct in config.VISIT_PREVIEW_FRAME_PERCENTAGES
+        for pct in frame_percentages
     ]
 
     raw_paths = []
@@ -215,16 +227,18 @@ def _grab_frame_near_timestamp(camera: str, timestamp: float, frame_path: str) -
     return os.path.exists(frame_path)
 
 
-def _panels_from_independent_timestamps(visit: dict, tmp: str) -> list[str]:
+def _panels_from_independent_timestamps(visit: dict, tmp: str, frame_percentages: list[float] | None = None) -> list[str]:
     # Returns the 4 raw (un-cropped, un-scaled) frame paths, already deduped (a gap reuses a
     # neighbor's raw path -- see below) -- same contract as _panels_from_clip, so the caller can
     # apply whatever size it needs each of them at.
+    if frame_percentages is None:
+        frame_percentages = config.VISIT_PREVIEW_FRAME_PERCENTAGES
     start_epoch = _as_datetime(visit["start_ts"]).timestamp()
     end_epoch = _as_datetime(visit["end_ts"]).timestamp()
     camera = visit["cameras"]
     timestamps = [
         start_epoch + (pct / 100) * (end_epoch - start_epoch)
-        for pct in config.VISIT_PREVIEW_FRAME_PERCENTAGES
+        for pct in frame_percentages
     ]
 
     raw_paths: list[str | None] = [None] * len(timestamps)
@@ -251,7 +265,11 @@ def _panels_from_independent_timestamps(visit: dict, tmp: str) -> list[str]:
     return filled_paths
 
 
-def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, str]:
+def build_visit_preview(
+    visit: dict, representative_event: dict,
+    frame_percentages: list[float] | None = None,
+    crop_disabled: bool | None = None, crop_padding_pct: float | None = None,
+) -> tuple[str, str]:
     # Returns (grid_image_base64, preview_gif_base64). Frigate's own thumb_time turned out
     # unreliable as a seek target -- its continuous-recording clip endpoint pads an unpredictable
     # amount of extra footage onto EITHER edge of the requested window, not consistently the same
@@ -274,8 +292,8 @@ def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, s
     # at a time rather than combining all 4 into one image, so it has no reason to share that
     # half-size constraint -- each of its frames is scaled to the SAME full MAX_CROP_DIMENSION a
     # normal single-event crop_image_base64 uses, not shrunk further for file-size's sake.
-    panel_vf = _build_vf_filter(box, config.MAX_CROP_DIMENSION // 2)
-    gif_frame_vf = _build_vf_filter(box, config.MAX_CROP_DIMENSION)
+    panel_vf = _build_vf_filter(box, config.MAX_CROP_DIMENSION // 2, crop_disabled, crop_padding_pct)
+    gif_frame_vf = _build_vf_filter(box, config.MAX_CROP_DIMENSION, crop_disabled, crop_padding_pct)
 
     with tempfile.TemporaryDirectory() as tmp:
         # Prefer a visit video alert_video_worker has already downloaded -- one known-good file,
@@ -290,11 +308,11 @@ def build_visit_preview(visit: dict, representative_event: dict) -> tuple[str, s
         raw_paths = None
         if local_video_path and os.path.isfile(local_video_path):
             try:
-                raw_paths = _panels_from_clip(local_video_path, visit, tmp)
+                raw_paths = _panels_from_clip(local_video_path, visit, tmp, frame_percentages)
             except ValueError:
                 pass
         if raw_paths is None:
-            raw_paths = _panels_from_independent_timestamps(visit, tmp)
+            raw_paths = _panels_from_independent_timestamps(visit, tmp, frame_percentages)
 
         # Both the grid panels and the GIF frames are just different-sized crops of the same 4
         # raw moments -- built here, once, from the same source frames.
@@ -353,23 +371,33 @@ def fetch_frigate_snapshot_base64(det_id: str) -> str:
     return base64.b64encode(resp.content).decode()
 
 
-def crop_event(raw_event: dict) -> dict:
+def crop_event(
+    raw_event: dict,
+    frigate_snapshot_enabled: bool | None = None,
+    crop_disabled: bool | None = None,
+    crop_frame_offset_pct: float | None = None,
+    crop_padding_pct: float | None = None,
+) -> dict:
     # sub_label/score come from this same Frigate API fetch (not the live MQTT "end" payload)
     # because LPR/sub_label resolution can settle after the event first fires -- this is the
     # settled, final read. Captured here rather than re-fetched later so the AI-processing
     # stage (n8n) never needs to call Frigate's API at all.
+    if frigate_snapshot_enabled is None:
+        frigate_snapshot_enabled = config.FRIGATE_SNAPSHOT_ENABLED
+    if crop_frame_offset_pct is None:
+        crop_frame_offset_pct = config.CROP_FRAME_OFFSET_PCT
     det_id = raw_event["det_id"]
     event = fetch_frigate_event(det_id)
     data = event.get("data") or {}
-    if config.FRIGATE_SNAPSHOT_ENABLED:
+    if frigate_snapshot_enabled:
         crop_image_base64 = fetch_frigate_snapshot_base64(det_id)
     else:
         box = compute_full_res_box(event)
         offset = compute_frame_offset_seconds(
-            raw_event["start_ts"], raw_event["end_ts"], config.CROP_FRAME_OFFSET_PCT,
+            raw_event["start_ts"], raw_event["end_ts"], crop_frame_offset_pct,
         )
         clip_url = f"{config.FRIGATE_API_BASE}/api/events/{det_id}/clip.mp4"
-        crop_image_base64 = crop_and_scale(clip_url, offset, box)
+        crop_image_base64 = crop_and_scale(clip_url, offset, box, crop_disabled, crop_padding_pct)
     return {
         "crop_image_base64": crop_image_base64,
         "sub_label": event.get("sub_label"),

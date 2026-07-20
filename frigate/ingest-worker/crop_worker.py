@@ -20,7 +20,14 @@ def process_claimed_event(row: dict, profile: dict | None = None) -> None:
     if row.get("crop_attempt_count", 0) == 0:
         time.sleep(config.CROP_INITIAL_WAIT_SECONDS)
     try:
-        result = crop.crop_event(row)
+        object_label = row.get("objects")
+        result = crop.crop_event(
+            row,
+            frigate_snapshot_enabled=profile_config.frigate_snapshot_enabled(profile, object_label),
+            crop_disabled=profile_config.crop_disabled(profile, object_label),
+            crop_frame_offset_pct=profile_config.crop_frame_offset_pct(profile, object_label),
+            crop_padding_pct=profile_config.crop_padding_pct(profile, object_label),
+        )
         db.mark_crop_done(event_id, result["crop_image_base64"], result["sub_label"], result["score"])
         logger.info("Cropped raw_event id=%s det_id=%s", event_id, row.get("det_id"))
 
@@ -29,7 +36,7 @@ def process_claimed_event(row: dict, profile: dict | None = None) -> None:
         # Never allowed to fail the crop stage -- telegram.py itself doesn't raise, but wrap
         # anyway (belt and suspenders, same spirit as the n8n workflow's onError branches).
         try:
-            mode = profile_config.telegram_events_mode(profile, row.get("objects"))
+            mode = profile_config.telegram_events_mode(profile, object_label)
             message_id = telegram.send_photo(result["crop_image_base64"], telegram.build_caption(row), mode=mode)
             if message_id is not None:
                 db.set_telegram_photo_message_id(event_id, message_id)

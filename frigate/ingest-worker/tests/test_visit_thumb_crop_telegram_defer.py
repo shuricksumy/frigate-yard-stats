@@ -123,7 +123,7 @@ def test_immediate_send_happens_when_thumb_crop_disabled(conn_ok, monkeypatch):
 
 def test_worker_sends_deferred_summary_on_successful_crop(conn_ok, monkeypatch):
     monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "all")
-    monkeypatch.setattr(visit_thumb_worker, "crop", type("C", (), {"build_visit_preview": staticmethod(lambda v, r: ("new-visit-crop", "new-visit-gif"))}))
+    monkeypatch.setattr(visit_thumb_worker, "crop", type("C", (), {"build_visit_preview": staticmethod(lambda v, r, *a, **k: ("new-visit-crop", "new-visit-gif"))}))
     calls = []
     monkeypatch.setattr(
         visit_thumb_worker.telegram, "send_visit_summary",
@@ -156,7 +156,7 @@ def test_worker_sends_fallback_summary_once_crop_permanently_fails(conn_ok, monk
     monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "all")
     monkeypatch.setattr(config, "VISIT_THUMB_CROP_MAX_ATTEMPTS", 1)
 
-    def _boom(visit, representative):
+    def _boom(visit, representative, *a, **k):
         raise RuntimeError("clip not ready")
     monkeypatch.setattr(visit_thumb_worker, "crop", type("C", (), {"build_visit_preview": staticmethod(_boom)}))
     calls = []
@@ -191,7 +191,7 @@ def test_worker_does_not_send_summary_while_still_retrying(conn_ok, monkeypatch)
     monkeypatch.setattr(config, "VISIT_THUMB_CROP_RETRY_WAIT_SECONDS", 0)
     monkeypatch.setattr(config, "VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS", 0)
 
-    def _boom(visit, representative):
+    def _boom(visit, representative, *a, **k):
         raise RuntimeError("clip not ready")
     monkeypatch.setattr(visit_thumb_worker, "crop", type("C", (), {"build_visit_preview": staticmethod(_boom)}))
     calls = []

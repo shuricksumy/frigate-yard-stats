@@ -110,6 +110,57 @@ def test_crop_and_scale_skips_crop_filter_when_disabled(monkeypatch):
     assert "scale=" in captured_vf[0]
 
 
+def test_crop_and_scale_crop_disabled_param_overrides_global_config(monkeypatch):
+    # crop_disabled passed explicitly wins over config.CROP_DISABLED (as crop_worker.py does once
+    # resolved via profile_config.crop_disabled) -- a per-type override, not just the global flag.
+    monkeypatch.setattr(config, "CROP_DISABLED", False)
+    captured_vf = []
+
+    def fake_run(cmd, check, capture_output):
+        if "-vf" in cmd:
+            captured_vf.append(cmd[cmd.index("-vf") + 1])
+        if "-ss" in cmd:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"fake-frame-bytes")
+        else:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"fake-cropped-bytes")
+
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
+
+    result = crop.crop_and_scale(
+        "http://frigate.test/api/events/abc/clip.mp4", 5.0, [0, 0, 100, 100], crop_disabled=True,
+    )
+
+    assert result
+    assert "crop=" not in captured_vf[0]
+
+
+def test_crop_and_scale_crop_padding_pct_param_overrides_global_config(monkeypatch):
+    monkeypatch.setattr(config, "CROP_PADDING_PCT", 0.2)
+    captured_vf = []
+
+    def fake_run(cmd, check, capture_output):
+        if "-vf" in cmd:
+            captured_vf.append(cmd[cmd.index("-vf") + 1])
+        if "-ss" in cmd:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"fake-frame-bytes")
+        else:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"fake-cropped-bytes")
+
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
+
+    # box=[0,0,100,100] (100x100) with crop_padding_pct=0.0 -- no padding at all, so the crop
+    # filter's width/height should stay exactly 100x100 rather than the default 0.2 padding.
+    crop.crop_and_scale(
+        "http://frigate.test/api/events/abc/clip.mp4", 5.0, [0, 0, 100, 100], crop_padding_pct=0.0,
+    )
+
+    assert "crop=100.0:100.0:0:0" in captured_vf[0]
+
+
 def test_crop_and_scale_disabled_ignores_an_invalid_box(monkeypatch):
     # box is unused when CROP_DISABLED is set, so an otherwise-invalid box must not raise here --
     # it never affects the result in this mode.
@@ -324,6 +375,30 @@ def test_build_visit_preview_respects_configured_frame_percentages(monkeypatch):
     }
 
 
+def test_build_visit_preview_frame_percentages_param_overrides_global_config(monkeypatch):
+    # frame_percentages passed explicitly (as visit_thumb_worker.py does once resolved via
+    # profile_config.visit_preview_frame_percentages) wins over config.VISIT_PREVIEW_FRAME_PERCENTAGES
+    # entirely -- a per-type override, not just the global default.
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
+    monkeypatch.setattr(config, "VISIT_PREVIEW_FRAME_PERCENTAGES", [0, 25, 50, 100])
+    fake_run, calls = _fake_run_factory_for_preview()
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
+
+    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
+    representative_event = {"det_id": "1784219191.5-abc123"}
+
+    crop.build_visit_preview(visit, representative_event, frame_percentages=[5, 35, 65, 90])
+
+    grab_calls = [c for c in calls if "-ss" in c]
+    urls = {c[c.index("-i") + 1] for c in grab_calls}
+    assert urls == {
+        "http://frigate.test:5000/api/outside2/start/1784219186/end/1784219196/clip.mp4",  # 5%
+        "http://frigate.test:5000/api/outside2/start/1784219189/end/1784219199/clip.mp4",  # 35%
+        "http://frigate.test:5000/api/outside2/start/1784219192/end/1784219202/clip.mp4",  # 65%
+        "http://frigate.test:5000/api/outside2/start/1784219195/end/1784219205/clip.mp4",  # 90%
+    }
+
+
 def test_build_visit_preview_returns_distinct_grid_and_gif_images(monkeypatch):
     monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
     fake_run, _ = _fake_run_factory_for_preview()
@@ -355,6 +430,25 @@ def test_build_visit_preview_respects_crop_disabled_for_every_panel(monkeypatch)
     for c in panel_calls:
         assert "crop=" not in c[c.index("-vf") + 1]
         assert "scale=" in c[c.index("-vf") + 1]
+
+
+def test_build_visit_preview_crop_disabled_param_overrides_global_config(monkeypatch):
+    # crop_disabled passed explicitly (True) wins even though the global config default is False --
+    # same per-type-override precedent as frame_percentages above.
+    monkeypatch.setattr(config, "CROP_DISABLED", False)
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
+    fake_run, calls = _fake_run_factory_for_preview()
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
+
+    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
+    representative_event = {"det_id": "1784219191.5-abc123"}
+
+    crop.build_visit_preview(visit, representative_event, crop_disabled=True)
+
+    panel_calls = [c for c in calls if "-vf" in c and "-ss" not in c and "-framerate" not in c]
+    assert len(panel_calls) == 8
+    for c in panel_calls:
+        assert "crop=" not in c[c.index("-vf") + 1]
 
 
 def test_build_visit_preview_reuses_neighbor_frame_when_one_timestamp_has_no_footage(monkeypatch):
@@ -483,9 +577,42 @@ def test_crop_event_uses_record_stream_crop_when_snapshot_disabled(monkeypatch):
     def _fail_if_called(det_id):
         raise AssertionError("fetch_frigate_snapshot_base64 should not run when FRIGATE_SNAPSHOT_ENABLED is false")
     monkeypatch.setattr(crop, "fetch_frigate_snapshot_base64", _fail_if_called)
-    monkeypatch.setattr(crop, "crop_and_scale", lambda clip_url, offset, box: "record-stream-crop-base64")
+    monkeypatch.setattr(crop, "crop_and_scale", lambda clip_url, offset, box, *a, **k: "record-stream-crop-base64")
 
     raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
     result = crop.crop_event(raw_event)
 
     assert result == {"crop_image_base64": "record-stream-crop-base64", "sub_label": None, "score": 0.5}
+
+
+def test_crop_event_frigate_snapshot_enabled_param_overrides_global_config(monkeypatch):
+    # frigate_snapshot_enabled=False passed explicitly (as crop_worker.py does once resolved via
+    # profile_config.frigate_snapshot_enabled) wins over the global default being True -- a
+    # per-type override, e.g. one object type wants the seek-based crop while others use Frigate's
+    # own snapshot.
+    monkeypatch.setattr(config, "FRIGATE_SNAPSHOT_ENABLED", True)
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
+        "data": {"region": [0.1, 0.1, 0.2, 0.2], "score": 0.5}, "sub_label": None,
+    })
+
+    def _fail_if_called(det_id):
+        raise AssertionError("fetch_frigate_snapshot_base64 should not run when overridden off")
+    monkeypatch.setattr(crop, "fetch_frigate_snapshot_base64", _fail_if_called)
+
+    captured = {}
+
+    def fake_crop_and_scale(clip_url, offset, box, crop_disabled=None, crop_padding_pct=None):
+        captured["crop_disabled"] = crop_disabled
+        captured["crop_padding_pct"] = crop_padding_pct
+        captured["offset"] = offset
+        return "record-stream-crop-base64"
+    monkeypatch.setattr(crop, "crop_and_scale", fake_crop_and_scale)
+
+    raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
+    result = crop.crop_event(
+        raw_event, frigate_snapshot_enabled=False, crop_disabled=True,
+        crop_frame_offset_pct=0.9, crop_padding_pct=0.05,
+    )
+
+    assert result["crop_image_base64"] == "record-stream-crop-base64"
+    assert captured == {"crop_disabled": True, "crop_padding_pct": 0.05, "offset": 90.0}

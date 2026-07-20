@@ -78,6 +78,11 @@ analyzed:
   visit's own composite grid (`VISIT_THUMB_CROP_ENABLED`) is unaffected either way — a single
   Frigate snapshot has no multi-frame equivalent to offer it.
 
+All four of these (`crop_disabled`/`crop_frame_offset_pct`/`crop_padding_pct`/
+`frigate_snapshot_enabled`) can be overridden **per object type** in `profiles.yaml`, e.g. to have
+`car` use a seek-based crop with extra padding for plate legibility while everything else keeps
+using Frigate's own snapshot. See "Per-object-type overrides" below for how the override tiers work.
+
 ## Camera allow-list
 
 `CAMERAS` (optional, comma-separated, e.g. `outside,outside2`) — if set, only these cameras'
@@ -113,6 +118,12 @@ Both share the same download-retry tuning (`VIDEO_INITIAL_WAIT_SECONDS`, `VIDEO_
 Frigate needing a few seconds to finish writing a clip before it's downloadable, and skip a clip
 that's very likely already rolled off Frigate's recording buffer rather than retrying forever.
 
+`STORE_VIDEO`/`STORE_VIDEO_ALERTS` can each be overridden **per object type** in `profiles.yaml`
+(`store_video`/`store_video_alerts` keys) — e.g. skip storing clips for `person` while `car` still
+gets them. Setting either override `true` for at least one type starts that stage's poll thread
+even if the matching global env var is `false` (same precedent the AI stages below use). See
+"Per-object-type overrides" below.
+
 ## Visit previews (composite grid + GIF)
 
 `VISIT_THUMB_CROP_ENABLED` (default `false`) turns on a fifth artifact: once a visit (a Frigate
@@ -122,6 +133,10 @@ separate animated GIF (human preview only, in the web UI). `VISIT_PREVIEW_FRAME_
 (default `0,25,50,100`) controls exactly which 4 points get sampled — e.g. `5,35,65,90` to stay a
 little clear of both edges. See [`frigate.md`](frigate.md) for why this feature's reliability
 depends on your `record.continuous.days` setting.
+
+Both `visit_thumb_crop_enabled` and `visit_preview_frame_percentages` (as a real YAML list, not a
+comma-separated string) can be overridden **per object type** in `profiles.yaml` too — e.g. a
+slower-moving `car` visit might want frames spread wider than a `person` visit that's over quickly.
 
 ## Telegram notifications
 
@@ -151,11 +166,9 @@ To use either, you need a Telegram bot and your own chat ID:
 this is deliberately a place to A/B which granularity (and which of photo vs. video) is actually
 useful for your traffic rather than a choice you're expected to get right upfront.
 
-Both are global defaults only — `profiles.yaml` can override either **per object type**
-(`telegram_events_mode`/`telegram_alerts_mode` keys under that type's `object_types` entry), e.g.
-to silence a noisy low-priority type's notifications without changing the mode for everything
-else. Omit the override and that type just inherits the global default above. See
-`profile_config.py` and `profiles.yaml`'s own comments for the full list of per-type overrides.
+Both can be overridden **per object type** in `profiles.yaml` (`telegram_events_mode`/
+`telegram_alerts_mode` keys), e.g. to silence a noisy low-priority type's notifications without
+changing the mode for everything else. See "Per-object-type overrides" below.
 
 ## Retention
 
@@ -175,6 +188,41 @@ single Frigate object type, e.g. clean up just `dog` events without touching eve
 retention. Only ever affects events/sightings of that type — visits (which can span multiple
 distinct object types in one row) are never touched by a type-scoped purge; omit `object_label`
 (the default) to keep covering visits too, same as before this param existed.
+
+## Per-object-type overrides
+
+A number of settings above have a plain global `.env` default but can also be tuned per Frigate
+object type (`car`, `truck`, `person`, `dog`, or any label you've added) directly in
+`frigate/profiles.yaml`, without touching `.env` at all:
+
+- `telegram_events_mode` / `telegram_alerts_mode`
+- `ai_events_stage_enabled` / `ai_alerts_enabled`
+- `crop_disabled` / `crop_frame_offset_pct` / `crop_padding_pct` / `frigate_snapshot_enabled`
+- `store_video` / `store_video_alerts` / `visit_thumb_crop_enabled`
+- `visit_preview_frame_percentages` (a real YAML list of 4 numbers here, not a comma-separated string)
+
+Three tiers, checked in this order:
+
+1. That type's own `object_types.<label>` entry in `profiles.yaml` — highest priority.
+2. A profile-wide `defaults` section (optional, sits alongside `object_types` in the same file) —
+   applied to every type that doesn't set its own value for that key. Useful for "change this
+   everywhere except one or two exceptions" instead of repeating the same override on every type.
+3. The matching global `.env` var — the plain fallback, exactly as if none of the above existed.
+
+```yaml
+defaults:
+  store_video: false        # off for everything...
+object_types:
+  car:
+    store_video: true        # ...except cars
+    crop_padding_pct: 0.3
+  person:
+    telegram_events_mode: none
+```
+
+Omit any of these entirely and every type just inherits the global `.env` default, unchanged from
+before this feature existed. `frigate/profiles.yaml`'s own comments have the full list with
+examples; `profile_config.py` is the actual resolver code if you want the exact tie-break logic.
 
 ## Web UI
 
@@ -218,13 +266,13 @@ until you deliberately opt into one or both instead:
   without it, no visit ever has a grid ready to analyze, so this stage just stays idle. Can run
   alongside or instead of `AI_EVENTS_STAGE_ENABLED` — the two are fully independent queues.
 
-Both are global defaults only — `profiles.yaml` can override either **per object type**
-(`ai_events_stage_enabled`/`ai_alerts_enabled` keys), e.g. to run the events stage for `car`/
-`person` only while `dog` sits out, or to enable a stage for just one type even while the global
-flag stays `false`. Setting either override `true` for at least one type is enough to start that
-stage's poll thread even if its global env var is `false` — the thread then only claims the
-type(s) that resolve to enabled (their own override, or the global default when they don't set
-one), never every mapped type unconditionally.
+Both can be overridden **per object type** in `profiles.yaml` (`ai_events_stage_enabled`/
+`ai_alerts_enabled` keys), e.g. to run the events stage for `car`/`person` only while `dog` sits
+out, or to enable a stage for just one type even while the global flag stays `false`. Setting
+either override `true` for at least one type is enough to start that stage's poll thread even if
+its global env var is `false` — the thread then only claims the type(s) that resolve to enabled
+(their own override, or the global default when they don't set one), never every mapped type
+unconditionally. See "Per-object-type overrides" below.
 
 - Object types + prompts + per-type model slot/timeout live in **`frigate/profiles.yaml`** (repo
   root, alongside `docker-compose.yml`), not env vars — that's genuinely a lot of config to cram

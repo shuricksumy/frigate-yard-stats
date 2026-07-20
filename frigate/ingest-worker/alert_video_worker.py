@@ -62,7 +62,14 @@ def run_once(profile: dict | None = None) -> None:
     if available_capacity <= 0:
         return
 
-    for visit in db.claim_visit_video_batch(available_capacity, config.VIDEO_MAX_AGE_HOURS):
+    object_types, exclude_object_types = profile_config.store_video_alerts_claim_filter(profile)
+    if object_types == []:
+        # Base disabled, nothing opted in per-type -- nothing for this stage to do at all.
+        return
+    for visit in db.claim_visit_video_batch(
+        available_capacity, config.VIDEO_MAX_AGE_HOURS,
+        object_types=object_types, exclude_object_types=exclude_object_types,
+    ):
         process_claimed_visit(visit, profile)
 
 

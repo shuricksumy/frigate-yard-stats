@@ -27,7 +27,7 @@ services:
     # pgvector/pgvector:pg16 is a drop-in build on top of postgres:16 -- same data directory
     # format, existing volumes/data untouched -- that additionally bundles the `vector` extension
     # (CREATE EXTENSION vector, applied by schema.sql) for the semantic-search embedding columns
-    # on vehicle_sightings/person_sightings.
+    # on sightings/visit_sightings.
     image: pgvector/pgvector:pg16
     container_name: postgres-projects
     restart: unless-stopped
@@ -71,6 +71,9 @@ services:
       # Crop tuning -- MAX_CROP_DIMENSION caps the cropped JPEG's long side (VLMs downsample
       # beyond this anyway); CROP_PADDING_PCT is extra margin around Frigate's `region` box;
       # CROP_FRAME_OFFSET_PCT is where in the event's span to seek (0.5 = midpoint, the default).
+      # CROP_DISABLED/CROP_FRAME_OFFSET_PCT/CROP_PADDING_PCT/FRIGATE_SNAPSHOT_ENABLED below can all
+      # be overridden per Frigate object type in profiles.yaml (see profile_config.py) -- these
+      # env vars are just the global default a type falls back to when it doesn't set its own.
       MAX_CROP_DIMENSION: ${MAX_CROP_DIMENSION:-1280}
       # Smaller copy of the same crop for report/preview UIs (see report.py) -- not the same knob
       # as MAX_CROP_DIMENSION, which VLM calls still use at full size.
@@ -111,7 +114,8 @@ services:
       # Video storage (third queue stage, video_status) -- see video.py/video_worker.py.
       # Disabled by default; when on, clips are downloaded from Frigate's own clip.mp4 endpoint,
       # stored under /data/video (bind-mounted below), and only the filesystem path lives in
-      # Postgres (video_path).
+      # Postgres (video_path). Can be overridden per object type in profiles.yaml (store_video key)
+      # -- e.g. skip storing clips for one low-priority type while everything else still gets them.
       STORE_VIDEO: ${STORE_VIDEO:-false}
       VIDEO_STORAGE_PATH: /data/video
       VIDEO_PARALLEL_LIMIT: ${VIDEO_PARALLEL_LIMIT:-1}
@@ -127,7 +131,8 @@ services:
       # Independent video-storage switch for the alerts/visits flow (frigate/reviews) -- one clip
       # per visit's whole span, separate from STORE_VIDEO above. Shares the VIDEO_* tuning above,
       # but stored under its own mount point (/data/video-alerts, bind-mounted below) so the two
-      # flows' disk usage can be measured/managed independently.
+      # flows' disk usage can be measured/managed independently. Also overridable per object type
+      # in profiles.yaml (store_video_alerts key), same as STORE_VIDEO above.
       STORE_VIDEO_ALERTS: ${STORE_VIDEO_ALERTS:-false}
       VIDEO_STORAGE_PATH_ALERTS: /data/video-alerts
       # Independent visit-level preview -- a composite grid image sampling frames proportionally
@@ -135,7 +140,9 @@ services:
       # seeking to one precise "best moment" (Frigate's thumb_time turned out unreliable to seek
       # to -- see crop.build_visit_preview). Only known once the review closes, so this is a
       # separate poll-loop stage/artifacts (visits.crop_image_base64/preview_gif_base64), not a
-      # replacement for the events-flow crop. Off by default.
+      # replacement for the events-flow crop. Off by default. Both this flag and
+      # VISIT_PREVIEW_FRAME_PERCENTAGES below can be overridden per object type in profiles.yaml
+      # (visit_thumb_crop_enabled/visit_preview_frame_percentages keys).
       VISIT_THUMB_CROP_ENABLED: ${VISIT_THUMB_CROP_ENABLED:-false}
       VISIT_THUMB_CROP_PARALLEL_LIMIT: ${VISIT_THUMB_CROP_PARALLEL_LIMIT:-1}
       VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS: ${VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS:-5}
@@ -146,7 +153,8 @@ services:
       VISIT_PREVIEW_FRAME_PERCENTAGES: ${VISIT_PREVIEW_FRAME_PERCENTAGES:-0,25,50,100}
       # Telegram notifications -- none/image/video/all, not a bool (see telegram.py). "none" by
       # default; TELEGRAM_BOT_TOKEN/TELEGRAM_CHAT_ID only need to be set when either mode below
-      # isn't "none".
+      # isn't "none". Both TELEGRAM_EVENTS_MODE and TELEGRAM_ALERTS_MODE below can be overridden
+      # per object type in profiles.yaml (telegram_events_mode/telegram_alerts_mode keys).
       TELEGRAM_EVENTS_MODE: ${TELEGRAM_EVENTS_MODE:-none}
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
@@ -169,7 +177,10 @@ services:
       # section before enabling. Independent switches: AI_EVENTS_STAGE_ENABLED analyzes each
       # event's own crop with profiles.yaml's event_prompt; AI_ALERTS_ENABLED analyzes a visit's
       # composite grid (needs VISIT_THUMB_CROP_ENABLED=true to have anything to claim) with
-      # alert_prompt, storing results separately in visit_vehicle_sightings/visit_person_sightings.
+      # alert_prompt, storing results separately in visit_sightings. Both flags can be overridden
+      # per object type in profiles.yaml (ai_events_stage_enabled/ai_alerts_enabled keys) -- setting
+      # either true for at least one type starts that stage's poll thread even if the global flag
+      # here stays false.
       AI_EVENTS_STAGE_ENABLED: ${AI_EVENTS_STAGE_ENABLED:-false}
       AI_ALERTS_ENABLED: ${AI_ALERTS_ENABLED:-false}
       AI_STAGE_PROFILE_PATH: ${AI_STAGE_PROFILE_PATH:-/app/profiles.yaml}
