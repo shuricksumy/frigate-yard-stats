@@ -59,6 +59,20 @@ CREATE INDEX IF NOT EXISTS idx_visits_zone_ts ON yard_stats.visits (zone, start_
 CREATE INDEX IF NOT EXISTS idx_visits_video_status ON yard_stats.visits (video_status);
 CREATE INDEX IF NOT EXISTS idx_visits_thumb_crop_status ON yard_stats.visits (thumb_crop_status);
 
+-- Sixth queue stage (AI_ALERTS_ENABLED) -- analyzes the visit's own composite grid
+-- (crop_image_base64 above, built once thumb_crop_status='done') with alert_ai_worker.py, using
+-- profiles.yaml's alert_prompt (framed for 4-frames-of-change, unlike AI_EVENTS_STAGE_ENABLED's
+-- event_prompt which is framed for one static frame). Independent of raw_events.ai_status
+-- entirely -- a visit's alert-level analysis and its linked raw_events' own event-level analysis
+-- are two separate results, stored in two separate places (see visit_vehicle_sightings/
+-- visit_person_sightings below vs. vehicle_sightings/person_sightings), so both can run at once
+-- without one overwriting or blocking the other.
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS alert_ai_status TEXT NOT NULL DEFAULT 'new'
+  CHECK (alert_ai_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS alert_ai_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS alert_ai_attempt_count INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_visits_alert_ai_status ON yard_stats.visits (alert_ai_status);
+
 -- One row per Frigate "end" event, any label (car/truck/person/dog/...). Carries three
 -- independent queue state machines -- crop_status/video_status owned directly by ingest-worker,
 -- ai_status owned by n8n via ingest-worker's /ai-queue/* API -- see CLAUDE.md's "Architecture"
@@ -148,6 +162,38 @@ CREATE TABLE IF NOT EXISTS yard_stats.person_sightings (
 );
 CREATE INDEX IF NOT EXISTS idx_person_sightings_raw_event ON yard_stats.person_sightings (raw_event_id);
 
+-- One row per alert-stage-analyzed visit (AI_ALERTS_ENABLED) -- same shape as vehicle_sightings
+-- above, but keyed by visit_id instead of raw_event_id, since this analyzes the visit's own
+-- composite grid (visits.crop_image_base64) rather than any single raw_event's crop. A visit
+-- whose representative event is a vehicle gets at most one row here; there is no plate_text_frigate
+-- equivalent (Frigate's own LPR read is per-event, not per-visit).
+CREATE TABLE IF NOT EXISTS yard_stats.visit_vehicle_sightings (
+  id SERIAL PRIMARY KEY,
+  visit_id INTEGER REFERENCES yard_stats.visits(id),
+  color TEXT,
+  body_type TEXT,
+  make_guess TEXT,
+  make_confidence TEXT,
+  model_guess TEXT,
+  model_confidence TEXT,
+  notable_features TEXT,
+  plate_text_llm TEXT,
+  plate_confidence TEXT,
+  notes TEXT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_visit_vehicle_sightings_visit ON yard_stats.visit_vehicle_sightings (visit_id);
+
+-- One row per alert-stage-analyzed visit whose representative event is a person.
+CREATE TABLE IF NOT EXISTS yard_stats.visit_person_sightings (
+  id SERIAL PRIMARY KEY,
+  visit_id INTEGER REFERENCES yard_stats.visits(id),
+  description TEXT,
+  notes TEXT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_visit_person_sightings_visit ON yard_stats.visit_person_sightings (visit_id);
+
 -- Semantic search over AI-written sighting text, embedded via whatever model is loaded behind
 -- LLAMA_PROXY_EMBED_PATH (Qwen3-Embedding-0.6B-GGUF, 1024 dims, in this deployment). Nullable:
 -- only newly-analyzed sightings get one; existing rows stay searchable by every other filter, just
@@ -163,7 +209,13 @@ CREATE INDEX IF NOT EXISTS idx_person_sightings_raw_event ON yard_stats.person_s
 -- unconditional/idempotent, since it clears the column's data).
 ALTER TABLE yard_stats.vehicle_sightings ADD COLUMN IF NOT EXISTS embedding vector(__EMBEDDING_DIMENSIONS__);
 ALTER TABLE yard_stats.person_sightings ADD COLUMN IF NOT EXISTS embedding vector(__EMBEDDING_DIMENSIONS__);
+ALTER TABLE yard_stats.visit_vehicle_sightings ADD COLUMN IF NOT EXISTS embedding vector(__EMBEDDING_DIMENSIONS__);
+ALTER TABLE yard_stats.visit_person_sightings ADD COLUMN IF NOT EXISTS embedding vector(__EMBEDDING_DIMENSIONS__);
 CREATE INDEX IF NOT EXISTS idx_vehicle_sightings_embedding ON yard_stats.vehicle_sightings
   USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_person_sightings_embedding ON yard_stats.person_sightings
+  USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_visit_vehicle_sightings_embedding ON yard_stats.visit_vehicle_sightings
+  USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_visit_person_sightings_embedding ON yard_stats.visit_person_sightings
   USING hnsw (embedding vector_cosine_ops);

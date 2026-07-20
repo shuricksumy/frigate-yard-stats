@@ -76,7 +76,7 @@ def _ensure_embedding_dimension() -> None:
     # regardless), which is only safe to run when the dimension is actually changing -- running it
     # unconditionally on every startup would silently wipe every embedding on every restart, even
     # when nothing changed.
-    for table in ("vehicle_sightings", "person_sightings"):
+    for table in ("vehicle_sightings", "person_sightings", "visit_vehicle_sightings", "visit_person_sightings"):
         current = _current_embedding_dimension(table)
         if current is not None and current != config.EMBEDDING_DIMENSIONS:
             logger.warning(
@@ -122,6 +122,130 @@ def get_status_breakdown() -> list:
         """,
         fetch=True,
     )
+
+
+def get_table_row_counts() -> dict:
+    # Total rows per table, for the admin dashboard's headline numbers -- deliberately just counts,
+    # not filtered by status/date, since get_stage_counts()/get_retention_info() already cover the
+    # "how many are in what state" and "how far back does data go" angles.
+    return {
+        "raw_events": _execute("SELECT count(*)::int AS c FROM yard_stats.raw_events", fetch=True)[0]["c"],
+        "visits": _execute("SELECT count(*)::int AS c FROM yard_stats.visits", fetch=True)[0]["c"],
+        "vehicle_sightings": _execute("SELECT count(*)::int AS c FROM yard_stats.vehicle_sightings", fetch=True)[0]["c"],
+        "person_sightings": _execute("SELECT count(*)::int AS c FROM yard_stats.person_sightings", fetch=True)[0]["c"],
+        "visit_vehicle_sightings": _execute("SELECT count(*)::int AS c FROM yard_stats.visit_vehicle_sightings", fetch=True)[0]["c"],
+        "visit_person_sightings": _execute("SELECT count(*)::int AS c FROM yard_stats.visit_person_sightings", fetch=True)[0]["c"],
+    }
+
+
+def get_stage_counts() -> dict:
+    # Per-stage status breakdown (crop/video/ai on raw_events; video/thumb_crop on visits) for the
+    # admin dashboard's queue-health section -- table/column names below are always one of the
+    # fixed literals passed by this function's own callers below, never caller-supplied, so
+    # building the query with an f-string carries no injection risk.
+    def _counts(table: str, column: str) -> dict:
+        rows = _execute(
+            f"SELECT {column} AS status, count(*)::int AS count FROM yard_stats.{table} "
+            f"GROUP BY {column} ORDER BY {column}",
+            fetch=True,
+        )
+        return {row["status"]: row["count"] for row in rows}
+
+    return {
+        "raw_events": {
+            "crop_status": _counts("raw_events", "crop_status"),
+            "video_status": _counts("raw_events", "video_status"),
+            "ai_status": _counts("raw_events", "ai_status"),
+        },
+        "visits": {
+            "video_status": _counts("visits", "video_status"),
+            "thumb_crop_status": _counts("visits", "thumb_crop_status"),
+            "alert_ai_status": _counts("visits", "alert_ai_status"),
+        },
+    }
+
+
+# (table, status_column, attempt_column, id_column) for every queue stage requeue_failed()
+# supports -- the whitelist requeue_failed() validates against, so a caller-supplied stage/table
+# name is never interpolated into SQL unchecked.
+_REQUEUE_TARGETS = {
+    ("raw_events", "crop"): ("yard_stats.raw_events", "crop_status", "crop_attempt_count", "crop_status_changed_at"),
+    ("raw_events", "video"): ("yard_stats.raw_events", "video_status", "video_attempt_count", "video_status_changed_at"),
+    ("raw_events", "ai"): ("yard_stats.raw_events", "ai_status", "ai_attempt_count", "ai_status_changed_at"),
+    ("visits", "video"): ("yard_stats.visits", "video_status", "video_attempt_count", "video_status_changed_at"),
+    ("visits", "thumb_crop"): ("yard_stats.visits", "thumb_crop_status", "thumb_crop_attempt_count", "thumb_crop_status_changed_at"),
+    ("visits", "alert_ai"): ("yard_stats.visits", "alert_ai_status", "alert_ai_attempt_count", "alert_ai_status_changed_at"),
+}
+
+
+def requeue_failed(table: str, stage: str) -> int:
+    # The exact fix applied by hand via sql/queue-debug.sql's "retry every ai-failed item" query,
+    # exposed as a real admin action instead of requiring direct psql access -- reset status back
+    # to 'retry' with a fresh attempt count, so the next poll tick/claim picks it back up. table/
+    # stage are validated against _REQUEUE_TARGETS before touching SQL, since they'd otherwise be
+    # caller-supplied strings.
+    target = _REQUEUE_TARGETS.get((table, stage))
+    if target is None:
+        raise ValueError(f"Unknown table/stage combination: {table}/{stage}")
+    sql_table, status_col, attempt_col, changed_col = target
+    rows = _execute(
+        f"UPDATE {sql_table} SET {status_col} = 'retry', {attempt_col} = 0, {changed_col} = now() "
+        f"WHERE {status_col} = 'failed' RETURNING 1",
+        fetch=True,
+    )
+    return len(rows)
+
+
+def get_db_size_info() -> dict:
+    # Total DB size plus a per-table breakdown (yard_stats' own tables only) for the admin
+    # dashboard's disk-usage section -- pg_total_relation_size includes indexes/TOAST, so this
+    # matches what actually shows up in `docker exec ... du` on the Postgres data volume, not just
+    # raw row bytes.
+    total = _execute("SELECT pg_database_size(current_database())::bigint AS b", fetch=True)[0]["b"]
+    tables = _execute(
+        """
+        SELECT relname AS table, pg_total_relation_size(c.oid)::bigint AS bytes
+        FROM pg_class c
+        JOIN pg_namespace n ON n.oid = c.relnamespace
+        WHERE n.nspname = 'yard_stats' AND c.relkind = 'r'
+        ORDER BY bytes DESC
+        """,
+        fetch=True,
+    )
+    return {"database_bytes": total, "tables": tables}
+
+
+def get_vector_index_status() -> dict:
+    # pgvector extension presence/version plus HNSW index health for the admin dashboard's vector
+    # DB section -- indisvalid=false (e.g. after a killed concurrent build) is exactly the
+    # condition the dashboard's "Reindex vector DB" button exists to fix.
+    ext = _execute("SELECT extversion FROM pg_extension WHERE extname = 'vector'", fetch=True)
+    indexes = _execute(
+        """
+        SELECT indexrelid::regclass::text AS index, indisvalid, indisready
+        FROM pg_index WHERE indexrelid::regclass::text IN (
+            'yard_stats.idx_vehicle_sightings_embedding', 'yard_stats.idx_person_sightings_embedding'
+        )
+        """,
+        fetch=True,
+    )
+    return {
+        "extension_installed": bool(ext),
+        "extension_version": ext[0]["extversion"] if ext else None,
+        "embedding_dimensions": config.EMBEDDING_DIMENSIONS,
+        "indexes": indexes,
+    }
+
+
+def reindex_vector_indexes() -> list[str]:
+    # REINDEX rebuilds the HNSW index structure in place -- fixes an indisvalid=false index (e.g.
+    # left behind by an interrupted build) and is the natural "tidy up" action after a large
+    # /embeddings/backfill run, without the brief index-gap a DROP+CREATE would introduce.
+    reindexed = []
+    for index in ("idx_vehicle_sightings_embedding", "idx_person_sightings_embedding"):
+        _execute(f"REINDEX INDEX yard_stats.{index}")
+        reindexed.append(index)
+    return reindexed
 
 
 def get_retention_info() -> dict:
@@ -1598,6 +1722,219 @@ def fail_ai_event(event_id: int, max_attempts: int) -> dict:
         fetch=True,
     )
     return rows[0]
+
+
+def reap_stale_alert_ai_processing(stale_minutes: int) -> None:
+    _execute(
+        """
+        UPDATE yard_stats.visits
+        SET alert_ai_status = 'retry', alert_ai_status_changed_at = now()
+        WHERE alert_ai_status = 'processing'
+          AND alert_ai_status_changed_at < now() - (%s * interval '1 minute')
+        """,
+        (stale_minutes,),
+    )
+
+
+def count_alert_ai_in_progress() -> int:
+    rows = _execute(
+        "SELECT count(*)::int AS c FROM yard_stats.visits WHERE alert_ai_status = 'processing'",
+        fetch=True,
+    )
+    return rows[0]["c"] if rows else 0
+
+
+def claim_alert_ai_batch(
+    object_types: list[str],
+    parallel_limit: int,
+    stale_minutes: int,
+    max_age_hours: float | None = None,
+) -> list:
+    # Sixth queue stage (AI_ALERTS_ENABLED), claiming from visits.alert_ai_status instead of
+    # raw_events.ai_status -- mirrors claim_ai_batch's reap-stale + count-in-progress + CTE-claim
+    # shape (same FOR UPDATE SKIP LOCKED reason). Unlike claim_ai_batch, this only ever claims a
+    # visit whose own composite grid is ready (thumb_crop_status='done') -- a visit with
+    # VISIT_THUMB_CROP_ENABLED off (or still building) simply has nothing this stage can analyze
+    # yet, so it stays alert_ai_status='new' indefinitely, same "nothing to do" treatment as an
+    # unmapped object type gets. object_types is matched against the visit's own *representative*
+    # event's objects (the single event the grid was actually framed around via its region/box),
+    # not visits.objects (a comma-joined list that can span several distinct types per visit,
+    # e.g. "car,person" -- see record_visit) -- the grid is inherently single-object-framed, so the
+    # representative event's own type is what determines which prompt/sighting_type applies.
+    reap_stale_alert_ai_processing(stale_minutes)
+    in_progress = count_alert_ai_in_progress()
+    capacity = max(0, parallel_limit - in_progress)
+    if capacity == 0:
+        return []
+
+    age_clause = ""
+    params: list = [object_types]
+    if max_age_hours is not None:
+        age_clause = "AND v.start_ts >= now() - (%s * interval '1 hour')"
+        params.append(max_age_hours)
+    params.append(capacity)
+
+    return _execute(
+        f"""
+        WITH claimable AS (
+            SELECT v.id FROM yard_stats.visits v
+            JOIN LATERAL (
+                SELECT re.objects FROM yard_stats.raw_events re
+                WHERE re.visit_id = v.id
+                ORDER BY re.start_ts ASC, re.id ASC
+                LIMIT 1
+            ) rep ON true
+            WHERE v.alert_ai_status IN ('new', 'retry')
+              AND v.thumb_crop_status = 'done'
+              AND rep.objects = ANY(%s)
+              {age_clause}
+            ORDER BY v.start_ts DESC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE yard_stats.visits
+        SET alert_ai_status = 'processing', alert_ai_status_changed_at = now()
+        FROM claimable
+        JOIN LATERAL (
+            SELECT re.objects, re.det_id, re.id AS representative_event_id
+            FROM yard_stats.raw_events re
+            WHERE re.visit_id = claimable.id
+            ORDER BY re.start_ts ASC, re.id ASC
+            LIMIT 1
+        ) rep ON true
+        WHERE yard_stats.visits.id = claimable.id
+        RETURNING yard_stats.visits.*, rep.objects, rep.det_id, rep.representative_event_id
+        """,
+        params,
+        fetch=True,
+    )
+
+
+def complete_visit_vehicle_sighting(
+    visit_id: int,
+    color: str | None,
+    body_type: str | None,
+    make_guess: str | None,
+    make_confidence: str | None,
+    model_guess: str | None,
+    model_confidence: str | None,
+    notable_features: str | None,
+    plate_text_llm: str | None,
+    plate_confidence: str | None,
+    notes: str | None,
+    embedding: list[float] | None = None,
+) -> int:
+    # Same insert-plus-mark-done-in-one-transaction shape as complete_vehicle_sighting, just
+    # against visit_vehicle_sightings/visits.alert_ai_status instead of vehicle_sightings/
+    # raw_events.ai_status. No plate_text_frigate equivalent -- Frigate's own LPR read
+    # (raw_events.sub_label) is per-event, this analysis is per-visit.
+    conn = get_conn()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO yard_stats.visit_vehicle_sightings
+                    (visit_id, color, body_type, make_guess, make_confidence,
+                     model_guess, model_confidence, notable_features,
+                     plate_text_llm, plate_confidence, notes, embedding)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
+                RETURNING id
+                """,
+                (visit_id, color, body_type, make_guess, make_confidence,
+                 model_guess, model_confidence, notable_features,
+                 plate_text_llm, plate_confidence, notes,
+                 _vector_literal(embedding)),
+            )
+            sighting_id = cur.fetchone()["id"]
+            cur.execute(
+                "UPDATE yard_stats.visits SET alert_ai_status = 'done', alert_ai_status_changed_at = now() WHERE id = %s",
+                (visit_id,),
+            )
+        conn.commit()
+        return sighting_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit = True
+
+
+def complete_visit_person_sighting(
+    visit_id: int, description: str | None, notes: str | None,
+    embedding: list[float] | None = None,
+) -> int:
+    conn = get_conn()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO yard_stats.visit_person_sightings (visit_id, description, notes, embedding)
+                VALUES (%s, %s, %s, %s::vector)
+                RETURNING id
+                """,
+                (visit_id, description, notes, _vector_literal(embedding)),
+            )
+            sighting_id = cur.fetchone()["id"]
+            cur.execute(
+                "UPDATE yard_stats.visits SET alert_ai_status = 'done', alert_ai_status_changed_at = now() WHERE id = %s",
+                (visit_id,),
+            )
+        conn.commit()
+        return sighting_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit = True
+
+
+def fail_alert_ai_event(visit_id: int, max_attempts: int) -> dict:
+    # Same retry-or-fail-with-cap CASE logic as fail_ai_event, against visits.alert_ai_status.
+    rows = _execute(
+        """
+        UPDATE yard_stats.visits
+        SET alert_ai_attempt_count = alert_ai_attempt_count + 1,
+            alert_ai_status = CASE WHEN alert_ai_attempt_count + 1 >= %s THEN 'failed' ELSE 'retry' END,
+            alert_ai_status_changed_at = now()
+        WHERE id = %s
+        RETURNING alert_ai_status, alert_ai_attempt_count
+        """,
+        (max_attempts, visit_id),
+        fetch=True,
+    )
+    return rows[0]
+
+
+def get_visit_alert_sighting(visit_id: int) -> dict | None:
+    # The visit's own alert-stage (2x2 grid) analysis, if AI_ALERTS_ENABLED has produced one --
+    # used by GET /visits/{id}/sightings so the web UI's Visits-tab lightbox can prefer this over
+    # the representative event's own per-event sighting (see get_sightings_for_visit), falling back
+    # to that when this is null (alert stage off, or not finished yet for this visit).
+    vehicle = _execute(
+        """
+        SELECT id, visit_id, color, body_type, make_guess, make_confidence,
+               model_guess, model_confidence, notable_features,
+               plate_text_llm, plate_confidence, notes
+        FROM yard_stats.visit_vehicle_sightings WHERE visit_id = %s
+        ORDER BY id DESC LIMIT 1
+        """,
+        (visit_id,), fetch=True,
+    )
+    if vehicle:
+        return {"sighting_type": "vehicle", **vehicle[0]}
+    person = _execute(
+        """
+        SELECT id, visit_id, description, notes
+        FROM yard_stats.visit_person_sightings WHERE visit_id = %s
+        ORDER BY id DESC LIMIT 1
+        """,
+        (visit_id,), fetch=True,
+    )
+    if person:
+        return {"sighting_type": "person", **person[0]}
+    return None
 
 
 def get_report_data(

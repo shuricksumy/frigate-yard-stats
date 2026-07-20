@@ -4,6 +4,7 @@ import threading
 import uvicorn
 
 import ai_worker
+import alert_ai_worker
 import alert_video_worker
 import config
 import crop_worker
@@ -35,8 +36,13 @@ def main():
         threading.Thread(target=visit_thumb_worker.run_forever, name="visit_thumb_worker", daemon=True).start()
     # Alternative to n8n/metadata-processor.json (see CLAUDE.md) -- off by default so a fresh
     # deploy still needs n8n for the AI stage until this is deliberately opted into.
-    if config.AI_STAGE_ENABLED:
+    if config.AI_EVENTS_STAGE_ENABLED:
         threading.Thread(target=ai_worker.run_forever, name="ai_worker", daemon=True).start()
+    # Independent switch, independent thread, independent queue (visits.alert_ai_status) -- can
+    # run alongside or instead of AI_EVENTS_STAGE_ENABLED, same "A/B independently" precedent as
+    # STORE_VIDEO_ALERTS/TELEGRAM_ALERTS_MODE.
+    if config.AI_ALERTS_ENABLED:
+        threading.Thread(target=alert_ai_worker.run_forever, name="alert_ai_worker", daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=config.API_PORT)
 
 

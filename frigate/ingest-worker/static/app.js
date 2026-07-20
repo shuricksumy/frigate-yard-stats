@@ -457,10 +457,22 @@ function eventsApp() {
           const resp = await fetch(`/visits/${event.visitId}/sightings`, { headers: { "X-API-Key": this.apiKey } });
           if (resp.ok) {
             const data = await resp.json();
-            this.lightboxGroups = [
-              ...data.vehicles.map((vs) => ({ title: "Vehicle", fields: this.vehicleFields(vs) })),
-              ...data.persons.map((ps) => ({ title: "Person", fields: this.personFields(ps) })),
-            ];
+            // Prefer the visit's own alert-stage analysis (AI_ALERTS_ENABLED, the 2x2 grid) when
+            // it's ready -- it's the richer, change-aware result this whole view exists for.
+            // Falls back to the per-event vehicles/persons (AI_EVENTS_STAGE_ENABLED) when the
+            // alert stage is off or hasn't finished this visit yet, so the lightbox never shows
+            // nothing just because one specific stage is still catching up.
+            if (data.alert_sighting) {
+              const title = data.alert_sighting.sighting_type === "vehicle" ? "Vehicle (alert analysis)" : "Person (alert analysis)";
+              const fields = data.alert_sighting.sighting_type === "vehicle"
+                ? this.vehicleFields(data.alert_sighting) : this.personFields(data.alert_sighting);
+              this.lightboxGroups = [{ title, fields }];
+            } else {
+              this.lightboxGroups = [
+                ...data.vehicles.map((vs) => ({ title: "Vehicle", fields: this.vehicleFields(vs) })),
+                ...data.persons.map((ps) => ({ title: "Person", fields: this.personFields(ps) })),
+              ];
+            }
           }
         } else {
           const resp = await fetch(`/events/${event.id}`, { headers: { "X-API-Key": this.apiKey } });

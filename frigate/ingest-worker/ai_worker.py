@@ -125,7 +125,7 @@ def _embed_text(text: str | None) -> list[float] | None:
 def run_embedding_backfill(limit: int) -> dict:
     # POST /embeddings/backfill's confirm=true path -- fills in the embedding column for
     # sightings that existed before semantic search did (or came from a run that didn't attach
-    # one). Deliberately independent of AI_STAGE_ENABLED/process_claimed_event -- this only ever
+    # one). Deliberately independent of AI_EVENTS_STAGE_ENABLED/process_claimed_event -- this only ever
     # re-embeds each sighting's own already-stored fields, never re-runs the VLM, so it works
     # whether metadata-processor.json or this stage is your primary AI flow, or the AI stage isn't
     # running at all right now. Reuses the exact combination logic report.py's alerts report and
@@ -166,7 +166,7 @@ def process_claimed_event(row: dict, profile: dict) -> None:
     timeout = type_config.get("timeout_seconds", config.AI_STAGE_DEFAULT_TIMEOUT_SECONDS)
 
     try:
-        response = _chat_request(type_config["chat_path"], type_config["prompt"], row["crop_image_base64"], timeout)
+        response = _chat_request(type_config["chat_path"], type_config["event_prompt"], row["crop_image_base64"], timeout)
         if sighting_type == "vehicle":
             fields = parse_vehicle_response(response, row)
             # Reuses report._vehicle_summary rather than a third copy of the same combination

@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Yard Stats -- Admin</title>
+<link rel="stylesheet" href="style.css">
+<!-- Vendored locally -- no CDN/outside requests. -->
+<script defer src="vendor/alpine.min.js"></script>
+</head>
+<body x-data="adminApp()" x-init="init()">
+
+  <!-- Login modal: shown until an api_key cookie is present -- same cookie/key the main /ui page
+       uses, so logging in on either page logs you in on both. -->
+  <div class="modal-backdrop" x-show="!hasApiKey" style="display:none">
+    <div class="modal">
+      <h2>Yard Stats -- Admin</h2>
+      <p>Enter your API key.</p>
+      <input type="password" x-model="apiKeyInput" placeholder="API key" @keydown.enter="saveApiKey()">
+      <button @click="saveApiKey()">Continue</button>
+      <p class="error" x-show="loginError" x-text="loginError"></p>
+    </div>
+  </div>
+
+  <div x-show="hasApiKey" style="display:none">
+    <header>
+      <h1>Admin</h1>
+      <div>
+        <a class="link-button" href="/ui">&larr; Back to report UI</a>
+        <button class="link-button" @click="logout()">Change API key</button>
+      </div>
+    </header>
+
+    <p class="status-line" x-show="loadError" x-text="loadError" style="color:#ff6b6b"></p>
+    <p class="status-line" x-show="lastRefreshed">Last refreshed: <span x-text="lastRefreshed"></span> &middot; <button class="link-button" @click="refreshAll()">Refresh now</button></p>
+
+    <!-- ============ Health / feature flags ============ -->
+    <section class="admin-card">
+      <h2>Health</h2>
+      <div class="admin-flags" x-show="overview">
+        <template x-for="flag in flagEntries()" :key="flag.label">
+          <span class="flag" :class="flag.ok ? 'flag-on' : 'flag-off'" x-text="flag.label + ': ' + flag.value"></span>
+        </template>
+      </div>
+      <div class="admin-row">
+        <div>
+          <strong>Embedding backend</strong>
+          <button @click="checkEmbeddingBackend()" :disabled="checkingEmbed">Check now</button>
+          <span x-show="embedCheck" :class="embedCheck && embedCheck.ok ? 'ok-text' : 'bad-text'" x-text="embedCheck ? (embedCheck.ok ? 'OK -- ' + embedCheck.dimensions + ' dims' : 'FAILED -- ' + embedCheck.detail) : ''"></span>
+        </div>
+      </div>
+      <div class="admin-row" x-show="overview">
+        <div>
+          <strong>Vector index</strong>
+          -- pgvector <span x-text="overview && overview.vector_index.extension_version"></span>,
+          expects <span x-text="overview && overview.vector_index.embedding_dimensions"></span> dims
+          <template x-for="idx in (overview ? overview.vector_index.indexes : [])" :key="idx.index">
+            <span class="flag" :class="idx.indisvalid ? 'flag-on' : 'flag-off'" x-text="idx.index.split('.').pop() + ': ' + (idx.indisvalid ? 'valid' : 'INVALID')"></span>
+          </template>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============ Counts ============ -->
+    <section class="admin-card" x-show="overview">
+      <h2>Counts</h2>
+      <div class="stat-grid">
+        <div class="stat-tile"><span class="stat-value" x-text="fmtNum(overview && overview.row_counts.raw_events)"></span><span class="stat-label">events</span></div>
+        <div class="stat-tile"><span class="stat-value" x-text="fmtNum(overview && overview.row_counts.visits)"></span><span class="stat-label">visits (alerts)</span></div>
+        <div class="stat-tile"><span class="stat-value" x-text="fmtNum(overview && overview.row_counts.vehicle_sightings)"></span><span class="stat-label">vehicle sightings</span></div>
+        <div class="stat-tile"><span class="stat-value" x-text="fmtNum(overview && overview.row_counts.person_sightings)"></span><span class="stat-label">person sightings</span></div>
+      </div>
+      <p class="status-line" x-show="overview">
+        Retention: <span x-text="overview && overview.retention.retention_months"></span> months
+        &middot; oldest surviving event:
+        <span x-text="overview && overview.retention.oldest_available_start_ts ? new Date(overview.retention.oldest_available_start_ts).toLocaleString() : 'n/a'"></span>
+      </p>
+    </section>
+
+    <!-- ============ Embedding coverage ============ -->
+    <section class="admin-card" x-show="overview">
+      <h2>Semantic search coverage</h2>
+      <div class="admin-row" x-show="overview">
+        <div>
+          Vehicle sightings: <strong x-text="overview && (overview.embeddings.vehicle_sightings_total - overview.embeddings.vehicle_sightings_missing)"></strong>
+          / <span x-text="overview && overview.embeddings.vehicle_sightings_total"></span> embedded
+        </div>
+        <div>
+          Person sightings: <strong x-text="overview && (overview.embeddings.person_sightings_total - overview.embeddings.person_sightings_missing)"></strong>
+          / <span x-text="overview && overview.embeddings.person_sightings_total"></span> embedded
+        </div>
+      </div>
+      <div class="admin-row">
+        <button @click="backfillEmbeddings()" :disabled="backfilling">Backfill missing embeddings</button>
+        <button @click="reindexVector()" :disabled="reindexing">Reindex vector DB</button>
+        <span x-show="backfillResult" x-text="backfillResult"></span>
+        <span x-show="reindexResult" x-text="reindexResult"></span>
+      </div>
+    </section>
+
+    <!-- ============ Queue health ============ -->
+    <section class="admin-card" x-show="overview">
+      <h2>Queue health</h2>
+      <template x-for="stage in stageList()" :key="stage.table + stage.stage">
+        <div class="admin-row queue-row">
+          <span class="queue-label" x-text="stage.table + ' / ' + stage.stage"></span>
+          <template x-for="[status, count] in Object.entries(stage.counts)" :key="status">
+            <span class="badge" :class="'ai-' + status" x-text="status + ': ' + count"></span>
+          </template>
+          <button
+            x-show="(stage.counts.failed || 0) > 0"
+            @click="requeueFailed(stage.table, stage.stage)"
+            :disabled="requeuing === (stage.table + stage.stage)">
+            Requeue <span x-text="stage.counts.failed"></span> failed
+          </button>
+          <span x-show="requeueResult[stage.table + stage.stage]" x-text="requeueResult[stage.table + stage.stage]"></span>
+        </div>
+      </template>
+    </section>
+
+    <!-- ============ Disk / DB usage ============ -->
+    <section class="admin-card">
+      <h2>Storage</h2>
+      <div class="stat-grid" x-show="diskUsage">
+        <div class="stat-tile"><span class="stat-value" x-text="fmtBytes(diskUsage && diskUsage.video_storage.bytes)"></span><span class="stat-label">video storage (<span x-text="diskUsage && diskUsage.video_storage.file_count"></span> files)</span></div>
+        <div class="stat-tile"><span class="stat-value" x-text="fmtBytes(diskUsage && diskUsage.video_storage_alerts.bytes)"></span><span class="stat-label">alert video storage (<span x-text="diskUsage && diskUsage.video_storage_alerts.file_count"></span> files)</span></div>
+        <div class="stat-tile"><span class="stat-value" x-text="fmtBytes(overview && overview.db_size.database_bytes)"></span><span class="stat-label">database total</span></div>
+      </div>
+      <p class="status-line" x-show="!diskUsage">Loading disk usage&hellip;</p>
+      <table class="admin-table" x-show="overview">
+        <thead><tr><th>Table</th><th>Size</th></tr></thead>
+        <tbody>
+          <template x-for="t in (overview ? overview.db_size.tables : [])" :key="t.table">
+            <tr><td x-text="t.table"></td><td x-text="fmtBytes(t.bytes)"></td></tr>
+          </template>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- ============ Retention purge ============ -->
+    <section class="admin-card">
+      <h2>Retention purge</h2>
+      <p class="status-line">Delete events (and their sightings/visits/video files) older than a chosen number of days. Always preview first -- nothing is deleted until you confirm.</p>
+      <div class="admin-row">
+        <label>
+          Older than (days)
+          <input type="number" min="1" x-model.number="purgeDays" style="width:100px">
+        </label>
+        <button @click="previewPurge()" :disabled="purging">Preview</button>
+        <button class="btn-danger" x-show="purgePreview" @click="confirmPurge()" :disabled="purging">Delete now</button>
+      </div>
+      <div x-show="purgePreview" class="admin-row">
+        <span>Would delete:</span>
+        <span x-text="'events: ' + (purgePreview && purgePreview.counts.raw_events)"></span>
+        <span x-text="'visits: ' + (purgePreview && purgePreview.counts.visits)"></span>
+        <span x-text="'vehicle sightings: ' + (purgePreview && purgePreview.counts.vehicle_sightings)"></span>
+        <span x-text="'person sightings: ' + (purgePreview && purgePreview.counts.person_sightings)"></span>
+        <span x-text="'video files: ' + (purgePreview && purgePreview.counts.video_files)"></span>
+      </div>
+      <p x-show="purgeResult" x-text="purgeResult"></p>
+    </section>
+
+  </div>
+
+  <script src="admin.js"></script>
+</body>
+</html>

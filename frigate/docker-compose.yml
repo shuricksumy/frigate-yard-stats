@@ -153,11 +153,16 @@ services:
       # Object labels your Frigate config actually produces -- drives the web UI's Type filter
       # dropdown (GET /object-types) so it doesn't need a frontend change to pick up a new label.
       OBJECT_TYPES: ${OBJECT_TYPES:-car,truck,person,dog}
-      # Internal AI stage (ai_worker.py) -- an alternative to n8n/metadata-processor.json, not a
-      # replacement for it (that workflow still works, just needs to stay deactivated in n8n while
-      # this is on, since both claim from the same ai_status queue). Off by default -- see
-      # CLAUDE.md's "Internal AI stage" section before enabling.
-      AI_STAGE_ENABLED: ${AI_STAGE_ENABLED:-false}
+      # Internal AI stages (ai_worker.py / alert_ai_worker.py) -- an alternative to
+      # n8n/metadata-processor.json, not a replacement for it (that workflow still works, just
+      # needs to stay deactivated in n8n while AI_EVENTS_STAGE_ENABLED is on, since both claim from
+      # the same ai_status queue). Both off by default -- see CLAUDE.md's "Internal AI stage"
+      # section before enabling. Independent switches: AI_EVENTS_STAGE_ENABLED analyzes each
+      # event's own crop with profiles.yaml's event_prompt; AI_ALERTS_ENABLED analyzes a visit's
+      # composite grid (needs VISIT_THUMB_CROP_ENABLED=true to have anything to claim) with
+      # alert_prompt, storing results separately in visit_vehicle_sightings/visit_person_sightings.
+      AI_EVENTS_STAGE_ENABLED: ${AI_EVENTS_STAGE_ENABLED:-false}
+      AI_ALERTS_ENABLED: ${AI_ALERTS_ENABLED:-false}
       AI_STAGE_PROFILE_PATH: ${AI_STAGE_PROFILE_PATH:-/app/profiles.yaml}
       AI_STAGE_PARALLEL_LIMIT: ${AI_STAGE_PARALLEL_LIMIT:-2}
       AI_STAGE_STALE_MINUTES: ${AI_STAGE_STALE_MINUTES:-5}
@@ -165,8 +170,9 @@ services:
       AI_STAGE_MAX_AGE_HOURS: ${AI_STAGE_MAX_AGE_HOURS:-}
       AI_STAGE_POLL_INTERVAL_SECONDS: ${AI_STAGE_POLL_INTERVAL_SECONDS:-5}
       # llama_slot_proxy's own base URL/token, called directly instead of going through n8n --
-      # only required when AI_STAGE_ENABLED is true. LLAMA_PROXY_TOKEN is optional (blank = no
-      # Authorization header sent -- llama_slot_proxy is unauthenticated on the LAN today).
+      # only required when AI_EVENTS_STAGE_ENABLED or AI_ALERTS_ENABLED is true. LLAMA_PROXY_TOKEN
+      # is optional (blank = no Authorization header sent -- llama_slot_proxy is unauthenticated on
+      # the LAN today).
       LLAMA_PROXY_BASE_URL: ${LLAMA_PROXY_BASE_URL:-}
       LLAMA_PROXY_TOKEN: ${LLAMA_PROXY_TOKEN:-}
       LLAMA_PROXY_EMBED_PATH: ${LLAMA_PROXY_EMBED_PATH:-/REPLACE_WITH_EMBED_SLOT/v1/embeddings}
@@ -195,9 +201,9 @@ services:
       # section) -- overrides the image-baked default at the same path
       # (AI_STAGE_PROFILE_PATH=/app/profiles.yaml), so editing frigate/profiles.yaml and
       # restarting the container is enough to change prompts/models, no image rebuild needed.
-      # Read-only since ai_worker.py only ever reads this file. Always mounted, same reasoning as
-      # the video mounts above -- harmless when AI_STAGE_ENABLED=false, no compose change needed
-      # to turn the stage on later.
+      # Read-only since ai_worker.py/alert_ai_worker.py only ever read this file. Always mounted,
+      # same reasoning as the video mounts above -- harmless when both AI stage flags are false,
+      # no compose change needed to turn either stage on later.
       - ./profiles.yaml:/app/profiles.yaml:ro
     depends_on:
       - postgres-projects

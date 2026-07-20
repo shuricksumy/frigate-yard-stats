@@ -24,7 +24,10 @@
   <div x-show="hasApiKey" style="display:none">
     <header>
       <h1>Yard Stats</h1>
-      <button class="link-button" @click="logout()">Change API key</button>
+      <div>
+        <a class="link-button" href="/ui/admin">Admin</a>
+        <button class="link-button" @click="logout()">Change API key</button>
+      </div>
     </header>
 
     <div class="view-toggle">

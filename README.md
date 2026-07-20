@@ -30,6 +30,9 @@ footage) — just to show the UI itself in motion.*
   same data — Events or Visits view, filters, a media lightbox with video/image/preview-GIF toggle.
 - A configurable retention sweep deletes data (DB rows and any stored video files) past a set age
   (default 12 months) automatically, plus an ad-hoc purge API for a caller-chosen cutoff.
+- An admin dashboard (`/ui/admin`) covers operational health: queue status per stage with a
+  one-click "requeue failed" action, semantic-search embedding coverage/backfill/reindex,
+  disk/database size, and a preview-then-confirm retention purge.
 
 ## Documentation
 

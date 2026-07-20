@@ -19,8 +19,14 @@ import db  # noqa: E402
 
 PROFILE = {
     "object_types": {"car": {"sighting_type": "vehicle"}, "person": {"sighting_type": "person"}},
-    "vehicle": {"chat_path": "/vehicle-slot/v1/chat/completions", "prompt": "vehicle prompt"},
-    "person": {"chat_path": "/person-slot/v1/chat/completions", "prompt": "person prompt"},
+    "vehicle": {
+        "chat_path": "/vehicle-slot/v1/chat/completions",
+        "event_prompt": "vehicle event prompt", "alert_prompt": "vehicle alert prompt",
+    },
+    "person": {
+        "chat_path": "/person-slot/v1/chat/completions",
+        "event_prompt": "person event prompt", "alert_prompt": "person alert prompt",
+    },
 }
 
 
@@ -97,8 +103,10 @@ def test_load_profile_parses_real_file():
     profile = ai_worker.load_profile(path)
     assert set(profile["object_types"]) == {"car", "truck", "person"}
     assert "dog" not in profile["object_types"]
-    assert profile["vehicle"]["prompt"]
-    assert profile["person"]["prompt"]
+    assert profile["vehicle"]["event_prompt"]
+    assert profile["vehicle"]["alert_prompt"]
+    assert profile["person"]["event_prompt"]
+    assert profile["person"]["alert_prompt"]
 
 
 # ---- run_once ----
@@ -152,7 +160,7 @@ def test_process_claimed_event_uses_profile_timeout(monkeypatch):
         "object_types": {"car": {"sighting_type": "vehicle"}},
         "vehicle": {
             "chat_path": "/vehicle-slot/v1/chat/completions",
-            "prompt": "vehicle prompt",
+            "event_prompt": "vehicle event prompt",
             "timeout_seconds": 42,
         },
     }

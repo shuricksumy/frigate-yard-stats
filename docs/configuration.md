@@ -21,11 +21,11 @@ once — bring it up in stages so if something looks wrong, you know which piece
    [`frigate.md`](frigate.md) for why the visit-preview feature specifically depends on your
    Frigate recording retention settings).
 4. **Turn on Telegram** whenever you want notifications — independent of everything else.
-5. **Semantic search and the internal AI stage are both separate, later opt-ins** — neither is
+5. **Semantic search and the internal AI stages are both separate, later opt-ins** — neither is
    needed to get the core pipeline or n8n's `metadata-processor.json` working. Turn on pgvector
    embeddings once you're already running `metadata-processor.json` successfully; only consider
-   the internal AI stage (`AI_STAGE_ENABLED`) once you're comfortable letting it replace that n8n
-   workflow.
+   the internal AI stages (`AI_EVENTS_STAGE_ENABLED`, `AI_ALERTS_ENABLED`) once you're comfortable
+   letting them replace or supplement that n8n workflow.
 
 ## Required settings
 
@@ -176,11 +176,20 @@ once with no `confirm` to see how many rows are missing an embedding, then repea
 hit zero. Needs `LLAMA_PROXY_BASE_URL` set (see "Internal AI stage" below) even if you're not using
 that stage for anything else — it's the only thing this endpoint needs from that section.
 
-## Internal AI stage (alternative to n8n's metadata-processor.json)
+## Internal AI stages (alternative to n8n's metadata-processor.json)
 
-Off by default (`AI_STAGE_ENABLED=false`) — n8n's `metadata-processor.json` is the AI stage until
-you deliberately opt into this instead. Don't run both against the same queue at once (see
-CLAUDE.md's "Internal AI stage" section for why that's wasteful, though not unsafe).
+Two independent stages, both off by default — n8n's `metadata-processor.json` is the AI stage
+until you deliberately opt into one or both instead:
+
+- **`AI_EVENTS_STAGE_ENABLED=false`** — analyzes each event's own single-frame crop with
+  `profiles.yaml`'s `event_prompt`. Don't run alongside n8n's `metadata-processor.json` against
+  the same queue at once (see CLAUDE.md's "Internal AI stage" section for why that's wasteful,
+  though not unsafe).
+- **`AI_ALERTS_ENABLED=false`** — analyzes a visit's own composite grid (4 frames sampled across
+  its span) with `profiles.yaml`'s `alert_prompt`, storing results separately in
+  `visit_vehicle_sightings`/`visit_person_sightings`. Requires `VISIT_THUMB_CROP_ENABLED=true` —
+  without it, no visit ever has a grid ready to analyze, so this stage just stays idle. Can run
+  alongside or instead of `AI_EVENTS_STAGE_ENABLED` — the two are fully independent queues.
 
 - Object types + prompts + per-type model slot/timeout live in **`frigate/profiles.yaml`** (repo
   root, alongside `docker-compose.yml`), not env vars — that's genuinely a lot of config to cram
@@ -188,11 +197,14 @@ CLAUDE.md's "Internal AI stage" section for why that's wasteful, though not unsa
   just edit it and restart `ingest-worker` — no rebuild needed. (`AI_STAGE_PROFILE_PATH`, default
   `/app/profiles.yaml`, is the path the bind mount lands on; you'd only touch this env var if you
   wanted to point at a differently-named file instead.) A Frigate object label with no entry in
-  this file (e.g. `dog`) is simply never analyzed by this stage.
+  this file (e.g. `dog`) is simply never analyzed by either stage. Each `vehicle`/`person` section
+  has two prompts, not one — `event_prompt` (single static frame) and `alert_prompt` (the 2x2
+  grid, framed to also describe what changed across the 4 frames, not just static attributes).
 - `AI_STAGE_PARALLEL_LIMIT`/`AI_STAGE_STALE_MINUTES`/`AI_STAGE_MAX_ATTEMPTS`/
   `AI_STAGE_MAX_AGE_HOURS`/`AI_STAGE_POLL_INTERVAL_SECONDS` — same queue-tuning shape as the crop
-  stage above, just for this stage's own `ai_status` claims.
-- `LLAMA_PROXY_BASE_URL` (required once `AI_STAGE_ENABLED=true`) — your
+  stage above, shared between both stages (each claims from its own separate queue, so this
+  doesn't mean they compete for capacity).
+- `LLAMA_PROXY_BASE_URL` (required once either stage is enabled) — your
   [`llama_slot_proxy`](https://github.com/shuricksumy/llama-slot-proxy)'s own base URL, called
   directly instead of going through n8n. `LLAMA_PROXY_TOKEN` is optional (blank = no
   `Authorization` header — `llama_slot_proxy` is unauthenticated on the LAN in most setups today).

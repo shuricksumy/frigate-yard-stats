@@ -78,12 +78,41 @@ class VisitSummary(BaseModel):
     has_video: bool
 
 
+class AlertVehicleSighting(BaseModel):
+    sighting_type: str
+    id: int
+    visit_id: int
+    color: str | None
+    body_type: str | None
+    make_guess: str | None
+    make_confidence: str | None
+    model_guess: str | None
+    model_confidence: str | None
+    notable_features: str | None
+    plate_text_llm: str | None
+    plate_confidence: str | None
+    notes: str | None
+
+
+class AlertPersonSighting(BaseModel):
+    sighting_type: str
+    id: int
+    visit_id: int
+    description: str | None
+    notes: str | None
+
+
 class VisitSightings(BaseModel):
     # One representative sighting per distinct object type the visit grouped together (see
     # claim_ai_batch's only_visit_representative comment in db.py) -- e.g. a car and a person in
     # the same visit each show up here, rather than just whichever was analyzed first.
     vehicles: list[VehicleSighting]
     persons: list[PersonSighting]
+    # The visit's own alert-stage (2x2 grid) analysis (AI_ALERTS_ENABLED), independent of the
+    # per-event vehicles/persons above -- null until that stage has produced one (feature off, or
+    # this visit's grid isn't ready/analyzed yet). The web UI prefers this when present, falling
+    # back to vehicles/persons otherwise.
+    alert_sighting: AlertVehicleSighting | AlertPersonSighting | None = None
 
 
 class CameraCount(BaseModel):

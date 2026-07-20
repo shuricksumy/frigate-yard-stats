@@ -211,17 +211,39 @@ TELEGRAM_ALERTS_MODE = _telegram_mode("TELEGRAM_ALERTS_MODE")
 OBJECT_TYPES = [t.strip() for t in _env("OBJECT_TYPES", "car,truck,person,dog").split(",") if t.strip()]
 
 # -------------------------------------------------
-# Internal AI stage (ai_worker.py) -- an alternative to n8n/metadata-processor.json, not a
-# replacement for it: that workflow is left untouched in the repo and can be re-enabled in n8n at
-# any time. Off by default, same convention as STORE_VIDEO/VISIT_THUMB_CROP_ENABLED above -- when
-# on, this thread claims the exact same ai_status='new'/'retry' rows metadata-processor.json's
-# "Claim Next Batch (API)" node does (via db.claim_ai_batch directly, not over HTTP), so the two
-# must not run against the same queue at the same time.
+# Internal AI stages (ai_worker.py / alert_ai_worker.py) -- an alternative to
+# n8n/metadata-processor.json, not a replacement for it: that workflow is left untouched in the
+# repo and can be re-enabled in n8n at any time. Off by default, same convention as
+# STORE_VIDEO/VISIT_THUMB_CROP_ENABLED above.
+#
+# Two independent stages, each with its own enable flag, queue, and prompt (profiles.yaml's
+# event_prompt vs alert_prompt) -- same "independent switch, shared tuning knobs" split this
+# project already uses for STORE_VIDEO vs STORE_VIDEO_ALERTS:
+#   AI_EVENTS_STAGE_ENABLED -- ai_worker.py, analyzes each raw_event's own single-frame crop with
+#     event_prompt. When on, this thread claims the exact same ai_status='new'/'retry' rows
+#     metadata-processor.json's "Claim Next Batch (API)" node does (via db.claim_ai_batch directly,
+#     not over HTTP), so the two must not run against the same queue at the same time. This is the
+#     renamed former AI_STAGE_ENABLED -- was previously the only stage; splitting it out clarifies
+#     that it only ever analyzed one event's own crop, never a visit's composite grid, regardless
+#     of VISIT_THUMB_CROP_ENABLED (a real gap: the grid was being built but never actually claimed
+#     or analyzed by this stage).
+#   AI_ALERTS_ENABLED -- alert_ai_worker.py, analyzes a visit's own composite grid
+#     (visits.crop_image_base64, built once thumb_crop_status='done') with alert_prompt, storing
+#     the result in visit_vehicle_sightings/visit_person_sightings -- a separate table from (and
+#     independent of) the events stage's own vehicle_sightings/person_sightings. Requires
+#     VISIT_THUMB_CROP_ENABLED to actually have anything to claim; if that's off, this stage just
+#     has nothing ready and stays idle, the same graceful no-op every other stage/object-type
+#     mismatch in this project already gets.
 # -------------------------------------------------
-AI_STAGE_ENABLED = _env("AI_STAGE_ENABLED", "false").lower() == "true"
+AI_EVENTS_STAGE_ENABLED = _env("AI_EVENTS_STAGE_ENABLED", "false").lower() == "true"
+AI_ALERTS_ENABLED = _env("AI_ALERTS_ENABLED", "false").lower() == "true"
 # Same idea as SCHEMA_SQL_PATH -- baked into the image by default, bind-mount a different file and
-# point this at it to customize prompts/models without a rebuild.
+# point this at it to customize prompts/models without a rebuild. Shared by both stages -- each
+# reads its own prompt key (event_prompt/alert_prompt) out of the same per-type profile section.
 AI_STAGE_PROFILE_PATH = _env("AI_STAGE_PROFILE_PATH", "/app/profiles.yaml")
+# Queue-tuning knobs below are shared between both stages (each stage claims from its own separate
+# queue -- raw_events.ai_status vs visits.alert_ai_status -- so sharing these doesn't mean they
+# compete for the same capacity).
 AI_STAGE_PARALLEL_LIMIT = int(_env("AI_STAGE_PARALLEL_LIMIT", "2"))
 AI_STAGE_STALE_MINUTES = int(_env("AI_STAGE_STALE_MINUTES", "5"))
 AI_STAGE_MAX_ATTEMPTS = int(_env("AI_STAGE_MAX_ATTEMPTS", "3"))
@@ -231,7 +253,8 @@ _ai_stage_max_age_hours_env = os.environ.get("AI_STAGE_MAX_AGE_HOURS")
 AI_STAGE_MAX_AGE_HOURS = float(_ai_stage_max_age_hours_env) if _ai_stage_max_age_hours_env else None
 AI_STAGE_POLL_INTERVAL_SECONDS = float(_env("AI_STAGE_POLL_INTERVAL_SECONDS", "5"))
 # llama_slot_proxy's own base URL, called directly instead of going through n8n -- e.g.
-# http://llama-proxy-host:port. Only required when AI_STAGE_ENABLED is true.
+# http://llama-proxy-host:port. Only required when AI_EVENTS_STAGE_ENABLED or AI_ALERTS_ENABLED is
+# true.
 LLAMA_PROXY_BASE_URL = _env("LLAMA_PROXY_BASE_URL", "").rstrip("/")
 # Optional -- llama_slot_proxy is unauthenticated on the LAN today (same as every VLM call n8n
 # makes directly), so this is future-proofing rather than a hard requirement. Blank means no

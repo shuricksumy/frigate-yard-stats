@@ -333,8 +333,13 @@ sighting -- is genuinely deterministic control flow; the only actual "AI" part i
 itself, which happens regardless of which language issues it. `ai_worker.py` is that same logic
 ported straight into `ingest-worker` as a real, testable Python poll-loop stage, following the
 exact same `process_claimed_event`/`run_once`/`run_forever` shape `crop_worker.py`/`video_worker.py`
-already use -- own daemon thread, started conditionally in `main.py` (`if config.AI_STAGE_ENABLED`),
-off by default like `STORE_VIDEO`/`VISIT_THUMB_CROP_ENABLED`. It calls the exact same three `db.py`
+already use -- own daemon thread, started conditionally in `main.py`
+(`if config.AI_EVENTS_STAGE_ENABLED`), off by default like `STORE_VIDEO`/`VISIT_THUMB_CROP_ENABLED`.
+This is the **events** stage specifically -- always analyzes a raw_event's own single-frame crop,
+never a visit's composite grid, regardless of `VISIT_THUMB_CROP_ENABLED`; see "Alert AI stage"
+below for the sibling stage that analyzes the grid. (Renamed from the original single
+`AI_STAGE_ENABLED` once a second, independent stage existed to split from -- see that section for
+why the split happened and the real gap it fixes.) It calls the exact same three `db.py`
 functions n8n's HTTP calls already wrap -- `claim_ai_batch`, `fail_ai_event`,
 `complete_vehicle_sighting`/`complete_person_sighting` -- directly rather than over HTTP, so **no
 `db.py`/`api.py`/schema change was needed at all** for the queue mechanics. `claim_ai_batch` already
@@ -360,10 +365,16 @@ Two-level structure: `object_types` maps a Frigate
 object label (`raw_events.objects`) to a `sighting_type` ("vehicle" or "person" -- which table/
 prompt/parsing shape to use); `vehicle`/`person` sections hold that type's `chat_path` (appended to
 `LLAMA_PROXY_BASE_URL` -- `llama_slot_proxy`'s convention is one URL path segment per model slot,
-e.g. `/spare/v1/chat/completions`, not a `model` field in the request body) and `prompt` (ported
-verbatim from `metadata-processor.json`'s `Call Qwen (Attributes + Plate)`/`Call VLM (Person)`
-nodes -- keep both in sync if you're switching between the two flows, so analysis quality doesn't
-change with the switch). **A Frigate object label with no `object_types` entry (e.g. `dog`, which
+e.g. `/spare/v1/chat/completions`, not a `model` field in the request body), shared by both stages,
+plus **two** separate prompts rather than one: `event_prompt` (this stage -- framed for the single
+static frame it actually receives) and `alert_prompt` (the alert stage below -- framed for the
+composite grid it receives instead). Originally a single `prompt` field, ported verbatim from
+`metadata-processor.json`'s `Call Qwen (Attributes + Plate)`/`Call VLM (Person)` nodes and already
+written as if it were receiving a 2x2 grid -- split in two once it became clear this stage never
+actually sent one (see "Alert AI stage" below). Keep `event_prompt` in sync with
+`metadata-processor.json`'s own node if you're switching between the two flows, so analysis quality
+doesn't change with the switch -- that n8n workflow only ever sends a single-frame crop today, same
+as this stage's `event_prompt`, never the grid. **A Frigate object label with no `object_types` entry (e.g. `dog`, which
 has no matching sightings table) is simply never claimed by this stage at all** -- its
 `object_types` keys become exactly the `object_types` list passed to `claim_ai_batch`, so an
 unmapped type's rows just stay `ai_status='new'` indefinitely, the same as if the stage were off for
@@ -406,6 +417,122 @@ daemon thread and Python releases the GIL during the blocking HTTP wait. The one
 the single global Postgres connection (`db.get_conn()`) every thread already uses -- `ai_worker.py`
 only touches it briefly, for the claim and the final insert, never while waiting on the VLM/
 embedding response.
+
+### Alert AI stage (`alert_ai_worker.py`) -- analyzes a visit's own composite grid
+
+#### The bug this fixes
+
+`profiles.yaml`'s original single `prompt` field was already written as if it were analyzing a
+2x2 grid ("This image is a 2x2 grid of 4 frames of the SAME vehicle...") -- but `ai_worker.py`'s
+`run_once` calls `db.claim_ai_batch` with none of `source="visits"`/`only_visit_representative`/
+`require_thumb_crop` set, so it behaves exactly like plain `source=events`: it claims individual
+`raw_events` and always analyzes that event's own single-frame crop (`crop.crop_and_scale`'s
+output, at `CROP_FRAME_OFFSET_PCT`), never `visits.crop_image_base64` (the composite grid). Those
+query params only ever existed for n8n's `POST /ai-queue/claim` -- `ai_worker.py` never wired them
+up. Confirmed live in production: every VLM call this stage made was analyzing a plain single
+frame while being told it was looking at 4 frames of motion, silently producing worse/inconsistent
+results (a "notable_features"/plate read based on one frame passed off as cross-referenced across
+4, a "what changed across the sequence" question a single static frame can't actually answer). Not
+a config toggle that was missed (`require_thumb_crop` defaulting to `false` is itself fine, an
+intentional latency/quality trade-off for n8n callers) -- `ai_worker.py` simply never requested the
+grid at all, under any configuration.
+
+#### The fix: two genuinely separate, independently-toggleable stages
+
+Rather than have one stage try to opportunistically use the grid when available (the n8n-facing
+`require_thumb_crop` approach, which still only produces one sighting per raw_event either way),
+this splits into two real stages with two real prompts, matching this project's existing precedent
+for every other events-vs-alerts split (`STORE_VIDEO`/`STORE_VIDEO_ALERTS`,
+`TELEGRAM_EVENTS_MODE`/`TELEGRAM_ALERTS_MODE`): independent enable flag, independent queue,
+independent poll thread, shared tuning knobs.
+
+- **`AI_EVENTS_STAGE_ENABLED`** (renamed from `AI_STAGE_ENABLED`) -- `ai_worker.py`, unchanged
+  behavior, now explicitly framed as the events-only stage. Uses `profiles.yaml`'s `event_prompt`.
+- **`AI_ALERTS_ENABLED`** -- `alert_ai_worker.py`, a new stage claiming from **`visits`**, not
+  `raw_events`, via a new sixth queue-state-machine column, `visits.alert_ai_status` (same
+  `new -> processing -> retry/failed -> done` shape, plus `alert_ai_status_changed_at`/
+  `alert_ai_attempt_count`, `idx_visits_alert_ai_status`). Uses `profiles.yaml`'s `alert_prompt`
+  against `visits.crop_image_base64` (the actual composite grid) -- the image this stage sends is
+  *always* the grid, never opportunistic, since that's the entire point of this stage existing.
+  Requires `VISIT_THUMB_CROP_ENABLED=true` to ever have anything to claim (`db.claim_alert_ai_batch`
+  hard-requires `thumb_crop_status='done'`) -- with it off, this stage just stays idle, the same
+  graceful "nothing to do" treatment an unmapped object type already gets elsewhere in this project,
+  not an error.
+
+Both stages can run at once, on or off independently -- an event's own `ai_status` and its visit's
+`alert_ai_status` are two entirely separate state machines on two separate tables, so the same
+underlying activity can be analyzed once per event (events stage) and once per visit (alerts
+stage) without either blocking or overwriting the other. Both are started conditionally in
+`main.py`, one `threading.Thread` each, same shape as every other opt-in poll-loop stage.
+
+#### `db.claim_alert_ai_batch` -- matching a visit to a single object type despite `visits.objects` being multi-valued
+
+`visits.objects` (populated by `record_visit` from Frigate's own `data.objects`, comma-joined --
+`mqtt_ingest.py`'s `",".join(data.get("objects") or [])`) can legitimately span more than one
+distinct type per visit (e.g. `"car,person"` -- see "Visit grouping" above). But the composite grid
+itself is inherently single-object-framed: `crop.build_visit_preview` crops all 4 sampled frames to
+one specific event's own region/box (the representative event's), not "the whole visit." So
+`object_types` filtering for this claim matches against the visit's own **representative** event's
+`objects` (`db.get_representative_event_for_visit`'s definition -- earliest-linked raw_event,
+`ORDER BY start_ts ASC, id ASC LIMIT 1`), joined in via `LATERAL` inside the claim's CTE, not
+`visits.objects` -- a visit spanning both a car and a person still gets exactly one alert analysis,
+of whichever type the grid was actually framed around. (This is a different, narrower matching
+concern from `claim_ai_batch`'s own `(visit_id, objects)` partitioning for `only_visit_representative`
+-- that dedups *raw_events* per type per visit for the *events* stage; this alerts-stage claim
+never touches `raw_events.ai_status` or that partitioning at all.) Same reap-stale +
+count-in-progress + CTE-`FOR UPDATE SKIP LOCKED` shape every other claim function in this project
+uses, newest-`start_ts`-first, with the same optional `max_age_hours` throughput safety valve
+`claim_ai_batch`/`claim_video_batch` already have.
+
+#### Storage: new tables, not new columns on existing ones
+
+`visit_vehicle_sightings`/`visit_person_sightings` -- new tables, same shape as
+`vehicle_sightings`/`person_sightings` (including their own nullable `embedding vector(N)` +
+HNSW index, sized off the same `EMBEDDING_DIMENSIONS`/`_ensure_embedding_dimension()` machinery),
+but keyed by `visit_id` instead of `raw_event_id`. Chosen over reusing the existing tables (adding
+a nullable `visit_id` + making `raw_event_id` nullable + a source discriminator) specifically
+because every other alerts-vs-events split in this project already keeps the two flows' storage
+fully separate rather than overloading one table/column set for both (`STORE_VIDEO_ALERTS`'s own
+`video_path`/storage directory, `visits.crop_image_base64`/`preview_gif_base64` vs.
+`raw_events.crop_image_base64`) -- this is purely additive, so zero risk to any existing query
+against `vehicle_sightings`/`person_sightings` (`report.py`, `/search/semantic`, the web UI's
+per-event lightbox, `/embeddings/backfill`), none of which needed to change at all.
+`db.complete_visit_vehicle_sighting`/`complete_visit_person_sighting` mirror
+`complete_vehicle_sighting`/`complete_person_sighting`'s insert-plus-mark-done-in-one-transaction
+shape exactly, just against `visits.alert_ai_status` instead of `raw_events.ai_status`; no
+`plate_text_frigate` equivalent exists on the visit-level table -- Frigate's own LPR read is
+per-event, not per-visit. `alert_ai_worker.parse_alert_vehicle_response`/
+`parse_alert_person_response` mirror `ai_worker.parse_vehicle_response`/`parse_person_response`
+(and directly reuse `ai_worker._chat_request`/`_sanitize_plate`/`_embed_text`/`_JSON_BLOB_RE` via
+`import ai_worker`, rather than a second copy of that request/parse/embed plumbing) -- the one
+real difference is `alert_prompt` asks for and gets a `notes` field the vehicle parser now
+actually captures (a short description of what changed across the 4 frames, e.g. "pulled into the
+driveway and parked"), where `event_prompt`/`parse_vehicle_response` never asked for one at all
+(single frame, nothing to describe "across").
+
+Currently out of scope, deliberately: `/embeddings/backfill` and `/search/semantic` don't cover
+`visit_vehicle_sightings`/`visit_person_sightings` yet -- freshly-analyzed alert sightings still
+get an embedding computed inline (same `_embed_text` call every events-stage sighting already
+gets), so there's no backlog needing a backfill on day one; wiring the read/backfill side to also
+cover these two tables is a reasonable follow-up once there's real data to search, not something
+this change needed to include to be complete.
+
+#### Web UI: `GET /visits/{id}/sightings` gains `alert_sighting`, preferred over the per-event fallback
+
+`db.get_visit_alert_sighting` (new) returns the visit's own `visit_vehicle_sightings`/
+`visit_person_sightings` row if one exists, `null` otherwise -- wired into the existing
+`GET /visits/{id}/sightings` response as one more field (`alert_sighting`) alongside the unchanged
+`vehicles`/`persons` lists, rather than a second endpoint, so the web UI's visit lightbox only
+needs the one fetch it already made. `static/app.js`'s `openLightbox` now prefers
+`data.alert_sighting` when present (labeled "Vehicle (alert analysis)"/"Person (alert analysis)"
+in the lightbox) and only falls back to the per-event `vehicles`/`persons` groups when it's `null`
+-- the same "richer artifact when available, graceful fallback otherwise" precedent this project
+already uses for the preview GIF/composite-grid/event-crop chain. This is deliberately a fallback,
+not an exclusive switch: a visit whose alert stage is off, or hasn't finished yet, still shows
+whatever per-event analysis already exists instead of an empty lightbox. On the Events tab (plain
+events, never visits), `GET /events/{id}`'s `vehicle_sighting`/`person_sighting` -- the events
+stage's own result -- is unaffected and unchanged; the alert stage/`alert_sighting` field only
+ever applies to the Visits tab.
 
 ### Video storage, Telegram notifications, and the web report UI
 
@@ -1124,14 +1251,14 @@ in `embedding` for sightings that existed before this feature did, or came from 
 attach one -- same dry-run-by-default shape `/retention/purge` already uses (`confirm` defaults to
 `false`, previews `db.count_sightings_missing_embedding()`'s counts with no embedding calls made;
 `confirm=true` actually processes up to `limit` rows per sighting type, call it repeatedly until
-both counts reach zero). Deliberately independent of `AI_STAGE_ENABLED`/`process_claimed_event` --
+both counts reach zero). Deliberately independent of `AI_EVENTS_STAGE_ENABLED`/`process_claimed_event` --
 it only ever re-embeds a sighting's own already-stored fields (`db.get_vehicle_sightings_missing_
 embedding`/`get_person_sightings_missing_embedding`), never re-runs the VLM, so it works whether
 `metadata-processor.json` or the internal AI stage is your primary AI flow, or neither is currently
 running. Reuses the exact same `report._vehicle_summary`/`_person_summary` combination logic and
 `ai_worker._embed_text` helper `process_claimed_event`'s own embed step already uses, so a
 backfilled row's embedding means the same thing as a freshly-computed one. Requires
-`LLAMA_PROXY_BASE_URL` to be set regardless of `AI_STAGE_ENABLED` (400 if it isn't, checked before
+`LLAMA_PROXY_BASE_URL` to be set regardless of `AI_EVENTS_STAGE_ENABLED` (400 if it isn't, checked before
 any row is touched) -- this is the one place a plain n8n-only deployment still needs that env var,
 specifically to backfill.
 
@@ -1187,6 +1314,84 @@ everywhere else in this project, this LangChain sub-node type requires a credent
 its base URL, it can't call a bare unauthenticated URL the way `Call Qwen (Attributes + Plate)` etc.
 do; the API Key field can be any placeholder value since `llama_slot_proxy` doesn't check it.
 
+### Admin dashboard (`/ui/admin`)
+
+A second static page alongside the report UI (`/ui`), for operational health/maintenance rather
+than browsing sightings -- born directly out of a real production incident (an embedding
+dimension mismatch that silently failed 34 events' AI analysis) that had to be diagnosed and fixed
+by hand over SSH/psql, following `sql/queue-debug.sql`'s manual queries. Every action this page
+exposes was previously only reachable that way; this turns them into real, authenticated buttons.
+Same auth as `/ui` -- shares the same `api_key` cookie (`static/admin.js` reuses the identical
+cookie name/mechanism as `static/app.js`, logging in on one page logs you into both), and every
+`/admin/*` endpoint requires `X-API-Key` like any other write/read endpoint beyond `/health`/
+`/status`. `GET /ui/admin` itself is a plain unauthenticated static page (same as `/ui/index.html`)
+-- the login modal and every actual data fetch is what's protected, not the HTML shell.
+
+Registered as an explicit `@app.get("/ui/admin")` route (`api.py`, just above the `/ui`
+`StaticFiles(html=True)` mount) rather than relying on the mount alone -- `StaticFiles(html=True)`
+only auto-resolves `index.html` for a directory path, not an arbitrary `/admin` -> `admin.html`
+mapping, so without this route the page would only be reachable at the uglier `/ui/admin.html`.
+Registered before the mount so it isn't shadowed; `static/admin.js`/shared `static/style.css` are
+still served fine through the mount itself (`/ui/admin.js`, `/ui/style.css`).
+
+**`GET /admin/overview`** is the dashboard's one fast-loading call -- row counts (`raw_events`/
+`visits`/`vehicle_sightings`/`person_sightings`, plus `visit_vehicle_sightings`/
+`visit_person_sightings` once the alert AI stage existed), per-stage queue status breakdown (`db.
+get_stage_counts()`: crop/video/ai on `raw_events`, video/thumb_crop/alert_ai on `visits`),
+embedding coverage (reuses `count_sightings_missing_embedding`), DB size (`db.get_db_size_info()` --
+`pg_database_size` total plus `pg_total_relation_size` per `yard_stats` table, so it matches what
+actually shows up on the Postgres data volume, not just row bytes), vector index health (`db.
+get_vector_index_status()` -- pgvector extension version, `EMBEDDING_DIMENSIONS`, and each HNSW
+index's `indisvalid`/`indisready`), `get_retention_info()` (already existed, reused as-is), and a
+feature-flags summary (`AI_EVENTS_STAGE_ENABLED`/`AI_ALERTS_ENABLED`/`STORE_VIDEO`/
+`STORE_VIDEO_ALERTS`/`VISIT_THUMB_CROP_ENABLED`/`CROP_DISABLED`/`TELEGRAM_EVENTS_MODE`/
+`TELEGRAM_ALERTS_MODE`) so "what's currently turned on" is visible at a glance instead of having to
+check `.env` by hand. Everything in this call is cheap SQL -- deliberately excludes anything
+that's a real filesystem walk or network call, so the dashboard's main section always loads fast
+regardless of video backlog size or whether the VLM host is reachable.
+
+**`GET /admin/disk-usage`** is split out specifically because it *is* a real filesystem walk
+(`admin.dir_size_bytes`, `os.walk` summing real file sizes under `VIDEO_STORAGE_PATH`/
+`VIDEO_STORAGE_PATH_ALERTS`) -- kept separate so a large video backlog's scan time never blocks the
+rest of the dashboard from rendering. A path that doesn't exist (e.g. `VIDEO_STORAGE_PATH_ALERTS`
+when `STORE_VIDEO_ALERTS` has never been turned on) reports as zero bytes rather than an error --
+an unused optional storage location isn't a fault.
+
+**`GET /admin/embedding-backend/check`** is a live, on-demand smoke test against
+`LLAMA_PROXY_BASE_URL`/`LLAMA_PROXY_EMBED_PATH` (`admin.check_embedding_backend`) -- sends a tiny
+real embedding request and checks both that something answers at all and that the dimension
+matches `config.EMBEDDING_DIMENSIONS`, the exact same check `ai_worker._embed_text` already applies
+on every real call. Button-triggered rather than part of `/admin/overview` since it's a genuine
+network round-trip, not a cheap query -- this is precisely the check that would have caught the
+`llama-slot-proxy` embedding-slot outage (a `501 not_supported_error` from a `--embeddings`-less
+model) discovered live in production while building this feature, without needing to manually curl
+the endpoint from a shell.
+
+**`POST /admin/vector/reindex`** (`db.reindex_vector_indexes`) runs `REINDEX INDEX` on both HNSW
+embedding indexes -- fixes an `indisvalid=false` index (e.g. left behind by an interrupted
+concurrent build) and is a reasonable "tidy up" action after a large `/embeddings/backfill` run.
+Non-destructive to the underlying embedding data either way, so no confirmation step is needed
+(unlike retention purge below).
+
+**`POST /admin/queue/requeue-failed?table=<raw_events|visits>&stage=<...>`** (`db.requeue_failed`)
+is the exact fix `sql/queue-debug.sql`'s "retry every crop-failed / ai-failed item" query already
+documented for manual use, now a real button: resets every row at `{stage}_status='failed'` back
+to `'retry'` with `{stage}_attempt_count` reset to `0`, so the next poll tick/claim picks it back
+up. `table`/`stage` are validated against a fixed whitelist (`db._REQUEUE_TARGETS`) before ever
+touching SQL -- a `raw_events` row can be requeued for `crop`/`video`/`ai`, a `visits` row for
+`video`/`thumb_crop`/`alert_ai`; an unknown combination is a 400, not a SQL injection surface. The dashboard
+shows a "Requeue N failed" button next to any stage currently at 1+ failed, matching how this
+session's production incident (34 events failed on an embedding dimension mismatch) was actually
+resolved by hand over SSH before this button existed.
+
+**Embeddings backfill and retention purge are exposed as buttons too, reusing the existing
+endpoints unchanged** (`POST /embeddings/backfill?confirm=true&limit=200`, `POST /retention/purge`)
+-- no new backend logic, since both already had the right dry-run-by-default shape. The retention
+button specifically requires a native JS `confirm()` dialog spelling out exact row/file counts
+(from a mandatory preview call first) before the real `confirm=true` delete fires -- the same
+two-step preview-then-confirm flow the API itself already enforces, just made impossible to skip
+from the UI as well, since this is the one action on the page that's genuinely irreversible.
+
 ### Schema (`yard_stats`)
 
 - `raw_events` — one row per Frigate `end` event, any label. Carries all three queue state machines
@@ -1202,12 +1407,20 @@ do; the API Key field can be any placeholder value since `llama_slot_proxy` does
   cropping -- see below) and, when `VISIT_THUMB_CROP_ENABLED`, its own `crop_image_base64`
   (composite grid image) plus `preview_gif_base64` (animated GIF, human preview only) and
   `thumb_crop_status` state machine -- separate artifacts from any linked raw_event's own crop
-  (see "Visit preview" above).
+  (see "Visit preview" above). `alert_ai_status`/`alert_ai_status_changed_at`/
+  `alert_ai_attempt_count` (see "Alert AI stage" above) are this visit's own sixth queue stage,
+  entirely independent of any linked raw_event's `ai_status`.
 - `vehicle_sightings` / `person_sightings` — one row per AI-analyzed event. `vehicle_sightings`
   keeps `plate_text_frigate` (from `raw_events.sub_label`) next to `plate_text_llm` (the OCR
   model's read) as a cross-check. Both also carry a nullable `embedding vector(1024)` (pgvector,
   `Qwen3-Embedding-0.6B-GGUF`) for `POST /search/semantic` -- see "Semantic search and the Q&A
   agent" above.
+- `visit_vehicle_sightings` / `visit_person_sightings` — one row per alert-AI-analyzed visit (see
+  "Alert AI stage" above), keyed by `visit_id` instead of `raw_event_id` -- same shape as
+  `vehicle_sightings`/`person_sightings` (including their own nullable `embedding vector(1024)` +
+  HNSW index) minus `plate_text_frigate` (no per-visit LPR read exists), plus a `notes` field
+  `alert_prompt` actually populates with a description of what changed across the visit's 4
+  sampled frames.
 
 ### Prerequisites this plan assumes
 

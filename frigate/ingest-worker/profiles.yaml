@@ -4,15 +4,15 @@
 # takes effect; this copy only matters if that bind mount is ever removed. Keep the two in sync
 # yourself if you edit one.
 #
-# Configures the internal AI stage (ai_worker.py, only runs when AI_STAGE_ENABLED=true) -- an
-# alternative to n8n/metadata-processor.json, not a replacement for it: that workflow is left
-# untouched in the repo and can be re-enabled in n8n at any time (see CLAUDE.md's "Internal AI
-# stage" section).
+# Configures the two internal AI stages -- ai_worker.py (AI_EVENTS_STAGE_ENABLED) and
+# alert_ai_worker.py (AI_ALERTS_ENABLED), alternatives to n8n/metadata-processor.json, not a
+# replacement for it: that workflow is left untouched in the repo and can be re-enabled in n8n at
+# any time (see CLAUDE.md's "Internal AI stage" section).
 #
 # object_types maps a Frigate object label (raw_events.objects) to which prompt/sighting shape to
-# use. A label with no entry here is never claimed by this stage at all -- ai_status stays 'new'
-# indefinitely, exactly as if AI_STAGE_ENABLED were off for that one type. This is deliberate for
-# any type with no matching sightings table (e.g. 'dog') -- not a bug to fix.
+# use. A label with no entry here is never claimed by either stage at all -- ai_status (or
+# alert_ai_status) stays 'new' indefinitely, exactly as if that stage were off for that one type.
+# This is deliberate for any type with no matching sightings table (e.g. 'dog') -- not a bug to fix.
 object_types:
   car:
     sighting_type: vehicle
@@ -23,7 +23,18 @@ object_types:
 
 # One entry per sighting_type used above. chat_path is appended to LLAMA_PROXY_BASE_URL -- the
 # llama_slot_proxy convention already used by n8n's VLM calls is one URL path segment per model
-# slot (e.g. /spare/v1/chat/completions), not a "model" field in the request body.
+# slot (e.g. /spare/v1/chat/completions), not a "model" field in the request body. Shared between
+# both stages -- same model/slot answers either prompt, just with different instructions.
+#
+# Two separate prompts, for two genuinely different inputs:
+#   event_prompt -- ai_worker.py sends this with ONE single-frame crop (the raw_event's own
+#     region/box at CROP_FRAME_OFFSET_PCT). Framed for a single static moment -- no "grid"/
+#     "4 frames" language, since there's only ever one frame here.
+#   alert_prompt -- alert_ai_worker.py sends this with the visit's own composite grid (4 frames
+#     sampled across the visit's whole span, see CLAUDE.md's "Visit preview" section). Framed for
+#     both a confident static read (using whichever of the 4 panels shows a detail most clearly)
+#     AND a description of what changed/happened across the sequence -- something a single frame
+#     can never capture (e.g. "pulled in and parked" vs. "drove past").
 vehicle:
   chat_path: /REPLACE_WITH_VEHICLE_SLOT/v1/chat/completions
   # How long to wait for this type's chat completion, in seconds -- a local model on CPU/modest
@@ -32,16 +43,9 @@ vehicle:
   # omitted. Per-type (not a single global value) since different prompts/models have real
   # differences in load -- the person prompt below is much shorter and typically faster.
   timeout_seconds: 180
-  # Ported verbatim from n8n/metadata-processor.json's "Call Qwen (Attributes + Plate)" node --
-  # merged attributes + plate OCR in one call for speed. Keep this in sync with that node's prompt
-  # if you're running both this stage and metadata-processor.json at different times, so switching
-  # between them doesn't change analysis quality.
-  prompt: >-
-    This image is a 2x2 grid of 4 frames of the SAME vehicle captured moments apart during one
-    sighting (not 4 different vehicles) -- use all 4 panels together to give the single most
-    confident answer, since a detail unclear in one panel (angle, glare, motion blur) may be
-    legible in another, e.g. the plate. Respond with ONLY a JSON object, no other text before or
-    after it, no markdown, no explanation, and do not mention that the image is a grid:
+  event_prompt: >-
+    This image shows a single moment from one vehicle sighting. Respond with ONLY a JSON object,
+    no other text before or after it, no markdown, no explanation:
     {"color": string, "body_type": string (e.g. sedan/suv/truck/van/pickup/minivan), "make": string
     or null if unsure, "make_confidence": "low"|"medium"|"high", "model": string or null if unsure
     (e.g. "F-150", "Camry", "Model 3" -- the specific model, not just the make), "model_confidence":
@@ -50,16 +54,40 @@ vehicle:
     windows, decals or commercial branding/text, visible damage or rust, unusual color/wrap,
     aftermarket wheels/lift kit -- use null if the vehicle looks unremarkable, "plate_text": string
     or null}. plate_text must be ONLY the plate's characters (e.g. "10MG407") with no spaces,
+    punctuation, labels, or reasoning -- if no plate is visible or legible, use null. Do not
+    describe your process.
+  alert_prompt: >-
+    This image is a 2x2 grid of 4 frames of the SAME vehicle captured moments apart during one
+    visit (not 4 different vehicles) -- use all 4 panels together to give the single most
+    confident answer for the static attributes below, since a detail unclear in one panel (angle,
+    glare, motion blur) may be legible in another, e.g. the plate. Respond with ONLY a JSON
+    object, no other text before or after it, no markdown, no explanation, and do not mention that
+    the image is a grid:
+    {"color": string, "body_type": string (e.g. sedan/suv/truck/van/pickup/minivan), "make": string
+    or null if unsure, "make_confidence": "low"|"medium"|"high", "model": string or null if unsure
+    (e.g. "F-150", "Camry", "Model 3" -- the specific model, not just the make), "model_confidence":
+    "low"|"medium"|"high", "notable_features": string or null, a short phrase (under 10 words) for
+    anything visually distinctive -- roof rack, ladder rack, trailer hitch, bike rack, tinted
+    windows, decals or commercial branding/text, visible damage or rust, unusual color/wrap,
+    aftermarket wheels/lift kit -- use null if the vehicle looks unremarkable, "plate_text": string
+    or null, "notes": string or null, one short sentence describing what changed or happened across
+    the 4 frames in sequence (e.g. "pulled into the driveway and parked", "drove past left to
+    right", "reversed out and left") -- use null if the vehicle appears stationary/unchanged across
+    all 4 frames}. plate_text must be ONLY the plate's characters (e.g. "10MG407") with no spaces,
     punctuation, labels, or reasoning -- if no plate is visible or legible in any panel, use null.
     Do not describe your process.
 
 person:
   chat_path: /REPLACE_WITH_PERSON_SLOT/v1/chat/completions
   timeout_seconds: 180
-  # Ported verbatim from "Call VLM (Person)".
-  prompt: >-
+  event_prompt: >-
+    This image shows a single moment of one person. Describe their clothing colors and what they
+    appear to be doing in this one frame, in one short sentence. No speculation about identity.
+  alert_prompt: >-
     This image is a 2x2 grid of 4 frames of the SAME person captured moments apart during one
-    sighting (not 4 different people) -- use all 4 panels together, since a detail unclear in one
-    may be visible in another. Describe this person's clothing colors and what they appear to be
-    doing across the sequence, in one short sentence. No speculation about identity. Do not mention
-    that the image is a grid.
+    visit (not 4 different people) -- use all 4 panels together, since a detail unclear in one may
+    be visible in another. Describe this person's clothing colors (a static detail, most reliable
+    from whichever panel shows it most clearly) and what they appear to be doing across the
+    sequence -- e.g. walking toward the door, carrying something, getting in/out of a vehicle -- in
+    one short sentence covering both. No speculation about identity. Do not mention that the image
+    is a grid.

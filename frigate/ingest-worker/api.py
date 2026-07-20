@@ -6,6 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+import admin
 import ai_worker
 import config
 import crop
@@ -23,8 +24,8 @@ app = FastAPI(
         "mechanics (claim/complete/fail) n8n's Metadata Processor calls. /health, /status, "
         "/crop/{id}, /retention/run are unauthenticated admin/debug endpoints for manual testing "
         "-- not part of the normal pipeline. Everything under /events, /sightings, /stats, "
-        "/reports, /ai-queue, /retention/purge requires an X-API-Key header (use the Authorize "
-        "button below). "
+        "/reports, /ai-queue, /retention/purge, /admin requires an X-API-Key header (use the "
+        "Authorize button below). A web dashboard over the /admin/* endpoints is at /ui/admin. "
         "ingest-worker never calls an LLM itself -- the actual VLM call and prompt still live in "
         "n8n; this only executes the claim/retry-with-cap mechanics and stores whatever result "
         "n8n posts back. Swagger UI at /docs, ReDoc at /redoc."
@@ -95,7 +96,7 @@ def backfill_embeddings(
     """Fills in the embedding column for sightings that existed before semantic search was added
     (or came from any run that didn't attach one) -- calls llama_slot_proxy directly
     (LLAMA_PROXY_BASE_URL/LLAMA_PROXY_EMBED_PATH) to re-embed each sighting's own already-stored
-    fields, independent of AI_STAGE_ENABLED and without re-running the VLM. Defaults to a dry run
+    fields, independent of AI_EVENTS_STAGE_ENABLED and without re-running the VLM. Defaults to a dry run
     like /retention/purge: call once without confirm=true to see how many rows are missing an
     embedding, then repeatedly with confirm=true (bounded by limit per call) until both counts
     reach zero."""
@@ -184,10 +185,12 @@ def get_visit_sightings(visit_id: int):
     together (see its only_visit_representative comment), so a visit spanning e.g. a car and a
     person has one vehicle_sighting and one person_sighting here, not just whichever was analyzed
     first. GET /events/{id} still only ever returns a single event's own sighting; this is the
-    visit-scoped combined view the web UI's lightbox uses instead."""
+    visit-scoped combined view the web UI's lightbox uses instead. alert_sighting is the visit's
+    own AI_ALERTS_ENABLED analysis of its composite grid, independent of vehicles/persons above --
+    null until that stage has produced one for this visit."""
     if db.get_visit(visit_id) is None:
         raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
-    return db.get_sightings_for_visit(visit_id)
+    return {**db.get_sightings_for_visit(visit_id), "alert_sighting": db.get_visit_alert_sighting(visit_id)}
 
 
 @app.get("/events/{event_id}", response_model=schemas.EventDetail, tags=["events"], dependencies=[Depends(require_api_key)])
@@ -462,10 +465,101 @@ def fail_ai_event(
     return db.fail_ai_event(event_id, max_attempts)
 
 
+@app.get("/admin/overview", tags=["admin"], dependencies=[Depends(require_api_key)])
+def admin_overview():
+    """Everything the /ui/admin dashboard needs for its fast-loading section -- row counts,
+    per-stage queue status breakdown, embedding coverage, DB size, vector index health, retention
+    info, and the feature-flag switches currently on. Deliberately excludes anything that's a real
+    network/filesystem call (see /admin/disk-usage, /admin/embedding-backend/check) so this stays
+    cheap enough to load on every dashboard visit."""
+    missing_embeddings = db.count_sightings_missing_embedding()
+    row_counts = db.get_table_row_counts()
+    return {
+        "row_counts": row_counts,
+        "stage_counts": db.get_stage_counts(),
+        "embeddings": {
+            "vehicle_sightings_missing": missing_embeddings["vehicle_sightings"],
+            "vehicle_sightings_total": row_counts["vehicle_sightings"],
+            "person_sightings_missing": missing_embeddings["person_sightings"],
+            "person_sightings_total": row_counts["person_sightings"],
+        },
+        "db_size": db.get_db_size_info(),
+        "vector_index": db.get_vector_index_status(),
+        "retention": db.get_retention_info(),
+        "feature_flags": {
+            "ai_events_stage_enabled": config.AI_EVENTS_STAGE_ENABLED,
+            "ai_alerts_enabled": config.AI_ALERTS_ENABLED,
+            "store_video": config.STORE_VIDEO,
+            "store_video_alerts": config.STORE_VIDEO_ALERTS,
+            "visit_thumb_crop_enabled": config.VISIT_THUMB_CROP_ENABLED,
+            "crop_disabled": config.CROP_DISABLED,
+            "telegram_events_mode": config.TELEGRAM_EVENTS_MODE,
+            "telegram_alerts_mode": config.TELEGRAM_ALERTS_MODE,
+        },
+    }
+
+
+@app.get("/admin/disk-usage", tags=["admin"], dependencies=[Depends(require_api_key)])
+def admin_disk_usage():
+    """Walks VIDEO_STORAGE_PATH/VIDEO_STORAGE_PATH_ALERTS on disk to report real bytes used --
+    kept separate from /admin/overview since this is a real filesystem walk (can be slow with a
+    large video backlog), not a cheap SQL query."""
+    return {
+        "video_storage": admin.dir_size_bytes(config.VIDEO_STORAGE_PATH),
+        "video_storage_alerts": admin.dir_size_bytes(config.VIDEO_STORAGE_PATH_ALERTS),
+    }
+
+
+@app.get("/admin/embedding-backend/check", tags=["admin"], dependencies=[Depends(require_api_key)])
+def admin_check_embedding_backend():
+    """On-demand live smoke test against LLAMA_PROXY_BASE_URL/LLAMA_PROXY_EMBED_PATH -- confirms
+    it answers at all and returns EMBEDDING_DIMENSIONS-sized vectors, the same check every real
+    embedding call already makes. A real network call, so this is button-triggered from the
+    dashboard rather than loaded automatically."""
+    return admin.check_embedding_backend()
+
+
+@app.post("/admin/vector/reindex", tags=["admin"], dependencies=[Depends(require_api_key)])
+def admin_reindex_vector():
+    """Rebuilds both HNSW embedding indexes in place -- fixes an invalid index (e.g. left behind
+    by an interrupted build) and is a reasonable "tidy up" action after a large
+    /embeddings/backfill run. Non-destructive to the underlying data either way."""
+    return {"reindexed": db.reindex_vector_indexes()}
+
+
+@app.post("/admin/queue/requeue-failed", tags=["admin"], dependencies=[Depends(require_api_key)])
+def admin_requeue_failed(
+    table: str = Query(..., description="'raw_events' or 'visits'"),
+    stage: str = Query(..., description="raw_events: 'crop'/'video'/'ai'. visits: 'video'/'thumb_crop'."),
+):
+    """Resets every row currently stuck at {stage}_status='failed' back to 'retry' with a fresh
+    attempt count, so the next poll tick/claim picks it back up -- the exact fix
+    sql/queue-debug.sql's "retry every ai-failed item" query applies by hand, exposed as a real
+    button instead of requiring direct psql access."""
+    try:
+        count = db.requeue_failed(table, stage)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"table": table, "stage": stage, "requeued": count}
+
+
 # Static web report UI (index.html/app.js/style.css/vendor/*) -- all local files, no CDN
 # requests. Calls back into GET /events, /events/{id}/thumbnail, /media/video/{id} above using an
 # API key the user enters once and stores in a cookie. Baked into the image by the Dockerfile
 # (COPY static/ ./static/); mounted last so it doesn't shadow any API route above.
 _STATIC_DIR = os.path.join(os.path.dirname(__file__), "static")
+
+
+@app.get("/ui/admin", tags=["admin"], include_in_schema=False)
+def admin_ui():
+    """Clean URL for the admin dashboard (static/admin.html) -- registered before the /ui
+    StaticFiles mount below so it isn't shadowed; StaticFiles(html=True) only auto-resolves
+    index.html for a directory path, not arbitrary/admin -> admin.html, so this route is what
+    makes /ui/admin (no .html) work. Same unauthenticated-page-plus-client-side-key pattern as
+    /ui/index.html -- the page itself carries no data, every fetch() it makes still sends
+    X-API-Key and is protected server-side same as any other admin endpoint."""
+    return FileResponse(os.path.join(_STATIC_DIR, "admin.html"))
+
+
 if os.path.isdir(_STATIC_DIR):
     app.mount("/ui", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")

@@ -54,9 +54,14 @@ row, toggle buttons switch between them:
 Whichever is richest and already available opens by default (Preview, then Video, then Image) —
 the toggle buttons only appear when there's actually more than one to switch between.
 
-Below the media, once AI analysis has finished (`ai_status: done`), you'll see the actual
-extracted fields — color/body type/make/model/notable features/plate for a vehicle, a short
-description for a person. A visit that grouped both a vehicle and a person shows both, labeled
+Below the media, once AI analysis has finished, you'll see the actual extracted fields —
+color/body type/make/model/notable features/plate for a vehicle, a short description for a
+person. On the Events tab this is always the event's own single-frame analysis
+(`AI_EVENTS_STAGE_ENABLED`). On the Visits tab, it prefers that visit's own alert-stage analysis
+of the composite grid instead (`AI_ALERTS_ENABLED`, labeled "... (alert analysis)") — a richer
+result that also describes what changed across the visit, not just static attributes — falling
+back to the per-event analysis if the alert stage is off or hasn't finished that visit yet. A
+visit that grouped both a vehicle and a person shows both (per-event fallback only), labeled
 separately, rather than picking just one.
 
 A download button next to the close button grabs whichever of video/image is currently on screen.
@@ -80,3 +85,28 @@ filters — not just "there might be more data" from a full page of results.
 
 The checkbox next to the Search button keeps the current page's data refreshing on its own,
 without you needing to hit Search repeatedly while watching activity come in live.
+
+## Admin dashboard
+
+A separate page at `/ui/admin` (linked from the main report UI's header) for operational
+health/maintenance rather than browsing sightings — same login (the same API key/cookie works on
+both pages). It shows:
+
+- **Health** — feature flags currently on (AI stage, video storage, Telegram modes, etc.), pgvector
+  extension/index status, and an on-demand "Check now" button that live-tests your embedding
+  backend (`LLAMA_PROXY_EMBED_PATH`) and reports whether it's reachable and returning the right
+  vector size.
+- **Counts** — total events, visits, vehicle/person sightings, and retention info (how many months
+  you're keeping, and the oldest event still in the database).
+- **Semantic search coverage** — how many sightings have an embedding vs. don't, with buttons to
+  backfill missing ones or reindex the vector database.
+- **Queue health** — a status breakdown (new/processing/retry/failed/done) for every queue stage
+  (crop/video/AI on events, video/preview on visits). Any stage with failed rows gets a "Requeue N
+  failed" button — the same fix `frigate/sql/queue-debug.sql` documents for manual psql use, now a
+  real button instead of requiring shell access.
+- **Storage** — disk usage for stored video (main and alerts), plus Postgres database size broken
+  down per table.
+- **Retention purge** — pick a cutoff in days, hit Preview to see exactly what would be deleted
+  (row counts and video files), then Delete now, which asks for an explicit confirmation spelling
+  out those same numbers before anything is actually removed. Nothing is deleted from a single
+  click.
