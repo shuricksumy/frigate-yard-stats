@@ -1117,6 +1117,22 @@ sightings that predate this feature or came from an n8n run that didn't attach o
 narrower result set, not an error. Rows without their own embedding just aren't candidates, same as
 `GET /events`' `q` only ever matching rows that already have a sighting.
 
+**`POST /embeddings/backfill`** (`X-API-Key` protected, `ai_worker.run_embedding_backfill`) fills
+in `embedding` for sightings that existed before this feature did, or came from any run that didn't
+attach one -- same dry-run-by-default shape `/retention/purge` already uses (`confirm` defaults to
+`false`, previews `db.count_sightings_missing_embedding()`'s counts with no embedding calls made;
+`confirm=true` actually processes up to `limit` rows per sighting type, call it repeatedly until
+both counts reach zero). Deliberately independent of `AI_STAGE_ENABLED`/`process_claimed_event` --
+it only ever re-embeds a sighting's own already-stored fields (`db.get_vehicle_sightings_missing_
+embedding`/`get_person_sightings_missing_embedding`), never re-runs the VLM, so it works whether
+`metadata-processor.json` or the internal AI stage is your primary AI flow, or neither is currently
+running. Reuses the exact same `report._vehicle_summary`/`_person_summary` combination logic and
+`ai_worker._embed_text` helper `process_claimed_event`'s own embed step already uses, so a
+backfilled row's embedding means the same thing as a freshly-computed one. Requires
+`LLAMA_PROXY_BASE_URL` to be set regardless of `AI_STAGE_ENABLED` (400 if it isn't, checked before
+any row is touched) -- this is the one place a plain n8n-only deployment still needs that env var,
+specifically to backfill.
+
 **`GET /status`** additionally returns `retention_months` (`config.RETENTION_MONTHS`) and
 `oldest_available_start_ts` (`db.get_retention_info`, `MIN(raw_events.start_ts)`) -- lets the Q&A
 agent tell "nothing happened in that range" apart from "that range was already purged" instead of

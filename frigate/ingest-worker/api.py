@@ -6,6 +6,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 
+import ai_worker
 import config
 import crop
 import crop_worker
@@ -84,6 +85,25 @@ def purge_old_records(
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
     counts = db.purge_older_than(cutoff, execute=confirm)
     return {"cutoff": cutoff, "dry_run": not confirm, "counts": counts}
+
+
+@app.post("/embeddings/backfill", tags=["sightings"], dependencies=[Depends(require_api_key)])
+def backfill_embeddings(
+    limit: int = Query(50, ge=1, le=500, description="Max rows per sighting type to process in this call -- call repeatedly (each with confirm=true) until the counts reach zero for a larger backlog."),
+    confirm: bool = Query(False, description="Must be true to actually call the embedding model and update rows. Omitted/false previews counts only -- no embedding calls are made."),
+):
+    """Fills in the embedding column for sightings that existed before semantic search was added
+    (or came from any run that didn't attach one) -- calls llama_slot_proxy directly
+    (LLAMA_PROXY_BASE_URL/LLAMA_PROXY_EMBED_PATH) to re-embed each sighting's own already-stored
+    fields, independent of AI_STAGE_ENABLED and without re-running the VLM. Defaults to a dry run
+    like /retention/purge: call once without confirm=true to see how many rows are missing an
+    embedding, then repeatedly with confirm=true (bounded by limit per call) until both counts
+    reach zero."""
+    if not confirm:
+        return {"confirm": False, **db.count_sightings_missing_embedding()}
+    if not config.LLAMA_PROXY_BASE_URL:
+        raise HTTPException(status_code=400, detail="LLAMA_PROXY_BASE_URL is not configured")
+    return {"confirm": True, **ai_worker.run_embedding_backfill(limit)}
 
 
 @app.get("/object-types", tags=["events"], dependencies=[Depends(require_api_key)])

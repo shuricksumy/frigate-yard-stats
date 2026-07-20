@@ -169,6 +169,13 @@ embedding, filtered by a time range. See CLAUDE.md's "Semantic search and the Q&
 for the full design, and `n8n/yard-stats-semantic-search-tool.json` /
 `n8n/yard-stats-qa.json` for the Q&A agent that uses it.
 
+**Backfilling old sightings**: anything analyzed before you turned this on has `embedding = NULL`
+and won't show up in semantic search results. `POST /embeddings/backfill` fills those in — call it
+once with no `confirm` to see how many rows are missing an embedding, then repeatedly with
+`confirm=true` (each call processes up to `limit`, default 50, per sighting type) until both counts
+hit zero. Needs `LLAMA_PROXY_BASE_URL` set (see "Internal AI stage" below) even if you're not using
+that stage for anything else — it's the only thing this endpoint needs from that section.
+
 ## Internal AI stage (alternative to n8n's metadata-processor.json)
 
 Off by default (`AI_STAGE_ENABLED=false`) — n8n's `metadata-processor.json` is the AI stage until

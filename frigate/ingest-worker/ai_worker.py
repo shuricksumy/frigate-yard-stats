@@ -113,6 +113,37 @@ def _embed_text(text: str | None) -> list[float] | None:
         return None
 
 
+def run_embedding_backfill(limit: int) -> dict:
+    # POST /embeddings/backfill's confirm=true path -- fills in the embedding column for
+    # sightings that existed before semantic search did (or came from a run that didn't attach
+    # one). Deliberately independent of AI_STAGE_ENABLED/process_claimed_event -- this only ever
+    # re-embeds each sighting's own already-stored fields, never re-runs the VLM, so it works
+    # whether metadata-processor.json or this stage is your primary AI flow, or the AI stage isn't
+    # running at all right now. Reuses the exact combination logic report.py's alerts report and
+    # process_claimed_event's own embed step already use, so a backfilled row's embedding means
+    # the same thing as a freshly-computed one.
+    if not config.LLAMA_PROXY_BASE_URL:
+        raise RuntimeError("LLAMA_PROXY_BASE_URL is not configured")
+
+    result = {"vehicles_processed": 0, "vehicles_updated": 0, "persons_processed": 0, "persons_updated": 0}
+
+    for row in db.get_vehicle_sightings_missing_embedding(limit):
+        result["vehicles_processed"] += 1
+        embedding = _embed_text(report._vehicle_summary(row))
+        if embedding is not None:
+            db.update_vehicle_sighting_embedding(row["id"], embedding)
+            result["vehicles_updated"] += 1
+
+    for row in db.get_person_sightings_missing_embedding(limit):
+        result["persons_processed"] += 1
+        embedding = _embed_text(report._person_summary(row))
+        if embedding is not None:
+            db.update_person_sighting_embedding(row["id"], embedding)
+            result["persons_updated"] += 1
+
+    return result
+
+
 def process_claimed_event(row: dict, profile: dict) -> None:
     event_id = row["id"]
     mapping = profile.get("object_types", {}).get(row.get("objects"))

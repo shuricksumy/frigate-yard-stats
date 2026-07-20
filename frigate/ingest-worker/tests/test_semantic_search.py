@@ -162,3 +162,74 @@ def test_get_retention_info_returns_configured_months_and_oldest_ts(conn_ok):
     info = db.get_retention_info()
     assert info["retention_months"] == db.config.RETENTION_MONTHS
     assert "oldest_available_start_ts" in info
+
+
+def test_get_vehicle_sightings_missing_embedding_excludes_rows_with_one(conn_ok):
+    camera = f"pytest-backfill-{uuid.uuid4()}"
+    missing_id = _insert_event(camera=camera)
+    has_one_id = _insert_event(camera=camera)
+    try:
+        db.complete_vehicle_sighting(
+            missing_id, color="red", body_type="sedan", make_guess=None, make_confidence=None,
+            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
+            plate_text_frigate=None, plate_confidence=None, notes=None,
+        )
+        db.complete_vehicle_sighting(
+            has_one_id, color="blue", body_type="suv", make_guess=None, make_confidence=None,
+            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
+            plate_text_frigate=None, plate_confidence=None, notes=None, embedding=_vec(1.0),
+        )
+        rows = db.get_vehicle_sightings_missing_embedding(limit=100)
+        raw_event_ids = {r["raw_event_id"] for r in rows}
+        assert missing_id in raw_event_ids
+        assert has_one_id not in raw_event_ids
+    finally:
+        _cleanup_event(missing_id)
+        _cleanup_event(has_one_id)
+
+
+def test_update_vehicle_sighting_embedding_sets_column(conn_ok):
+    event_id = _insert_event(camera="pytest-backfill")
+    try:
+        sighting_id = db.complete_vehicle_sighting(
+            event_id, color="black", body_type="hatchback", make_guess=None, make_confidence=None,
+            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
+            plate_text_frigate=None, plate_confidence=None, notes=None,
+        )
+        db.update_vehicle_sighting_embedding(sighting_id, _vec(1.0))
+        rows = db._execute(
+            "SELECT embedding IS NOT NULL AS has_embedding FROM yard_stats.vehicle_sightings WHERE id = %s",
+            (sighting_id,), fetch=True,
+        )
+        assert rows[0]["has_embedding"] is True
+    finally:
+        _cleanup_event(event_id)
+
+
+def test_update_person_sighting_embedding_sets_column(conn_ok):
+    event_id = _insert_event(camera="pytest-backfill", objects="person")
+    try:
+        sighting_id = db.complete_person_sighting(event_id, description="wearing a blue jacket", notes=None)
+        db.update_person_sighting_embedding(sighting_id, _vec(1.0))
+        rows = db._execute(
+            "SELECT embedding IS NOT NULL AS has_embedding FROM yard_stats.person_sightings WHERE id = %s",
+            (sighting_id,), fetch=True,
+        )
+        assert rows[0]["has_embedding"] is True
+    finally:
+        _cleanup_event(event_id)
+
+
+def test_count_sightings_missing_embedding_reflects_null_rows(conn_ok):
+    camera = f"pytest-backfill-{uuid.uuid4()}"
+    event_id = _insert_event(camera=camera)
+    try:
+        db.complete_vehicle_sighting(
+            event_id, color="white", body_type="van", make_guess=None, make_confidence=None,
+            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
+            plate_text_frigate=None, plate_confidence=None, notes=None,
+        )
+        before = db.count_sightings_missing_embedding()
+        assert before["vehicle_sightings"] >= 1
+    finally:
+        _cleanup_event(event_id)

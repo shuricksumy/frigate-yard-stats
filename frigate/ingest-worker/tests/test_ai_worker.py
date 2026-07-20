@@ -245,6 +245,14 @@ def test_process_claimed_event_embedding_failure_still_inserts_sighting(monkeypa
     assert not failed
 
 
+# ---- run_embedding_backfill ----
+
+def test_run_embedding_backfill_requires_llama_proxy_base_url(monkeypatch):
+    monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "")
+    with pytest.raises(RuntimeError):
+        ai_worker.run_embedding_backfill(limit=10)
+
+
 # ---- integration: real Postgres, mocked HTTP ----
 
 @pytest.fixture
@@ -303,3 +311,39 @@ def test_process_claimed_event_end_to_end_marks_ai_status_done(conn_ok, monkeypa
         assert sighting_rows[0]["has_embedding"] is True
     finally:
         _cleanup_event(event_id)
+
+
+def test_run_embedding_backfill_updates_rows_missing_embedding(conn_ok, monkeypatch):
+    monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
+    monkeypatch.setattr(ai_worker.requests, "post", lambda *a, **k: _Resp(_embed_response([0.1] + [0.0] * 767)))
+
+    vehicle_event_id = _insert_event(camera="pytest-backfill")
+    person_event_id = _insert_event(camera="pytest-backfill", objects="person")
+    try:
+        db.complete_vehicle_sighting(
+            vehicle_event_id, color="red", body_type="sedan", make_guess=None, make_confidence=None,
+            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
+            plate_text_frigate=None, plate_confidence=None, notes=None,
+        )
+        db.complete_person_sighting(person_event_id, description="wearing a green hat", notes=None)
+
+        result = ai_worker.run_embedding_backfill(limit=100)
+
+        assert result["vehicles_updated"] >= 1
+        assert result["persons_updated"] >= 1
+
+        vehicle_rows = db._execute(
+            "SELECT embedding IS NOT NULL AS has_embedding FROM yard_stats.vehicle_sightings "
+            "WHERE raw_event_id = %s",
+            (vehicle_event_id,), fetch=True,
+        )
+        person_rows = db._execute(
+            "SELECT embedding IS NOT NULL AS has_embedding FROM yard_stats.person_sightings "
+            "WHERE raw_event_id = %s",
+            (person_event_id,), fetch=True,
+        )
+        assert vehicle_rows[0]["has_embedding"] is True
+        assert person_rows[0]["has_embedding"] is True
+    finally:
+        _cleanup_event(vehicle_event_id)
+        _cleanup_event(person_event_id)

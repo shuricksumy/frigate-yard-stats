@@ -92,6 +92,67 @@ def get_retention_info() -> dict:
     }
 
 
+def count_sightings_missing_embedding() -> dict:
+    # Dry-run counterpart for POST /embeddings/backfill, same shape as purge_older_than's own
+    # always-count-first approach -- a sighting from before semantic search existed (or from any
+    # run that didn't attach one) has embedding IS NULL, same condition
+    # semantic_search_sightings already excludes on the read side.
+    return {
+        "vehicle_sightings": _execute(
+            "SELECT count(*)::int AS c FROM yard_stats.vehicle_sightings WHERE embedding IS NULL",
+            fetch=True,
+        )[0]["c"],
+        "person_sightings": _execute(
+            "SELECT count(*)::int AS c FROM yard_stats.person_sightings WHERE embedding IS NULL",
+            fetch=True,
+        )[0]["c"],
+    }
+
+
+def get_vehicle_sightings_missing_embedding(limit: int) -> list[dict]:
+    # Oldest first (plain id order) -- a backfill has no "freshness" concept the way live queue
+    # claims do (see claim_ai_batch's newest-first comment), so working through the backlog in a
+    # stable, predictable order is simplest; repeated calls make steady progress either way.
+    return _execute(
+        """
+        SELECT id, raw_event_id, color, body_type, make_guess, model_guess, notable_features,
+               plate_text_llm, plate_text_frigate
+        FROM yard_stats.vehicle_sightings
+        WHERE embedding IS NULL
+        ORDER BY id
+        LIMIT %s
+        """,
+        (limit,), fetch=True,
+    )
+
+
+def get_person_sightings_missing_embedding(limit: int) -> list[dict]:
+    return _execute(
+        """
+        SELECT id, raw_event_id, description
+        FROM yard_stats.person_sightings
+        WHERE embedding IS NULL
+        ORDER BY id
+        LIMIT %s
+        """,
+        (limit,), fetch=True,
+    )
+
+
+def update_vehicle_sighting_embedding(sighting_id: int, embedding: list[float]) -> None:
+    _execute(
+        "UPDATE yard_stats.vehicle_sightings SET embedding = %s::vector WHERE id = %s",
+        (_vector_literal(embedding), sighting_id),
+    )
+
+
+def update_person_sighting_embedding(sighting_id: int, embedding: list[float]) -> None:
+    _execute(
+        "UPDATE yard_stats.person_sightings SET embedding = %s::vector WHERE id = %s",
+        (_vector_literal(embedding), sighting_id),
+    )
+
+
 def get_raw_event(event_id: int) -> dict | None:
     rows = _execute(
         """
