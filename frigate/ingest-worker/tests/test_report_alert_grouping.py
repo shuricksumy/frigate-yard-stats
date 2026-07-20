@@ -1,10 +1,10 @@
-"""Tests for report.py's alerts-report grouping (source="visits") -- a visit's vehicle and person
-sightings are combined into one alert row (image + both AI results) instead of two disjoint
-Vehicles/Persons tables, since they belong to the same real-world activity.
+"""Tests for report.py's alerts-report grouping (source="visits") -- a visit's sightings (any
+mix of object types) are combined into one alert row (image + one labeled line per sighting)
+instead of separate per-type tables, since they belong to the same real-world activity.
 
-_group_by_visit/_vehicle_summary/_person_summary/_build_alert_rows are pure functions (no DB), so
-most of this runs without Postgres. The end-to-end generate_report() test at the bottom does need
-a reachable Postgres with schema.sql applied -- see test_db_video_queue.py's module docstring.
+_group_by_visit/_img_cell/_build_alert_rows are pure functions (no DB), so most of this runs
+without Postgres. The end-to-end generate_report() test at the bottom does need a reachable
+Postgres with schema.sql applied -- see test_db_video_queue.py's module docstring.
 """
 import os
 import uuid
@@ -35,40 +35,21 @@ _TINY_JPEG_BASE64 = (
 )
 
 
-def test_vehicle_summary_combines_available_fields():
-    v = {
-        "color": "silver", "body_type": "sedan", "make_guess": "VW", "model_guess": "Passat",
-        "notable_features": "roof rack", "plate_text_llm": "10MO407", "plate_text_frigate": None,
-    }
-    assert report._vehicle_summary(v) == "silver sedan VW Passat -- roof rack -- plate 10MO407"
-
-
-def test_vehicle_summary_falls_back_to_frigate_plate():
-    v = {
-        "color": None, "body_type": None, "make_guess": None, "model_guess": None,
-        "notable_features": None, "plate_text_llm": None, "plate_text_frigate": "10MO407",
-    }
-    assert report._vehicle_summary(v) == "plate 10MO407"
-
-
-def test_vehicle_summary_none_when_nothing_present():
-    v = {
-        "color": None, "body_type": None, "make_guess": None, "model_guess": None,
-        "notable_features": None, "plate_text_llm": None, "plate_text_frigate": None,
-    }
-    assert report._vehicle_summary(v) is None
-
-
 def test_group_by_visit_combines_car_and_person_of_same_visit():
     t0 = datetime(2026, 7, 17, 10, 0, 0)
     t1 = datetime(2026, 7, 17, 10, 0, 5)
-    car = {"visit_id": 42, "raw_event_id": 1, "start_ts": t1, "camera": "outside2", "crop_image_base64": "car-crop"}
-    person = {"visit_id": 42, "raw_event_id": 2, "start_ts": t0, "camera": "outside2", "crop_image_base64": "person-crop"}
-    groups = report._group_by_visit([car], [person])
+    car = {
+        "visit_id": 42, "raw_event_id": 1, "start_ts": t1, "camera": "outside2",
+        "crop_image_base64": "car-crop", "object_label": "car", "description": "orange suv",
+    }
+    person = {
+        "visit_id": 42, "raw_event_id": 2, "start_ts": t0, "camera": "outside2",
+        "crop_image_base64": "person-crop", "object_label": "person", "description": "dark jacket",
+    }
+    groups = report._group_by_visit([car, person])
     assert len(groups) == 1
     group = groups[0]
-    assert group["vehicles"] == [car]
-    assert group["persons"] == [person]
+    assert group["sightings"] == [car, person]
     # Earliest sighting (person, t0) represents the group's time/image.
     assert group["start_ts"] == t0
     assert group["crop_image_base64"] == "person-crop"
@@ -78,7 +59,7 @@ def test_group_by_visit_keeps_ungrouped_sightings_separate():
     t = datetime(2026, 7, 17, 10, 0, 0)
     a = {"visit_id": None, "raw_event_id": 1, "start_ts": t, "camera": "outside2", "crop_image_base64": "a"}
     b = {"visit_id": None, "raw_event_id": 2, "start_ts": t, "camera": "outside2", "crop_image_base64": "b"}
-    groups = report._group_by_visit([a, b], [])
+    groups = report._group_by_visit([a, b])
     assert len(groups) == 2
 
 
@@ -104,29 +85,27 @@ def test_group_by_visit_carries_preview_gif_from_earliest_sighting():
     car = {
         "visit_id": 42, "raw_event_id": 1, "start_ts": t1, "camera": "outside2",
         "crop_image_base64": "car-crop", "preview_gif_base64": "visit-gif",
+        "object_label": "car", "description": "orange suv",
     }
     person = {
         "visit_id": 42, "raw_event_id": 2, "start_ts": t0, "camera": "outside2",
         "crop_image_base64": "person-crop", "preview_gif_base64": "visit-gif",
+        "object_label": "person", "description": "dark jacket",
     }
-    group = report._group_by_visit([car], [person])[0]
+    group = report._group_by_visit([car, person])[0]
     assert group["preview_gif_base64"] == "visit-gif"
 
 
 def test_build_alert_rows_orders_newest_first():
     older = {
         "visit_id": None, "raw_event_id": 1, "start_ts": datetime(2026, 7, 17, 9, 0, 0),
-        "camera": "outside2", "crop_image_base64": None,
-        "color": "red", "body_type": None, "make_guess": None, "model_guess": None,
-        "notable_features": None, "plate_text_llm": None, "plate_text_frigate": None,
+        "camera": "outside2", "crop_image_base64": None, "object_label": "car", "description": "red",
     }
     newer = {
         "visit_id": None, "raw_event_id": 2, "start_ts": datetime(2026, 7, 17, 10, 0, 0),
-        "camera": "outside2", "crop_image_base64": None,
-        "color": "blue", "body_type": None, "make_guess": None, "model_guess": None,
-        "notable_features": None, "plate_text_llm": None, "plate_text_frigate": None,
+        "camera": "outside2", "crop_image_base64": None, "object_label": "car", "description": "blue",
     }
-    html = report._build_alert_rows([older, newer], [], [], [0])
+    html = report._build_alert_rows([older, newer], [], [0])
     assert html.index("blue") < html.index("red")
 
 
@@ -134,15 +113,13 @@ def test_build_alert_rows_renders_both_summaries_in_one_row():
     t = datetime(2026, 7, 17, 10, 0, 0)
     car = {
         "visit_id": 1, "raw_event_id": 1, "start_ts": t, "camera": "outside2",
-        "crop_image_base64": None, "color": "silver", "body_type": "sedan",
-        "make_guess": None, "model_guess": None, "notable_features": None,
-        "plate_text_llm": "10MO407", "plate_text_frigate": None,
+        "crop_image_base64": None, "object_label": "car", "description": "silver sedan, plate 10MO407",
     }
     person = {
         "visit_id": 1, "raw_event_id": 2, "start_ts": t, "camera": "outside2",
-        "crop_image_base64": None, "description": "dark jacket",
+        "crop_image_base64": None, "object_label": "person", "description": "dark jacket",
     }
-    html = report._build_alert_rows([car], [person], [], [0])
+    html = report._build_alert_rows([car, person], [], [0])
     assert "silver sedan" in html
     assert "10MO407" in html
     assert "dark jacket" in html
@@ -176,25 +153,16 @@ def _insert_raw_event(start_ts_expr="now()", objects="car"):
     return rows[0]["id"], rows[0]["det_id"]
 
 
-def _insert_vehicle_sighting(raw_event_id: int) -> int:
+def _insert_sighting(raw_event_id: int, object_label: str, description: str) -> int:
     rows = db._execute(
-        "INSERT INTO yard_stats.vehicle_sightings (raw_event_id, color) VALUES (%s, 'silver') RETURNING id",
-        (raw_event_id,), fetch=True,
-    )
-    return rows[0]["id"]
-
-
-def _insert_person_sighting(raw_event_id: int) -> int:
-    rows = db._execute(
-        "INSERT INTO yard_stats.person_sightings (raw_event_id, description) VALUES (%s, 'dark jacket') RETURNING id",
-        (raw_event_id,), fetch=True,
+        "INSERT INTO yard_stats.sightings (raw_event_id, object_label, description) VALUES (%s, %s, %s) RETURNING id",
+        (raw_event_id, object_label, description), fetch=True,
     )
     return rows[0]["id"]
 
 
 def _cleanup(*raw_event_ids, visit_id=None):
-    db._execute("DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id = ANY(%s)", (list(raw_event_ids),))
-    db._execute("DELETE FROM yard_stats.person_sightings WHERE raw_event_id = ANY(%s)", (list(raw_event_ids),))
+    db._execute("DELETE FROM yard_stats.sightings WHERE raw_event_id = ANY(%s)", (list(raw_event_ids),))
     db._execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", (list(raw_event_ids),))
     if visit_id is not None:
         db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
@@ -203,8 +171,8 @@ def _cleanup(*raw_event_ids, visit_id=None):
 def test_generate_report_visits_combines_car_and_person_into_one_alert(conn_ok):
     car_id, car_det = _insert_raw_event(objects="car")
     person_id, person_det = _insert_raw_event(objects="person")
-    _insert_vehicle_sighting(car_id)
-    _insert_person_sighting(person_id)
+    _insert_sighting(car_id, "car", "silver sedan")
+    _insert_sighting(person_id, "person", "dark jacket")
     visit_id = db.record_visit({
         "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car,person",
         "start_time": 1784198451.0, "end_time": 1784198470.0,
@@ -214,17 +182,16 @@ def test_generate_report_visits_combines_car_and_person_into_one_alert(conn_ok):
         now = datetime.now(timezone.utc)
         result = report.generate_report(now - timedelta(hours=1), now + timedelta(hours=1), source="visits")
         assert "1</b> alert(s)" in result["html"]
-        assert "silver" in result["html"]
+        assert "silver sedan" in result["html"]
         assert "dark jacket" in result["html"]
-        assert result["car_count"] == 1
-        assert result["person_count"] == 1
+        assert result["sighting_count"] == 2
     finally:
         _cleanup(car_id, person_id, visit_id=visit_id)
 
 
 def test_generate_report_include_preview_image_omits_gif(conn_ok):
     raw_id, det_id = _insert_raw_event(objects="car")
-    _insert_vehicle_sighting(raw_id)
+    _insert_sighting(raw_id, "car", "silver sedan")
     visit_id = db.record_visit({
         "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
         "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],

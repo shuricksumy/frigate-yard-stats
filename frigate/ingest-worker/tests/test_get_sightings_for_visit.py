@@ -35,25 +35,16 @@ def _insert_raw_event(start_ts_expr="now()", objects="car"):
     return rows[0]["id"], rows[0]["det_id"]
 
 
-def _insert_vehicle_sighting(raw_event_id: int) -> int:
+def _insert_sighting(raw_event_id: int, object_label="car", description="silver") -> int:
     rows = db._execute(
-        "INSERT INTO yard_stats.vehicle_sightings (raw_event_id, color) VALUES (%s, 'silver') RETURNING id",
-        (raw_event_id,), fetch=True,
-    )
-    return rows[0]["id"]
-
-
-def _insert_person_sighting(raw_event_id: int) -> int:
-    rows = db._execute(
-        "INSERT INTO yard_stats.person_sightings (raw_event_id, description) VALUES (%s, 'dark jacket') RETURNING id",
-        (raw_event_id,), fetch=True,
+        "INSERT INTO yard_stats.sightings (raw_event_id, object_label, description) VALUES (%s, %s, %s) RETURNING id",
+        (raw_event_id, object_label, description), fetch=True,
     )
     return rows[0]["id"]
 
 
 def _cleanup(*raw_event_ids, visit_id=None):
-    db._execute("DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id = ANY(%s)", (list(raw_event_ids),))
-    db._execute("DELETE FROM yard_stats.person_sightings WHERE raw_event_id = ANY(%s)", (list(raw_event_ids),))
+    db._execute("DELETE FROM yard_stats.sightings WHERE raw_event_id = ANY(%s)", (list(raw_event_ids),))
     db._execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", (list(raw_event_ids),))
     if visit_id is not None:
         db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
@@ -67,11 +58,11 @@ def conn_ok():
         pytest.skip(f"Postgres not reachable for integration test: {exc}")
 
 
-def test_returns_both_vehicle_and_person_sightings_for_one_visit(conn_ok):
+def test_returns_sightings_of_every_distinct_object_type_for_one_visit(conn_ok):
     car_id, car_det = _insert_raw_event(objects="car")
     person_id, person_det = _insert_raw_event(objects="person")
-    _insert_vehicle_sighting(car_id)
-    _insert_person_sighting(person_id)
+    _insert_sighting(car_id, "car", "silver sedan")
+    _insert_sighting(person_id, "person", "dark jacket")
     visit_id = db.record_visit({
         "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car,person",
         "start_time": 1784198451.0, "end_time": 1784198470.0,
@@ -79,13 +70,15 @@ def test_returns_both_vehicle_and_person_sightings_for_one_visit(conn_ok):
     })
     try:
         result = db.get_sightings_for_visit(visit_id)
-        assert {v["raw_event_id"] for v in result["vehicles"]} == {car_id}
-        assert {p["raw_event_id"] for p in result["persons"]} == {person_id}
+        assert {s["raw_event_id"] for s in result} == {car_id, person_id}
+        by_id = {s["raw_event_id"]: s for s in result}
+        assert by_id[car_id]["object_label"] == "car"
+        assert by_id[person_id]["object_label"] == "person"
     finally:
         _cleanup(car_id, person_id, visit_id=visit_id)
 
 
-def test_returns_empty_lists_for_visit_with_no_sightings_yet(conn_ok):
+def test_returns_empty_list_for_visit_with_no_sightings_yet(conn_ok):
     raw_id, det_id = _insert_raw_event()
     visit_id = db.record_visit({
         "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
@@ -93,7 +86,7 @@ def test_returns_empty_lists_for_visit_with_no_sightings_yet(conn_ok):
     })
     try:
         result = db.get_sightings_for_visit(visit_id)
-        assert result == {"vehicles": [], "persons": []}
+        assert result == []
     finally:
         _cleanup(raw_id, visit_id=visit_id)
 
@@ -101,8 +94,8 @@ def test_returns_empty_lists_for_visit_with_no_sightings_yet(conn_ok):
 def test_does_not_include_sightings_from_other_visits(conn_ok):
     this_car_id, this_det = _insert_raw_event(objects="car")
     other_car_id, other_det = _insert_raw_event(objects="car")
-    _insert_vehicle_sighting(this_car_id)
-    _insert_vehicle_sighting(other_car_id)
+    _insert_sighting(this_car_id)
+    _insert_sighting(other_car_id)
     visit_id = db.record_visit({
         "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
         "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [this_det],
@@ -113,7 +106,7 @@ def test_does_not_include_sightings_from_other_visits(conn_ok):
     })
     try:
         result = db.get_sightings_for_visit(visit_id)
-        assert {v["raw_event_id"] for v in result["vehicles"]} == {this_car_id}
+        assert {s["raw_event_id"] for s in result} == {this_car_id}
     finally:
         _cleanup(this_car_id, visit_id=visit_id)
         _cleanup(other_car_id, visit_id=other_visit_id)

@@ -54,36 +54,23 @@ def _img_cell(
     )
 
 
-def _vehicle_summary(v: dict) -> str | None:
-    bits = [b for b in (v.get("color"), v.get("body_type"), v.get("make_guess"), v.get("model_guess")) if b]
-    summary = " ".join(bits) if bits else None
-    plate = v.get("plate_text_llm") or v.get("plate_text_frigate")
-    parts = [p for p in (summary, v.get("notable_features")) if p]
-    if plate:
-        parts.append(f"plate {plate}")
-    return " -- ".join(parts) if parts else None
-
-
-def _person_summary(p: dict) -> str | None:
-    return p.get("description")
-
-
-def _group_by_visit(cars: list, persons: list) -> list[dict]:
+def _group_by_visit(sightings: list) -> list[dict]:
     # One entry per visit (or per standalone raw_event, for a sighting that was never grouped into
-    # a visit -- visit_id is NULL, so it becomes a group of one) instead of two disjoint Vehicles/
-    # Persons tables -- a visit's car and person sightings (e.g. someone getting out of their car)
-    # belong together, not two unrelated rows a reader has to mentally reassociate by timestamp.
+    # a visit -- visit_id is NULL, so it becomes a group of one) instead of separate per-type
+    # tables -- a visit's sightings (e.g. a car and a person, someone getting out of their car)
+    # belong together, not unrelated rows a reader has to mentally reassociate by timestamp. One
+    # universal "sightings" list per group now, not split by type.
     groups: dict[object, dict] = {}
     order: list[object] = []
 
-    def _group_for(row: dict) -> dict:
+    for row in sightings:
         key = row["visit_id"] if row["visit_id"] is not None else ("event", row["raw_event_id"])
         if key not in groups:
             groups[key] = {
                 "start_ts": row["start_ts"], "camera": row["camera"],
                 "crop_image_base64": row["crop_image_base64"],
                 "preview_gif_base64": row.get("preview_gif_base64"),
-                "vehicles": [], "persons": [],
+                "sightings": [],
             }
             order.append(key)
         group = groups[key]
@@ -94,28 +81,25 @@ def _group_by_visit(cars: list, persons: list) -> list[dict]:
             group["camera"] = row["camera"]
             group["crop_image_base64"] = row["crop_image_base64"]
             group["preview_gif_base64"] = row.get("preview_gif_base64")
-        return group
-
-    for c in cars:
-        _group_for(c)["vehicles"].append(c)
-    for p in persons:
-        _group_for(p)["persons"].append(p)
+        group["sightings"].append(row)
 
     return [groups[key] for key in order]
 
 
-def _build_alert_rows(cars: list, persons: list, lightboxes: list, counter: list) -> str:
+def _build_alert_rows(sightings: list, lightboxes: list, counter: list) -> str:
     # Newest first -- matches get_report_data's own ORDER BY re.start_ts DESC and the web report
     # UI's convention (most recent activity at the top, not buried at the bottom of a long window).
-    groups = sorted(_group_by_visit(cars, persons), key=lambda g: g["start_ts"], reverse=True)
+    groups = sorted(_group_by_visit(sightings), key=lambda g: g["start_ts"], reverse=True)
     rows = []
     for g in groups:
-        vehicle_text = "; ".join(s for s in (_vehicle_summary(v) for v in g["vehicles"]) if s) or None
-        person_text = "; ".join(s for s in (_person_summary(p) for p in g["persons"]) if s) or None
+        # One labeled line per sighting in the group (e.g. "car: orange suv, plate 10MG407" /
+        # "person: wearing a red jacket") -- a visit grouping several distinct object types shows
+        # all of them, joined, rather than picking just one.
+        summary = "; ".join(f"{s['object_label']}: {s['description']}" for s in g["sightings"] if s["description"]) or None
         rows.append(
             f"<tr><td>{_img_cell(g['crop_image_base64'], lightboxes, counter, g['preview_gif_base64'])}</td>"
             f"<td>{_fmt_time(g['start_ts'])}</td><td>{_esc(g['camera'])}</td>"
-            f"<td>{_esc(vehicle_text)}</td><td>{_esc(person_text)}</td></tr>"
+            f"<td>{_esc(summary)}</td></tr>"
         )
     return "\n".join(rows)
 
@@ -128,8 +112,7 @@ def generate_report(
     # NULL at the SQL level, so _img_cell's existing fallbacks (grid/crop when there's no GIF,
     # "(no image)" when there's no image at all) apply with no separate rendering path needed.
     data = db.get_report_data(start, end, source, include_preview)
-    cars = data["vehicles"]
-    persons = data["persons"]
+    sightings = data["sightings"]
 
     lightboxes: list[str] = []
     counter = [0]
@@ -164,49 +147,34 @@ tr:nth-child(even){background:#f7f7f7;}
     )
 
     if source == "visits":
-        # One combined table per alert (visit) instead of separate Vehicles/Persons tables -- a
-        # visit's car and person sightings belong to the same real-world activity, so the thumbnail
-        # and both AI results show up together in one row rather than two unrelated ones.
-        alert_count = len(_group_by_visit(cars, persons))
-        alert_rows = _build_alert_rows(cars, persons, lightboxes, counter)
+        # One combined row per alert (visit) instead of one row per sighting -- a visit's several
+        # sightings (e.g. a car and a person) belong to the same real-world activity, so the
+        # thumbnail and every AI result show up together in one row rather than separate ones.
+        alert_count = len(_group_by_visit(sightings))
+        alert_rows = _build_alert_rows(sightings, lightboxes, counter)
         body = f"""<h1>Yard Stats Alerts Report</h1>
-<div class="summary"><b>{alert_count}</b> alert(s) ({len(cars)} vehicle sighting(s), {len(persons)} person sighting(s)) from {_fmt_time(start)} to {_fmt_time(end)}.</div>
-<table><tr><th>Image</th><th>Time</th><th>Camera</th><th>Vehicle</th><th>Person</th></tr>
-{alert_rows or '<tr><td colspan="5">No alerts.</td></tr>'}
+<div class="summary"><b>{alert_count}</b> alert(s) ({len(sightings)} sighting(s)) from {_fmt_time(start)} to {_fmt_time(end)}.</div>
+<table><tr><th>Image</th><th>Time</th><th>Camera</th><th>Sightings</th></tr>
+{alert_rows or '<tr><td colspan="4">No alerts.</td></tr>'}
 </table>"""
         caption = (
-            f"Yard Stats Alerts Report -- {alert_count} alert(s) ({len(cars)} vehicle sighting(s), "
-            f"{len(persons)} person sighting(s)) from {_fmt_time(start)} to {_fmt_time(end)}."
+            f"Yard Stats Alerts Report -- {alert_count} alert(s) ({len(sightings)} sighting(s)) "
+            f"from {_fmt_time(start)} to {_fmt_time(end)}."
         )
     else:
-        car_rows = "\n".join(
-            f"<tr><td>{_img_cell(c['crop_image_base64'], lightboxes, counter)}</td>"
-            f"<td>{_fmt_time(c['start_ts'])}</td><td>{_esc(c['camera'])}</td>"
-            f"<td>{_esc(c['color'])}</td><td>{_esc(c['body_type'])}</td>"
-            f"<td>{_esc(c['make_guess'])}</td><td>{_esc(c['model_guess'])}</td>"
-            f"<td>{_esc(c['notable_features'])}</td><td>{_esc(c['plate_text_llm'])}</td>"
-            f"<td>{_esc(c['plate_text_frigate'])}</td></tr>"
-            for c in cars
-        )
-        person_rows = "\n".join(
-            f"<tr><td>{_img_cell(p['crop_image_base64'], lightboxes, counter)}</td>"
-            f"<td>{_fmt_time(p['start_ts'])}</td><td>{_esc(p['camera'])}</td>"
-            f"<td>{_esc(p['description'])}</td></tr>"
-            for p in persons
+        sighting_rows = "\n".join(
+            f"<tr><td>{_img_cell(s['crop_image_base64'], lightboxes, counter)}</td>"
+            f"<td>{_fmt_time(s['start_ts'])}</td><td>{_esc(s['camera'])}</td>"
+            f"<td>{_esc(s['object_label'])}</td><td>{_esc(s['description'])}</td></tr>"
+            for s in sightings
         )
         body = f"""<h1>Yard Stats Report</h1>
-<div class="summary"><b>{len(cars)}</b> vehicle sighting(s), <b>{len(persons)}</b> person sighting(s) from {_fmt_time(start)} to {_fmt_time(end)}.</div>
-<h2>Vehicles ({len(cars)})</h2>
-<table><tr><th>Image</th><th>Time</th><th>Camera</th><th>Color</th><th>Body Type</th><th>Make</th><th>Model</th><th>Notable Features</th><th>Plate (VLM)</th><th>Plate (Frigate)</th></tr>
-{car_rows or '<tr><td colspan="10">No vehicle sightings.</td></tr>'}
-</table>
-<h2>Persons ({len(persons)})</h2>
-<table><tr><th>Image</th><th>Time</th><th>Camera</th><th>Description</th></tr>
-{person_rows or '<tr><td colspan="4">No person sightings.</td></tr>'}
+<div class="summary"><b>{len(sightings)}</b> sighting(s) from {_fmt_time(start)} to {_fmt_time(end)}.</div>
+<table><tr><th>Image</th><th>Time</th><th>Camera</th><th>Type</th><th>Description</th></tr>
+{sighting_rows or '<tr><td colspan="5">No sightings.</td></tr>'}
 </table>"""
         caption = (
-            f"Yard Stats Report -- {len(cars)} vehicle sighting(s), {len(persons)} person sighting(s) "
-            f"from {_fmt_time(start)} to {_fmt_time(end)}."
+            f"Yard Stats Report -- {len(sightings)} sighting(s) from {_fmt_time(start)} to {_fmt_time(end)}."
         )
 
     html_doc = (
@@ -219,6 +187,5 @@ tr:nth-child(even){background:#f7f7f7;}
         "end": end,
         "html": html_doc,
         "caption": caption,
-        "car_count": len(cars),
-        "person_count": len(persons),
+        "sighting_count": len(sightings),
     }

@@ -176,18 +176,18 @@ change needed. See [`web-ui.md`](web-ui.md) for a tour of the UI itself.
 Requires `postgres-projects` to run the `pgvector/pgvector:pg16` image (already the default in
 `docker-compose.yml`) rather than plain `postgres:16` — `schema.sql`'s `CREATE EXTENSION IF NOT
 EXISTS vector` needs that extension actually present in the image. No `ingest-worker` env var
-turns this on/off by itself — `vehicle_sightings`/`person_sightings` gain a nullable `embedding`
-column either way; it just stays empty until something (n8n's `metadata-processor.json`, or the
-internal AI stage below) actually sends one via `POST /sightings/vehicles|persons`. `POST
+turns this on/off by itself — the universal `sightings`/`visit_sightings` tables gain a nullable
+`embedding` column either way; it just stays empty until something (n8n's `metadata-processor.json`,
+or the internal AI stage below) actually sends one via `POST /sightings`. `POST
 /search/semantic` is the read side — cosine-similarity search over whatever sightings do have an
-embedding, filtered by a time range. See CLAUDE.md's "Semantic search and the Q&A agent" section
-for the full design, and `n8n/yard-stats-semantic-search-tool.json` /
-`n8n/yard-stats-qa.json` for the Q&A agent that uses it.
+embedding, filtered by a time range and (optionally) which object labels to include. See CLAUDE.md's
+"Semantic search and the Q&A agent" section for the full design, and
+`n8n/yard-stats-semantic-search-tool.json` / `n8n/yard-stats-qa.json` for the Q&A agent that uses it.
 
 **Backfilling old sightings**: anything analyzed before you turned this on has `embedding = NULL`
 and won't show up in semantic search results. `POST /embeddings/backfill` fills those in — call it
 once with no `confirm` to see how many rows are missing an embedding, then repeatedly with
-`confirm=true` (each call processes up to `limit`, default 50, per sighting type) until both counts
+`confirm=true` (each call processes up to `limit`, default 50, per table) until both counts
 hit zero. Needs `LLAMA_PROXY_BASE_URL` set (see "Internal AI stage" below) even if you're not using
 that stage for anything else — it's the only thing this endpoint needs from that section.
 
@@ -202,7 +202,7 @@ until you deliberately opt into one or both instead:
   though not unsafe).
 - **`AI_ALERTS_ENABLED=false`** — analyzes a visit's own composite grid (4 frames sampled across
   its span) with `profiles.yaml`'s `alert_prompt`, storing results separately in
-  `visit_vehicle_sightings`/`visit_person_sightings`. Requires `VISIT_THUMB_CROP_ENABLED=true` —
+  `visit_sightings`. Requires `VISIT_THUMB_CROP_ENABLED=true` —
   without it, no visit ever has a grid ready to analyze, so this stage just stays idle. Can run
   alongside or instead of `AI_EVENTS_STAGE_ENABLED` — the two are fully independent queues.
 
@@ -211,10 +211,14 @@ until you deliberately opt into one or both instead:
   into `.env` readably. `docker-compose.yml` already bind-mounts this file into the container, so
   just edit it and restart `ingest-worker` — no rebuild needed. (`AI_STAGE_PROFILE_PATH`, default
   `/app/profiles.yaml`, is the path the bind mount lands on; you'd only touch this env var if you
-  wanted to point at a differently-named file instead.) A Frigate object label with no entry in
-  this file (e.g. `dog`) is simply never analyzed by either stage. Each `vehicle`/`person` section
-  has two prompts, not one — `event_prompt` (single static frame) and `alert_prompt` (the 2x2
-  grid, framed to also describe what changed across the 4 frames, not just static attributes).
+  wanted to point at a differently-named file instead.) This is a flat map — every Frigate object
+  label (`car`, `truck`, `person`, or any label you add, e.g. `dog`) gets its own entry with two
+  prompts: `event_prompt` (single static frame) and `alert_prompt` (the 2x2 grid, framed to also
+  describe what changed across the 4 frames, not just static attributes). Both prompts are answered
+  as plain free text — there is no JSON schema or per-field response format, so adding a brand-new
+  object type is purely a `profiles.yaml` edit, never a code change. Labels that should share one
+  model/prompt (e.g. `car` and `truck`) can point at the same YAML anchor instead of duplicating the
+  block. A Frigate object label with no entry in this file is simply never analyzed by either stage.
 - `AI_STAGE_PARALLEL_LIMIT`/`AI_STAGE_STALE_MINUTES`/`AI_STAGE_MAX_ATTEMPTS`/
   `AI_STAGE_MAX_AGE_HOURS`/`AI_STAGE_POLL_INTERVAL_SECONDS` — same queue-tuning shape as the crop
   stage above, shared between both stages (each claims from its own separate queue, so this
@@ -227,8 +231,8 @@ until you deliberately opt into one or both instead:
   convention `profiles.yaml`'s `chat_path` uses).
 - `EMBEDDING_DIMENSIONS` (default `1024`) — must match the output size of whatever model is loaded
   behind `LLAMA_PROXY_EMBED_PATH` (e.g. `1024` for Qwen3-Embedding-0.6B-GGUF, `768` for
-  nomic-embed-text-v1.5). Sizes the pgvector `embedding` columns on `vehicle_sightings`/
-  `person_sightings`. Changing this after sightings already have embeddings stored clears them (a
+  nomic-embed-text-v1.5). Sizes the pgvector `embedding` columns on `sightings`/
+  `visit_sightings`. Changing this after sightings already have embeddings stored clears them (a
   different model's vectors are an incomparable vector space regardless of dimension) — re-run
   `POST /embeddings/backfill?confirm=true` afterwards.
 - `AI_STAGE_DEFAULT_TIMEOUT_SECONDS` (default `180`)/`AI_STAGE_EMBED_TIMEOUT_SECONDS` (default

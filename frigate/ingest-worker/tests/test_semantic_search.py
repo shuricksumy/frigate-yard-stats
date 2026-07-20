@@ -51,8 +51,7 @@ def _insert_event(camera, objects="car"):
 
 
 def _cleanup_event(event_id):
-    db._execute("DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id = %s", (event_id,))
-    db._execute("DELETE FROM yard_stats.person_sightings WHERE raw_event_id = %s", (event_id,))
+    db._execute("DELETE FROM yard_stats.sightings WHERE raw_event_id = %s", (event_id,))
     db._execute("DELETE FROM yard_stats.raw_events WHERE id = %s", (event_id,))
 
 
@@ -65,17 +64,12 @@ def test_vector_literal_passes_through_none():
     assert db._vector_literal(None) is None
 
 
-def test_complete_vehicle_sighting_stores_embedding(conn_ok):
+def test_complete_sighting_stores_embedding(conn_ok):
     event_id = _insert_event(camera="pytest-cam")
     try:
-        db.complete_vehicle_sighting(
-            event_id, color="red", body_type="sedan", make_guess="Toyota",
-            make_confidence="high", model_guess="Camry", model_confidence="medium",
-            notable_features="roof rack", plate_text_llm="ABC123", plate_text_frigate=None,
-            plate_confidence="high", notes=None, embedding=_vec(1.0),
-        )
+        db.complete_sighting(event_id, "car", "red sedan, roof rack, plate ABC123", embedding=_vec(1.0))
         rows = db._execute(
-            "SELECT embedding IS NOT NULL AS has_embedding FROM yard_stats.vehicle_sightings "
+            "SELECT embedding IS NOT NULL AS has_embedding FROM yard_stats.sightings "
             "WHERE raw_event_id = %s",
             (event_id,), fetch=True,
         )
@@ -84,12 +78,12 @@ def test_complete_vehicle_sighting_stores_embedding(conn_ok):
         _cleanup_event(event_id)
 
 
-def test_complete_person_sighting_without_embedding_stays_null(conn_ok):
+def test_complete_sighting_without_embedding_stays_null(conn_ok):
     event_id = _insert_event(camera="pytest-cam", objects="person")
     try:
-        db.complete_person_sighting(event_id, description="wearing a red hoodie", notes=None)
+        db.complete_sighting(event_id, "person", "wearing a red hoodie")
         rows = db._execute(
-            "SELECT embedding IS NULL AS no_embedding FROM yard_stats.person_sightings "
+            "SELECT embedding IS NULL AS no_embedding FROM yard_stats.sightings "
             "WHERE raw_event_id = %s",
             (event_id,), fetch=True,
         )
@@ -103,19 +97,9 @@ def test_semantic_search_orders_by_distance(conn_ok):
     close_id = _insert_event(camera=camera)
     far_id = _insert_event(camera=camera)
     try:
-        db.complete_vehicle_sighting(
-            close_id, color="red", body_type="sedan", make_guess=None, make_confidence=None,
-            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
-            plate_text_frigate=None, plate_confidence=None, notes=None, embedding=_vec(1.0),
-        )
-        db.complete_vehicle_sighting(
-            far_id, color="blue", body_type="hatchback", make_guess=None, make_confidence=None,
-            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
-            plate_text_frigate=None, plate_confidence=None, notes=None, embedding=_vec(-1.0),
-        )
-        results = db.semantic_search_sightings(
-            _vec(1.0), object_types=["vehicle"], limit=10,
-        )
+        db.complete_sighting(close_id, "car", "red sedan", embedding=_vec(1.0))
+        db.complete_sighting(far_id, "car", "blue hatchback", embedding=_vec(-1.0))
+        results = db.semantic_search_sightings(_vec(1.0), object_types=["car"], limit=10)
         result_ids = [r["raw_event_id"] for r in results if r["raw_event_id"] in (close_id, far_id)]
         assert result_ids == [close_id, far_id]
     finally:
@@ -124,22 +108,20 @@ def test_semantic_search_orders_by_distance(conn_ok):
 
 
 def test_semantic_search_filters_by_object_type(conn_ok):
+    # object_types now filters by the actual Frigate label directly, not a "vehicle"/"person"
+    # pseudo-category -- there's only one table to search regardless.
     camera = f"pytest-sem-{uuid.uuid4()}"
     vehicle_id = _insert_event(camera=camera, objects="car")
     person_id = _insert_event(camera=camera, objects="person")
     try:
-        db.complete_vehicle_sighting(
-            vehicle_id, color="red", body_type="sedan", make_guess=None, make_confidence=None,
-            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
-            plate_text_frigate=None, plate_confidence=None, notes=None, embedding=_vec(1.0),
-        )
-        db.complete_person_sighting(person_id, description="red jacket", notes=None, embedding=_vec(1.0))
+        db.complete_sighting(vehicle_id, "car", "red sedan", embedding=_vec(1.0))
+        db.complete_sighting(person_id, "person", "red jacket", embedding=_vec(1.0))
 
-        vehicles_only = db.semantic_search_sightings(_vec(1.0), object_types=["vehicle"], limit=10)
-        assert {r["sighting_type"] for r in vehicles_only} == {"vehicle"}
+        vehicles_only = db.semantic_search_sightings(_vec(1.0), object_types=["car"], limit=10)
+        assert {r["object_label"] for r in vehicles_only} == {"car"}
 
         persons_only = db.semantic_search_sightings(_vec(1.0), object_types=["person"], limit=10)
-        assert {r["sighting_type"] for r in persons_only} == {"person"}
+        assert {r["object_label"] for r in persons_only} == {"person"}
     finally:
         _cleanup_event(vehicle_id)
         _cleanup_event(person_id)
@@ -149,12 +131,8 @@ def test_semantic_search_excludes_sightings_without_embedding(conn_ok):
     camera = f"pytest-sem-{uuid.uuid4()}"
     event_id = _insert_event(camera=camera)
     try:
-        db.complete_vehicle_sighting(
-            event_id, color="green", body_type="coupe", make_guess=None, make_confidence=None,
-            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
-            plate_text_frigate=None, plate_confidence=None, notes=None,
-        )
-        results = db.semantic_search_sightings(_vec(1.0), object_types=["vehicle"], limit=50)
+        db.complete_sighting(event_id, "car", "green coupe")
+        results = db.semantic_search_sightings(_vec(1.0), object_types=["car"], limit=50)
         assert event_id not in {r["raw_event_id"] for r in results}
     finally:
         _cleanup_event(event_id)
@@ -166,22 +144,14 @@ def test_get_retention_info_returns_configured_months_and_oldest_ts(conn_ok):
     assert "oldest_available_start_ts" in info
 
 
-def test_get_vehicle_sightings_missing_embedding_excludes_rows_with_one(conn_ok):
+def test_get_sightings_missing_embedding_excludes_rows_with_one(conn_ok):
     camera = f"pytest-backfill-{uuid.uuid4()}"
     missing_id = _insert_event(camera=camera)
     has_one_id = _insert_event(camera=camera)
     try:
-        db.complete_vehicle_sighting(
-            missing_id, color="red", body_type="sedan", make_guess=None, make_confidence=None,
-            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
-            plate_text_frigate=None, plate_confidence=None, notes=None,
-        )
-        db.complete_vehicle_sighting(
-            has_one_id, color="blue", body_type="suv", make_guess=None, make_confidence=None,
-            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
-            plate_text_frigate=None, plate_confidence=None, notes=None, embedding=_vec(1.0),
-        )
-        rows = db.get_vehicle_sightings_missing_embedding(limit=100)
+        db.complete_sighting(missing_id, "car", "red sedan")
+        db.complete_sighting(has_one_id, "car", "blue suv", embedding=_vec(1.0))
+        rows = db.get_sightings_missing_embedding(limit=100)
         raw_event_ids = {r["raw_event_id"] for r in rows}
         assert missing_id in raw_event_ids
         assert has_one_id not in raw_event_ids
@@ -190,31 +160,13 @@ def test_get_vehicle_sightings_missing_embedding_excludes_rows_with_one(conn_ok)
         _cleanup_event(has_one_id)
 
 
-def test_update_vehicle_sighting_embedding_sets_column(conn_ok):
+def test_update_sighting_embedding_sets_column(conn_ok):
     event_id = _insert_event(camera="pytest-backfill")
     try:
-        sighting_id = db.complete_vehicle_sighting(
-            event_id, color="black", body_type="hatchback", make_guess=None, make_confidence=None,
-            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
-            plate_text_frigate=None, plate_confidence=None, notes=None,
-        )
-        db.update_vehicle_sighting_embedding(sighting_id, _vec(1.0))
+        sighting_id = db.complete_sighting(event_id, "car", "black hatchback")
+        db.update_sighting_embedding(sighting_id, _vec(1.0))
         rows = db._execute(
-            "SELECT embedding IS NOT NULL AS has_embedding FROM yard_stats.vehicle_sightings WHERE id = %s",
-            (sighting_id,), fetch=True,
-        )
-        assert rows[0]["has_embedding"] is True
-    finally:
-        _cleanup_event(event_id)
-
-
-def test_update_person_sighting_embedding_sets_column(conn_ok):
-    event_id = _insert_event(camera="pytest-backfill", objects="person")
-    try:
-        sighting_id = db.complete_person_sighting(event_id, description="wearing a blue jacket", notes=None)
-        db.update_person_sighting_embedding(sighting_id, _vec(1.0))
-        rows = db._execute(
-            "SELECT embedding IS NOT NULL AS has_embedding FROM yard_stats.person_sightings WHERE id = %s",
+            "SELECT embedding IS NOT NULL AS has_embedding FROM yard_stats.sightings WHERE id = %s",
             (sighting_id,), fetch=True,
         )
         assert rows[0]["has_embedding"] is True
@@ -226,12 +178,8 @@ def test_count_sightings_missing_embedding_reflects_null_rows(conn_ok):
     camera = f"pytest-backfill-{uuid.uuid4()}"
     event_id = _insert_event(camera=camera)
     try:
-        db.complete_vehicle_sighting(
-            event_id, color="white", body_type="van", make_guess=None, make_confidence=None,
-            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
-            plate_text_frigate=None, plate_confidence=None, notes=None,
-        )
+        db.complete_sighting(event_id, "car", "white van")
         before = db.count_sightings_missing_embedding()
-        assert before["vehicle_sightings"] >= 1
+        assert before["sightings"] >= 1
     finally:
         _cleanup_event(event_id)

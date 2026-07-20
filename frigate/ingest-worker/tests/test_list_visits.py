@@ -33,28 +33,16 @@ def _insert_raw_event(det_id: str, start_ts_expr: str = "now()", objects: str = 
     return rows[0]["id"]
 
 
-def _insert_vehicle_sighting(raw_event_id: int, **kwargs) -> int:
-    kwargs.setdefault("color", "silver")
-    columns = ", ".join(["raw_event_id"] + list(kwargs))
-    placeholders = ", ".join(["%s"] * (len(kwargs) + 1))
+def _insert_sighting(raw_event_id: int, object_label: str = "car", description: str = "silver") -> int:
     rows = db._execute(
-        f"INSERT INTO yard_stats.vehicle_sightings ({columns}) VALUES ({placeholders}) RETURNING id",
-        (raw_event_id, *kwargs.values()), fetch=True,
-    )
-    return rows[0]["id"]
-
-
-def _insert_person_sighting(raw_event_id: int, description: str = "dark jacket") -> int:
-    rows = db._execute(
-        "INSERT INTO yard_stats.person_sightings (raw_event_id, description) VALUES (%s, %s) RETURNING id",
-        (raw_event_id, description), fetch=True,
+        "INSERT INTO yard_stats.sightings (raw_event_id, object_label, description) VALUES (%s, %s, %s) RETURNING id",
+        (raw_event_id, object_label, description), fetch=True,
     )
     return rows[0]["id"]
 
 
 def _cleanup(*raw_event_ids, visit_id=None):
-    db._execute("DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id = ANY(%s)", (list(raw_event_ids),))
-    db._execute("DELETE FROM yard_stats.person_sightings WHERE raw_event_id = ANY(%s)", (list(raw_event_ids),))
+    db._execute("DELETE FROM yard_stats.sightings WHERE raw_event_id = ANY(%s)", (list(raw_event_ids),))
     db._execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", (list(raw_event_ids),))
     if visit_id is not None:
         db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
@@ -197,7 +185,7 @@ def test_list_visits_has_video_reflects_the_visit_not_the_representative_event(c
 def test_list_visits_q_matches_visit_by_representative_events_own_sighting(conn_ok):
     det_id = f"pytest-{uuid.uuid4()}"
     raw_id = _insert_raw_event(det_id, objects="car")
-    _insert_vehicle_sighting(raw_id, color="silver", model_guess="Passat")
+    _insert_sighting(raw_id, "car", "silver Passat")
     visit_id = db.record_visit({
         "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
         "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
@@ -221,8 +209,8 @@ def test_list_visits_q_matches_visit_by_a_non_representative_events_sighting(con
     person_det = f"pytest-{uuid.uuid4()}"
     car_id = _insert_raw_event(car_det, "now() - interval '10 seconds'", objects="car")
     person_id = _insert_raw_event(person_det, "now()", objects="person")
-    _insert_vehicle_sighting(car_id, color="silver")
-    _insert_person_sighting(person_id, description="wearing a bright green jacket")
+    _insert_sighting(car_id, "car", "silver")
+    _insert_sighting(person_id, "person", "wearing a bright green jacket")
     visit_id = db.record_visit({
         "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car,person",
         "start_time": 1784198451.0, "end_time": 1784198470.0,
@@ -238,7 +226,7 @@ def test_list_visits_q_matches_visit_by_a_non_representative_events_sighting(con
 def test_list_visits_q_is_case_insensitive_substring(conn_ok):
     det_id = f"pytest-{uuid.uuid4()}"
     raw_id = _insert_raw_event(det_id, objects="car")
-    _insert_vehicle_sighting(raw_id, notable_features="roof rack")
+    _insert_sighting(raw_id, "car", "has a roof rack")
     visit_id = db.record_visit({
         "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
         "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],

@@ -76,7 +76,7 @@ def _ensure_embedding_dimension() -> None:
     # regardless), which is only safe to run when the dimension is actually changing -- running it
     # unconditionally on every startup would silently wipe every embedding on every restart, even
     # when nothing changed.
-    for table in ("vehicle_sightings", "person_sightings", "visit_vehicle_sightings", "visit_person_sightings"):
+    for table in ("sightings", "visit_sightings"):
         current = _current_embedding_dimension(table)
         if current is not None and current != config.EMBEDDING_DIMENSIONS:
             logger.warning(
@@ -131,10 +131,8 @@ def get_table_row_counts() -> dict:
     return {
         "raw_events": _execute("SELECT count(*)::int AS c FROM yard_stats.raw_events", fetch=True)[0]["c"],
         "visits": _execute("SELECT count(*)::int AS c FROM yard_stats.visits", fetch=True)[0]["c"],
-        "vehicle_sightings": _execute("SELECT count(*)::int AS c FROM yard_stats.vehicle_sightings", fetch=True)[0]["c"],
-        "person_sightings": _execute("SELECT count(*)::int AS c FROM yard_stats.person_sightings", fetch=True)[0]["c"],
-        "visit_vehicle_sightings": _execute("SELECT count(*)::int AS c FROM yard_stats.visit_vehicle_sightings", fetch=True)[0]["c"],
-        "visit_person_sightings": _execute("SELECT count(*)::int AS c FROM yard_stats.visit_person_sightings", fetch=True)[0]["c"],
+        "sightings": _execute("SELECT count(*)::int AS c FROM yard_stats.sightings", fetch=True)[0]["c"],
+        "visit_sightings": _execute("SELECT count(*)::int AS c FROM yard_stats.visit_sightings", fetch=True)[0]["c"],
     }
 
 
@@ -224,7 +222,7 @@ def get_vector_index_status() -> dict:
         """
         SELECT indexrelid::regclass::text AS index, indisvalid, indisready
         FROM pg_index WHERE indexrelid::regclass::text IN (
-            'yard_stats.idx_vehicle_sightings_embedding', 'yard_stats.idx_person_sightings_embedding'
+            'yard_stats.idx_sightings_embedding', 'yard_stats.idx_visit_sightings_embedding'
         )
         """,
         fetch=True,
@@ -242,7 +240,7 @@ def reindex_vector_indexes() -> list[str]:
     # left behind by an interrupted build) and is the natural "tidy up" action after a large
     # /embeddings/backfill run, without the brief index-gap a DROP+CREATE would introduce.
     reindexed = []
-    for index in ("idx_vehicle_sightings_embedding", "idx_person_sightings_embedding"):
+    for index in ("idx_sightings_embedding", "idx_visit_sightings_embedding"):
         _execute(f"REINDEX INDEX yard_stats.{index}")
         reindexed.append(index)
     return reindexed
@@ -266,28 +264,29 @@ def count_sightings_missing_embedding() -> dict:
     # Dry-run counterpart for POST /embeddings/backfill, same shape as purge_older_than's own
     # always-count-first approach -- a sighting from before semantic search existed (or from any
     # run that didn't attach one) has embedding IS NULL, same condition
-    # semantic_search_sightings already excludes on the read side.
+    # semantic_search_sightings already excludes on the read side. Covers both event-level and
+    # visit-level sightings -- unlike the old vehicle_sightings/person_sightings-only backfill,
+    # there's no reason to leave visit_sightings out now that both share one universal shape.
     return {
-        "vehicle_sightings": _execute(
-            "SELECT count(*)::int AS c FROM yard_stats.vehicle_sightings WHERE embedding IS NULL",
+        "sightings": _execute(
+            "SELECT count(*)::int AS c FROM yard_stats.sightings WHERE embedding IS NULL",
             fetch=True,
         )[0]["c"],
-        "person_sightings": _execute(
-            "SELECT count(*)::int AS c FROM yard_stats.person_sightings WHERE embedding IS NULL",
+        "visit_sightings": _execute(
+            "SELECT count(*)::int AS c FROM yard_stats.visit_sightings WHERE embedding IS NULL",
             fetch=True,
         )[0]["c"],
     }
 
 
-def get_vehicle_sightings_missing_embedding(limit: int) -> list[dict]:
+def get_sightings_missing_embedding(limit: int) -> list[dict]:
     # Oldest first (plain id order) -- a backfill has no "freshness" concept the way live queue
     # claims do (see claim_ai_batch's newest-first comment), so working through the backlog in a
     # stable, predictable order is simplest; repeated calls make steady progress either way.
     return _execute(
         """
-        SELECT id, raw_event_id, color, body_type, make_guess, model_guess, notable_features,
-               plate_text_llm, plate_text_frigate
-        FROM yard_stats.vehicle_sightings
+        SELECT id, raw_event_id, object_label, description
+        FROM yard_stats.sightings
         WHERE embedding IS NULL
         ORDER BY id
         LIMIT %s
@@ -296,11 +295,11 @@ def get_vehicle_sightings_missing_embedding(limit: int) -> list[dict]:
     )
 
 
-def get_person_sightings_missing_embedding(limit: int) -> list[dict]:
+def get_visit_sightings_missing_embedding(limit: int) -> list[dict]:
     return _execute(
         """
-        SELECT id, raw_event_id, description
-        FROM yard_stats.person_sightings
+        SELECT id, visit_id, object_label, description
+        FROM yard_stats.visit_sightings
         WHERE embedding IS NULL
         ORDER BY id
         LIMIT %s
@@ -309,16 +308,16 @@ def get_person_sightings_missing_embedding(limit: int) -> list[dict]:
     )
 
 
-def update_vehicle_sighting_embedding(sighting_id: int, embedding: list[float]) -> None:
+def update_sighting_embedding(sighting_id: int, embedding: list[float]) -> None:
     _execute(
-        "UPDATE yard_stats.vehicle_sightings SET embedding = %s::vector WHERE id = %s",
+        "UPDATE yard_stats.sightings SET embedding = %s::vector WHERE id = %s",
         (_vector_literal(embedding), sighting_id),
     )
 
 
-def update_person_sighting_embedding(sighting_id: int, embedding: list[float]) -> None:
+def update_visit_sighting_embedding(sighting_id: int, embedding: list[float]) -> None:
     _execute(
-        "UPDATE yard_stats.person_sightings SET embedding = %s::vector WHERE id = %s",
+        "UPDATE yard_stats.visit_sightings SET embedding = %s::vector WHERE id = %s",
         (_vector_literal(embedding), sighting_id),
     )
 
@@ -335,68 +334,39 @@ def get_raw_event(event_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
-def get_vehicle_sighting_for_event(raw_event_id: int) -> dict | None:
-    # For GET /events/{id} -- surfaces the AI analysis result (plate, color, description) in the
+def get_sighting_for_event(raw_event_id: int) -> dict | None:
+    # For GET /events/{id} -- surfaces the AI analysis result (object_label + description) in the
     # web UI's lightbox once ai_status='done'. At most one row ever exists per raw_event_id.
     rows = _execute(
         """
-        SELECT vs.id, vs.raw_event_id, re.camera, re.zone, re.start_ts,
-               vs.color, vs.body_type, vs.make_guess, vs.make_confidence,
-               vs.model_guess, vs.model_confidence, vs.notable_features,
-               vs.plate_text_llm, vs.plate_text_frigate, vs.plate_confidence, vs.notes
-        FROM yard_stats.vehicle_sightings vs
-        JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
-        WHERE vs.raw_event_id = %s
+        SELECT s.id, s.raw_event_id, re.camera, re.zone, re.start_ts, s.object_label, s.description
+        FROM yard_stats.sightings s
+        JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
+        WHERE s.raw_event_id = %s
         """,
         (raw_event_id,), fetch=True,
     )
     return rows[0] if rows else None
 
 
-def get_person_sighting_for_event(raw_event_id: int) -> dict | None:
-    rows = _execute(
-        """
-        SELECT ps.id, ps.raw_event_id, re.camera, re.zone, re.start_ts, ps.description, ps.notes
-        FROM yard_stats.person_sightings ps
-        JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
-        WHERE ps.raw_event_id = %s
-        """,
-        (raw_event_id,), fetch=True,
-    )
-    return rows[0] if rows else None
-
-
-def get_sightings_for_visit(visit_id: int) -> dict:
+def get_sightings_for_visit(visit_id: int) -> list[dict]:
     # Every sighting linked to this visit, not just the representative event's -- claim_ai_batch's
     # only_visit_representative now partitions by (visit_id, objects) rather than visit_id alone
     # (see there for why), so a visit can have more than one analyzed event: one representative per
     # distinct object type (a car and a person in the same visit each get their own sighting), not
     # just one per visit. Used by the web UI's visit lightbox to show all of them together instead
-    # of only the single representative event's AI result GET /events/{id} would return.
-    vehicles = _execute(
+    # of only the single representative event's AI result GET /events/{id} would return. One flat
+    # list now (not split by type -- there's no type split anywhere in this universal model).
+    return _execute(
         """
-        SELECT vs.id, vs.raw_event_id, re.camera, re.zone, re.start_ts,
-               vs.color, vs.body_type, vs.make_guess, vs.make_confidence,
-               vs.model_guess, vs.model_confidence, vs.notable_features,
-               vs.plate_text_llm, vs.plate_text_frigate, vs.plate_confidence, vs.notes
-        FROM yard_stats.vehicle_sightings vs
-        JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
+        SELECT s.id, s.raw_event_id, re.camera, re.zone, re.start_ts, s.object_label, s.description
+        FROM yard_stats.sightings s
+        JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
         WHERE re.visit_id = %s
         ORDER BY re.start_ts ASC
         """,
         (visit_id,), fetch=True,
     )
-    persons = _execute(
-        """
-        SELECT ps.id, ps.raw_event_id, re.camera, re.zone, re.start_ts, ps.description, ps.notes
-        FROM yard_stats.person_sightings ps
-        JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
-        WHERE re.visit_id = %s
-        ORDER BY re.start_ts ASC
-        """,
-        (visit_id,), fetch=True,
-    )
-    return {"vehicles": vehicles, "persons": persons}
 
 
 def insert_raw_event(event: dict) -> None:
@@ -457,7 +427,7 @@ def record_visit(review: dict) -> int | None:
     # confirmed live against production Frigate that a review's "camera" is a single value, never
     # a list -- so cameras/camera_count are set for just that one camera; a cross-camera merge on
     # top of this (same zone, overlapping time window, different camera) is a separate, not-yet-
-    # built layer. Insert + link in one transaction, same pattern as complete_vehicle_sighting.
+    # built layer. Insert + link in one transaction, same pattern as complete_sighting.
     # video_status starts 'skipped' (not 'new') when STORE_VIDEO_ALERTS is off -- same reasoning
     # as insert_raw_event's initial_video_status: a cheap flag set once at insert, so the visit
     # video queue's WHERE clause never even considers these rows while the feature is disabled.
@@ -918,34 +888,18 @@ def run_retention_cleanup(retention_months: int) -> None:
 
     _execute(
         """
-        DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id IN (
+        DELETE FROM yard_stats.sightings WHERE raw_event_id IN (
             SELECT id FROM yard_stats.raw_events WHERE start_ts < now() - (%s || ' months')::interval
         )
         """,
         (retention_months,),
     )
+    # visit_sightings references visits(id) with no ON DELETE CASCADE -- must go before the
+    # visits DELETE below, same child-before-parent reasoning as sightings above
+    # (raw_event_id -> raw_events(id)).
     _execute(
         """
-        DELETE FROM yard_stats.person_sightings WHERE raw_event_id IN (
-            SELECT id FROM yard_stats.raw_events WHERE start_ts < now() - (%s || ' months')::interval
-        )
-        """,
-        (retention_months,),
-    )
-    # visit_vehicle_sightings/visit_person_sightings reference visits(id) with no ON DELETE
-    # CASCADE -- must go before the visits DELETE below, same child-before-parent reasoning as
-    # vehicle_sightings/person_sightings above (raw_event_id -> raw_events(id)).
-    _execute(
-        """
-        DELETE FROM yard_stats.visit_vehicle_sightings WHERE visit_id IN (
-            SELECT id FROM yard_stats.visits WHERE start_ts < now() - (%s || ' months')::interval
-        )
-        """,
-        (retention_months,),
-    )
-    _execute(
-        """
-        DELETE FROM yard_stats.visit_person_sightings WHERE visit_id IN (
+        DELETE FROM yard_stats.visit_sightings WHERE visit_id IN (
             SELECT id FROM yard_stats.visits WHERE start_ts < now() - (%s || ' months')::interval
         )
         """,
@@ -986,34 +940,18 @@ def purge_older_than(cutoff: datetime, execute: bool) -> dict:
     # config.RETENTION_MONTHS, and always counts first so a dry run (execute=False) and a real
     # run report the identical shape of result.
     counts = {
-        "vehicle_sightings": _execute(
+        "sightings": _execute(
             """
-            SELECT count(*)::int AS c FROM yard_stats.vehicle_sightings vs
-            JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
+            SELECT count(*)::int AS c FROM yard_stats.sightings s
+            JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
             WHERE re.start_ts < %s
             """,
             (cutoff,), fetch=True,
         )[0]["c"],
-        "person_sightings": _execute(
+        "visit_sightings": _execute(
             """
-            SELECT count(*)::int AS c FROM yard_stats.person_sightings ps
-            JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
-            WHERE re.start_ts < %s
-            """,
-            (cutoff,), fetch=True,
-        )[0]["c"],
-        "visit_vehicle_sightings": _execute(
-            """
-            SELECT count(*)::int AS c FROM yard_stats.visit_vehicle_sightings vvs
-            JOIN yard_stats.visits v ON v.id = vvs.visit_id
-            WHERE v.start_ts < %s
-            """,
-            (cutoff,), fetch=True,
-        )[0]["c"],
-        "visit_person_sightings": _execute(
-            """
-            SELECT count(*)::int AS c FROM yard_stats.visit_person_sightings vps
-            JOIN yard_stats.visits v ON v.id = vps.visit_id
+            SELECT count(*)::int AS c FROM yard_stats.visit_sightings vs
+            JOIN yard_stats.visits v ON v.id = vs.visit_id
             WHERE v.start_ts < %s
             """,
             (cutoff,), fetch=True,
@@ -1046,34 +984,17 @@ def purge_older_than(cutoff: datetime, execute: bool) -> dict:
         deleted_files = _delete_video_files(video_paths)
         _execute(
             """
-            DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id IN (
+            DELETE FROM yard_stats.sightings WHERE raw_event_id IN (
                 SELECT id FROM yard_stats.raw_events WHERE start_ts < %s
             )
             """,
             (cutoff,),
         )
+        # visit_sightings references visits(id) with no ON DELETE CASCADE -- must go before the
+        # visits DELETE below, same reasoning as sightings above.
         _execute(
             """
-            DELETE FROM yard_stats.person_sightings WHERE raw_event_id IN (
-                SELECT id FROM yard_stats.raw_events WHERE start_ts < %s
-            )
-            """,
-            (cutoff,),
-        )
-        # visit_vehicle_sightings/visit_person_sightings reference visits(id) with no ON DELETE
-        # CASCADE -- must go before the visits DELETE below, same reasoning as
-        # vehicle_sightings/person_sightings above.
-        _execute(
-            """
-            DELETE FROM yard_stats.visit_vehicle_sightings WHERE visit_id IN (
-                SELECT id FROM yard_stats.visits WHERE start_ts < %s
-            )
-            """,
-            (cutoff,),
-        )
-        _execute(
-            """
-            DELETE FROM yard_stats.visit_person_sightings WHERE visit_id IN (
+            DELETE FROM yard_stats.visit_sightings WHERE visit_id IN (
                 SELECT id FROM yard_stats.visits WHERE start_ts < %s
             )
             """,
@@ -1101,10 +1022,10 @@ def purge_older_than(cutoff: datetime, execute: bool) -> dict:
 def purge_media_older_than(cutoff: datetime, execute: bool) -> dict:
     # POST /retention/purge's only_media=true mode (the default) -- deletes stored video files off
     # disk and clears the stored image/GIF columns (crop_image_base64/preview_gif_base64) for rows
-    # older than cutoff, but keeps the rows themselves and every text/structured field on them
-    # (AI analysis, plate reads, embeddings) intact and searchable. Unlike purge_older_than, this
-    # never touches vehicle_sightings/person_sightings/visit_vehicle_sightings/
-    # visit_person_sightings at all -- those tables carry no media columns of their own, only text.
+    # older than cutoff, but keeps the rows themselves and every text field on them (AI analysis,
+    # embeddings) intact and searchable. Unlike purge_older_than, this never touches
+    # sightings/visit_sightings at all -- those tables carry no media columns of their own, only
+    # text.
     counts = {
         "raw_events_video_files": _execute(
             "SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE start_ts < %s AND video_path IS NOT NULL",
@@ -1181,23 +1102,13 @@ def _build_events_query(
     join = ""
     if q and q.strip():
         # Free-text search across the AI analysis result, not raw_events itself -- only ever
-        # matches rows that already have a vehicle_sighting or person_sighting (i.e. ai_status
-        # already 'done'), so it composes fine with has_media's default (those rows always have an
-        # image already, by the same crop_status='done' invariant everything else here relies on).
-        # LEFT JOIN both sighting tables rather than picking one, since object_type isn't required
-        # alongside q -- a raw_event only ever matches at most one of the two.
-        join = """
-        LEFT JOIN yard_stats.vehicle_sightings vs ON vs.raw_event_id = re.id
-        LEFT JOIN yard_stats.person_sightings ps ON ps.raw_event_id = re.id
-        """
+        # matches rows that already have a sighting (i.e. ai_status already 'done'), so it
+        # composes fine with has_media's default (those rows always have an image already, by the
+        # same crop_status='done' invariant everything else here relies on).
+        join = "LEFT JOIN yard_stats.sightings s ON s.raw_event_id = re.id"
         term = f"%{q.strip()}%"
-        clauses.append("""(
-            vs.color ILIKE %s OR vs.body_type ILIKE %s OR vs.make_guess ILIKE %s OR
-            vs.model_guess ILIKE %s OR vs.notable_features ILIKE %s OR
-            vs.plate_text_llm ILIKE %s OR vs.plate_text_frigate ILIKE %s OR vs.notes ILIKE %s OR
-            ps.description ILIKE %s OR ps.notes ILIKE %s
-        )""")
-        params.extend([term] * 10)
+        clauses.append("s.description ILIKE %s")
+        params.append(term)
     if has_media and event_id is None and visit_id is None:
         # Default view: hide rows with neither a crop image nor a stored video (crop_status not
         # yet 'done' -- including the 'skipped' rows has_snapshot=false produces, which will never
@@ -1347,29 +1258,22 @@ def _build_visits_query(
         clauses.append("v.start_ts <= %s")
         params.append(end)
     if q and q.strip():
-        # Matches a visit if ANY of its linked raw_events has a vehicle_sighting/person_sighting
-        # whose AI analysis text matches -- same fields/ILIKE substring match as GET /events' own
-        # q. An EXISTS subquery against a fresh raw_events/sighting join, not a condition on the
-        # `re` row already joined into `linked` below -- a visit can group several distinct events
-        # (e.g. a car and a person), and the match might come from either one, not necessarily the
-        # one row_number picks as the representative, so this can't be a plain per-row filter
-        # without breaking event_count/rn (which need every linked event, matching or not).
+        # Matches a visit if ANY of its linked raw_events has a sighting whose AI analysis text
+        # matches -- same ILIKE substring match as GET /events' own q. An EXISTS subquery against
+        # a fresh raw_events/sightings join, not a condition on the `re` row already joined into
+        # `linked` below -- a visit can group several distinct events (e.g. a car and a person),
+        # and the match might come from either one, not necessarily the one row_number picks as
+        # the representative, so this can't be a plain per-row filter without breaking
+        # event_count/rn (which need every linked event, matching or not).
         term = f"%{q.strip()}%"
         clauses.append("""
         EXISTS (
             SELECT 1 FROM yard_stats.raw_events re2
-            LEFT JOIN yard_stats.vehicle_sightings vs2 ON vs2.raw_event_id = re2.id
-            LEFT JOIN yard_stats.person_sightings ps2 ON ps2.raw_event_id = re2.id
-            WHERE re2.visit_id = v.id
-              AND (
-                vs2.color ILIKE %s OR vs2.body_type ILIKE %s OR vs2.make_guess ILIKE %s OR
-                vs2.model_guess ILIKE %s OR vs2.notable_features ILIKE %s OR
-                vs2.plate_text_llm ILIKE %s OR vs2.plate_text_frigate ILIKE %s OR vs2.notes ILIKE %s OR
-                ps2.description ILIKE %s OR ps2.notes ILIKE %s
-              )
+            JOIN yard_stats.sightings s2 ON s2.raw_event_id = re2.id
+            WHERE re2.visit_id = v.id AND s2.description ILIKE %s
         )
         """)
-        params.extend([term] * 10)
+        params.append(term)
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     query = f"""
@@ -1429,14 +1333,20 @@ def count_visits(
     return rows[0]["count"]
 
 
-def get_vehicle_sightings(
+def get_sightings(
     camera: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
-    plate_text: str | None = None,
+    object_label: str | None = None,
+    q: str | None = None,
     limit: int = 20,
     offset: int = 0,
 ) -> list:
+    # Replaces the former get_vehicle_sightings/get_person_sightings split -- one universal list,
+    # optionally narrowed to a specific Frigate label (object_label) rather than a fixed type.
+    # q is a free-text substring match across description -- the old vehicle-only plate_text
+    # filter doesn't apply anymore now that plate text (if the prompt asked for it) just lives
+    # inside description like everything else; q covers that and anything else equally.
     clauses = []
     params: list = []
     if camera:
@@ -1448,55 +1358,20 @@ def get_vehicle_sightings(
     if end:
         clauses.append("re.start_ts <= %s")
         params.append(end)
-    if plate_text:
-        clauses.append("(vs.plate_text_llm ILIKE %s OR vs.plate_text_frigate ILIKE %s)")
-        params.extend([f"%{plate_text}%", f"%{plate_text}%"])
+    if object_label:
+        clauses.append("s.object_label = %s")
+        params.append(object_label)
+    if q:
+        clauses.append("s.description ILIKE %s")
+        params.append(f"%{q}%")
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     params.extend([limit, offset])
     return _execute(
         f"""
-        SELECT vs.id, vs.raw_event_id, re.camera, re.zone, re.start_ts,
-               vs.color, vs.body_type, vs.make_guess, vs.make_confidence,
-               vs.model_guess, vs.model_confidence, vs.notable_features,
-               vs.plate_text_llm, vs.plate_text_frigate, vs.plate_confidence, vs.notes
-        FROM yard_stats.vehicle_sightings vs
-        JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
-        {where}
-        ORDER BY re.start_ts DESC
-        LIMIT %s OFFSET %s
-        """,
-        params,
-        fetch=True,
-    )
-
-
-def get_person_sightings(
-    camera: str | None = None,
-    start: datetime | None = None,
-    end: datetime | None = None,
-    limit: int = 20,
-    offset: int = 0,
-) -> list:
-    clauses = []
-    params: list = []
-    if camera:
-        clauses.append("re.camera = %s")
-        params.append(camera)
-    if start:
-        clauses.append("re.start_ts >= %s")
-        params.append(start)
-    if end:
-        clauses.append("re.start_ts <= %s")
-        params.append(end)
-
-    where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    params.extend([limit, offset])
-    return _execute(
-        f"""
-        SELECT ps.id, ps.raw_event_id, re.camera, re.zone, re.start_ts, ps.description, ps.notes
-        FROM yard_stats.person_sightings ps
-        JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
+        SELECT s.id, s.raw_event_id, re.camera, re.zone, re.start_ts, s.object_label, s.description
+        FROM yard_stats.sightings s
+        JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
         {where}
         ORDER BY re.start_ts DESC
         LIMIT %s OFFSET %s
@@ -1511,18 +1386,10 @@ def get_stats_summary(start: datetime, end: datetime) -> dict:
         "SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE start_ts >= %s AND start_ts <= %s",
         (start, end), fetch=True,
     )[0]["c"]
-    total_vehicle_sightings = _execute(
+    total_sightings = _execute(
         """
-        SELECT count(*)::int AS c FROM yard_stats.vehicle_sightings vs
-        JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
-        WHERE re.start_ts >= %s AND re.start_ts <= %s
-        """,
-        (start, end), fetch=True,
-    )[0]["c"]
-    total_person_sightings = _execute(
-        """
-        SELECT count(*)::int AS c FROM yard_stats.person_sightings ps
-        JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
+        SELECT count(*)::int AS c FROM yard_stats.sightings s
+        JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
         WHERE re.start_ts >= %s AND re.start_ts <= %s
         """,
         (start, end), fetch=True,
@@ -1556,8 +1423,7 @@ def get_stats_summary(start: datetime, end: datetime) -> dict:
         "start": start,
         "end": end,
         "total_events": total_events,
-        "total_vehicle_sightings": total_vehicle_sightings,
-        "total_person_sightings": total_person_sightings,
+        "total_sightings": total_sightings,
         "by_camera": by_camera,
         "by_object_type": by_object_type,
         "by_day": by_day,
@@ -1721,71 +1587,28 @@ def claim_ai_batch(
     return rows
 
 
-def complete_vehicle_sighting(
+def complete_sighting(
     raw_event_id: int,
-    color: str | None,
-    body_type: str | None,
-    make_guess: str | None,
-    make_confidence: str | None,
-    model_guess: str | None,
-    model_confidence: str | None,
-    notable_features: str | None,
-    plate_text_llm: str | None,
-    plate_text_frigate: str | None,
-    plate_confidence: str | None,
-    notes: str | None,
+    object_label: str | None,
+    description: str | None,
     embedding: list[float] | None = None,
 ) -> int:
-    # Insert + mark ai_status='done' in one transaction -- replaces the old Insert Vehicle
+    # Insert + mark ai_status='done' in one transaction -- replaces the old Insert Vehicle/Person
     # Sighting + Mark Done pair of n8n Postgres nodes, closing the gap where a crash between the
-    # two left the row stuck 'processing' until the next reap.
+    # two left the row stuck 'processing' until the next reap. One universal function now --
+    # object_label is just data on the row (whatever raw_events.objects said), not a branch;
+    # there's no vehicle-vs-person split anywhere in this function or the table it writes to.
     conn = get_conn()
     conn.autocommit = False
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                INSERT INTO yard_stats.vehicle_sightings
-                    (raw_event_id, color, body_type, make_guess, make_confidence,
-                     model_guess, model_confidence, notable_features,
-                     plate_text_llm, plate_text_frigate, plate_confidence, notes, embedding)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
-                RETURNING id
-                """,
-                (raw_event_id, color, body_type, make_guess, make_confidence,
-                 model_guess, model_confidence, notable_features,
-                 plate_text_llm, plate_text_frigate, plate_confidence, notes,
-                 _vector_literal(embedding)),
-            )
-            sighting_id = cur.fetchone()["id"]
-            cur.execute(
-                "UPDATE yard_stats.raw_events SET ai_status = 'done', ai_status_changed_at = now() WHERE id = %s",
-                (raw_event_id,),
-            )
-        conn.commit()
-        return sighting_id
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.autocommit = True
-
-
-def complete_person_sighting(
-    raw_event_id: int, description: str | None, notes: str | None,
-    embedding: list[float] | None = None,
-) -> int:
-    conn = get_conn()
-    conn.autocommit = False
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                INSERT INTO yard_stats.person_sightings (raw_event_id, description, notes, embedding)
+                INSERT INTO yard_stats.sightings (raw_event_id, object_label, description, embedding)
                 VALUES (%s, %s, %s, %s::vector)
                 RETURNING id
                 """,
-                (raw_event_id, description, notes, _vector_literal(embedding)),
+                (raw_event_id, object_label, description, _vector_literal(embedding)),
             )
             sighting_id = cur.fetchone()["id"]
             cur.execute(
@@ -1808,56 +1631,40 @@ def semantic_search_sightings(
     object_types: list[str] | None = None,
     limit: int = 10,
 ) -> list[dict]:
-    # Cosine-distance ("<=>") ordered search across vehicle_sightings/person_sightings, filtered by
+    # Cosine-distance ("<=>") ordered search across the one universal sightings table, filtered by
     # time range -- the agent resolves "last week"/"today" into concrete start/end itself (see
     # CLAUDE.md), this only ever ranks by semantic similarity *within* that already-resolved window,
     # same division of labor claim_ai_batch's own time filters already have. embedding IS NOT NULL
-    # naturally excludes sightings from before this feature existed (or any n8n run that didn't
-    # attach one) -- they're simply not semantically searchable, not an error.
-    vector_literal = _vector_literal(embedding)
-    want_vehicles = object_types is None or "vehicle" in object_types
-    want_persons = object_types is None or "person" in object_types
-    parts = []
-    params: list = []
-    if want_vehicles:
-        parts.append(
-            """
-            SELECT 'vehicle' AS sighting_type, vs.id AS sighting_id, vs.raw_event_id,
-                   re.start_ts, re.camera, re.objects,
-                   vs.color, vs.body_type, vs.make_guess, vs.model_guess,
-                   vs.notable_features, vs.plate_text_llm, vs.plate_text_frigate,
-                   NULL AS description,
-                   vs.embedding <=> %s::vector AS distance
-            FROM yard_stats.vehicle_sightings vs
-            JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
-            WHERE vs.embedding IS NOT NULL
-              AND (%s::timestamptz IS NULL OR re.start_ts >= %s)
-              AND (%s::timestamptz IS NULL OR re.start_ts <= %s)
-            """
-        )
-        params.extend([vector_literal, start, start, end, end])
-    if want_persons:
-        parts.append(
-            """
-            SELECT 'person' AS sighting_type, ps.id AS sighting_id, ps.raw_event_id,
-                   re.start_ts, re.camera, re.objects,
-                   NULL AS color, NULL AS body_type, NULL AS make_guess, NULL AS model_guess,
-                   NULL AS notable_features, NULL AS plate_text_llm, NULL AS plate_text_frigate,
-                   ps.description,
-                   ps.embedding <=> %s::vector AS distance
-            FROM yard_stats.person_sightings ps
-            JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
-            WHERE ps.embedding IS NOT NULL
-              AND (%s::timestamptz IS NULL OR re.start_ts >= %s)
-              AND (%s::timestamptz IS NULL OR re.start_ts <= %s)
-            """
-        )
-        params.extend([vector_literal, start, start, end, end])
-    if not parts:
-        return []
-    query = " UNION ALL ".join(parts) + " ORDER BY distance ASC LIMIT %s"
+    # naturally excludes sightings from before this feature existed (or any run that didn't attach
+    # one) -- they're simply not semantically searchable, not an error. object_types now filters by
+    # the actual Frigate label (object_label) directly -- e.g. ["car", "dog"] -- rather than the
+    # old pseudo-categories ("vehicle"/"person") the two-table split used to require.
+    clauses = ["s.embedding IS NOT NULL"]
+    params: list = [_vector_literal(embedding)]
+    if start:
+        clauses.append("re.start_ts >= %s")
+        params.append(start)
+    if end:
+        clauses.append("re.start_ts <= %s")
+        params.append(end)
+    if object_types:
+        clauses.append("s.object_label = ANY(%s)")
+        params.append(object_types)
+    where = " AND ".join(clauses)
     params.append(limit)
-    return _execute(query, tuple(params), fetch=True)
+    return _execute(
+        f"""
+        SELECT s.id AS sighting_id, s.raw_event_id, re.start_ts, re.camera, re.objects,
+               s.object_label, s.description, s.embedding <=> %s::vector AS distance
+        FROM yard_stats.sightings s
+        JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
+        WHERE {where}
+        ORDER BY distance ASC
+        LIMIT %s
+        """,
+        params,
+        fetch=True,
+    )
 
 
 def fail_ai_event(event_id: int, max_attempts: int) -> dict:
@@ -1913,7 +1720,7 @@ def claim_alert_ai_batch(
     # event's objects (the single event the grid was actually framed around via its region/box),
     # not visits.objects (a comma-joined list that can span several distinct types per visit,
     # e.g. "car,person" -- see record_visit) -- the grid is inherently single-object-framed, so the
-    # representative event's own type is what determines which prompt/sighting_type applies.
+    # representative event's own label is what determines which profiles.yaml prompt applies.
     reap_stale_alert_ai_processing(stale_minutes)
     in_progress = count_alert_ai_in_progress()
     capacity = max(0, parallel_limit - in_progress)
@@ -1963,71 +1770,25 @@ def claim_alert_ai_batch(
     )
 
 
-def complete_visit_vehicle_sighting(
+def complete_visit_sighting(
     visit_id: int,
-    color: str | None,
-    body_type: str | None,
-    make_guess: str | None,
-    make_confidence: str | None,
-    model_guess: str | None,
-    model_confidence: str | None,
-    notable_features: str | None,
-    plate_text_llm: str | None,
-    plate_confidence: str | None,
-    notes: str | None,
+    object_label: str | None,
+    description: str | None,
     embedding: list[float] | None = None,
 ) -> int:
-    # Same insert-plus-mark-done-in-one-transaction shape as complete_vehicle_sighting, just
-    # against visit_vehicle_sightings/visits.alert_ai_status instead of vehicle_sightings/
-    # raw_events.ai_status. No plate_text_frigate equivalent -- Frigate's own LPR read
-    # (raw_events.sub_label) is per-event, this analysis is per-visit.
+    # Same insert-plus-mark-done-in-one-transaction shape as complete_sighting, just against
+    # visit_sightings/visits.alert_ai_status instead of sightings/raw_events.ai_status.
     conn = get_conn()
     conn.autocommit = False
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                INSERT INTO yard_stats.visit_vehicle_sightings
-                    (visit_id, color, body_type, make_guess, make_confidence,
-                     model_guess, model_confidence, notable_features,
-                     plate_text_llm, plate_confidence, notes, embedding)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
-                RETURNING id
-                """,
-                (visit_id, color, body_type, make_guess, make_confidence,
-                 model_guess, model_confidence, notable_features,
-                 plate_text_llm, plate_confidence, notes,
-                 _vector_literal(embedding)),
-            )
-            sighting_id = cur.fetchone()["id"]
-            cur.execute(
-                "UPDATE yard_stats.visits SET alert_ai_status = 'done', alert_ai_status_changed_at = now() WHERE id = %s",
-                (visit_id,),
-            )
-        conn.commit()
-        return sighting_id
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.autocommit = True
-
-
-def complete_visit_person_sighting(
-    visit_id: int, description: str | None, notes: str | None,
-    embedding: list[float] | None = None,
-) -> int:
-    conn = get_conn()
-    conn.autocommit = False
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                INSERT INTO yard_stats.visit_person_sightings (visit_id, description, notes, embedding)
+                INSERT INTO yard_stats.visit_sightings (visit_id, object_label, description, embedding)
                 VALUES (%s, %s, %s, %s::vector)
                 RETURNING id
                 """,
-                (visit_id, description, notes, _vector_literal(embedding)),
+                (visit_id, object_label, description, _vector_literal(embedding)),
             )
             sighting_id = cur.fetchone()["id"]
             cur.execute(
@@ -2061,33 +1822,19 @@ def fail_alert_ai_event(visit_id: int, max_attempts: int) -> dict:
 
 
 def get_visit_alert_sighting(visit_id: int) -> dict | None:
-    # The visit's own alert-stage (2x2 grid) analysis, if AI_ALERTS_ENABLED has produced one --
-    # used by GET /visits/{id}/sightings so the web UI's Visits-tab lightbox can prefer this over
-    # the representative event's own per-event sighting (see get_sightings_for_visit), falling back
-    # to that when this is null (alert stage off, or not finished yet for this visit).
-    vehicle = _execute(
+    # The visit's own alert-stage (composite grid) analysis, if AI_ALERTS_ENABLED has produced
+    # one -- used by GET /visits/{id}/sightings so the web UI's Visits-tab lightbox can prefer
+    # this over the representative event's own per-event sighting (see get_sightings_for_visit),
+    # falling back to that when this is null (alert stage off, or not finished yet for this visit).
+    rows = _execute(
         """
-        SELECT id, visit_id, color, body_type, make_guess, make_confidence,
-               model_guess, model_confidence, notable_features,
-               plate_text_llm, plate_confidence, notes
-        FROM yard_stats.visit_vehicle_sightings WHERE visit_id = %s
+        SELECT id, visit_id, object_label, description
+        FROM yard_stats.visit_sightings WHERE visit_id = %s
         ORDER BY id DESC LIMIT 1
         """,
         (visit_id,), fetch=True,
     )
-    if vehicle:
-        return {"sighting_type": "vehicle", **vehicle[0]}
-    person = _execute(
-        """
-        SELECT id, visit_id, description, notes
-        FROM yard_stats.visit_person_sightings WHERE visit_id = %s
-        ORDER BY id DESC LIMIT 1
-        """,
-        (visit_id,), fetch=True,
-    )
-    if person:
-        return {"sighting_type": "person", **person[0]}
-    return None
+    return rows[0] if rows else None
 
 
 def get_report_data(
@@ -2144,37 +1891,23 @@ def get_report_data(
         gif_image_expr = "NULL"
     elif include_preview == "image":
         gif_image_expr = "NULL"
-    # visit_id is included so report.py can group a visit's vehicle + person sightings into one
-    # combined alert entry (source="visits" only -- always NULL under source="events", where
-    # there's no grouping concept and every sighting is its own entry).
-    vehicles = _execute(
+    # visit_id is included so report.py can group a visit's sightings into one combined alert
+    # entry (source="visits" only -- always NULL under source="events", where there's no grouping
+    # concept and every sighting is its own entry). One universal query now -- object_label tells
+    # report.py what kind of sighting each row is, there's no separate vehicles/persons split to
+    # union or render differently.
+    sightings = _execute(
         f"""
         SELECT re.id AS raw_event_id, re.visit_id, re.camera, re.zone, re.start_ts,
                {crop_image_expr} AS crop_image_base64, {gif_image_expr} AS preview_gif_base64,
-               vs.color, vs.body_type, vs.make_guess, vs.make_confidence,
-               vs.model_guess, vs.model_confidence, vs.notable_features,
-               vs.plate_text_llm, vs.plate_text_frigate, vs.notes
-        FROM yard_stats.vehicle_sightings vs
-        JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
+               s.object_label, s.description
+        FROM yard_stats.sightings s
+        JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
         {visit_join}
-        WHERE vs.created_at >= %s AND vs.created_at <= %s
+        WHERE s.created_at >= %s AND s.created_at <= %s
         {visit_clause}
         ORDER BY re.start_ts DESC
         """,
         (start, end), fetch=True,
     )
-    persons = _execute(
-        f"""
-        SELECT re.id AS raw_event_id, re.visit_id, re.camera, re.zone, re.start_ts,
-               {crop_image_expr} AS crop_image_base64, {gif_image_expr} AS preview_gif_base64,
-               ps.description, ps.notes
-        FROM yard_stats.person_sightings ps
-        JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
-        {visit_join}
-        WHERE ps.created_at >= %s AND ps.created_at <= %s
-        {visit_clause}
-        ORDER BY re.start_ts DESC
-        """,
-        (start, end), fetch=True,
-    )
-    return {"vehicles": vehicles, "persons": persons}
+    return {"sightings": sightings}

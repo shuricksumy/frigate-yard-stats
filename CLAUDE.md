@@ -79,16 +79,17 @@ ingest-worker/  (Python, one container, no LLM calls)
      static web report UI at /ui (Alpine.js, no build step) over that same API
    │  (crop_status = 'done', crop_image_base64/sub_label/score already on the row)
    ▼
-n8n Metadata Processor (car/truck/person, one shared queue) -- AI stage only, no Frigate/crop/video/
+n8n Metadata Processor (any object type, one shared queue) -- AI stage only, no Frigate/crop/video/
 Telegram calls
    - POST /ai-queue/claim -- reap stale, count in-progress, atomically claim a batch, all in one call
-   - route by object type, call the VLM(s) directly against the claimed row's crop_image_base64
-   - POST /sightings/vehicles or /sightings/persons -- insert + mark ai_status='done' in one call
+   - route by object type (per `profiles.yaml`), call the VLM directly against the claimed row's
+     crop_image_base64 -- the prompt alone decides what gets captured, no per-type response schema
+   - POST /sightings -- insert + mark ai_status='done' in one call, for ANY object type/label
    - on VLM failure: POST /ai-queue/{id}/fail -- retry-or-fail-with-cap
    │
    ▼
 Daily Report / Q&A agent (n8n) -- read-only, calls ingest-worker's query/report API
-   (which itself only ever reads *_sightings rows, i.e. AI-analyzed events)
+   (which itself only ever reads sightings rows, i.e. AI-analyzed events)
 ```
 
 Three independent queue state machines live on `raw_events` -- `crop_status`/`crop_status_changed_at`/
@@ -147,20 +148,47 @@ are actually enforced.
   invariant, calling `llama_slot_proxy` directly instead of going through n8n; the two are meant to
   be run one at a time, not both.
 - **VLM inference** goes through the user's existing `llama_slot_proxy` setup — one more per-agent
-  slot/port pointing at its own `.gguf` + `mmproj` pair. Vehicle attributes and plate OCR are a
-  single combined call to one model (merged for speed -- see `n8n/metadata-processor.json`'s
-  `Call Qwen (Attributes + Plate)` node); `plate_text_frigate` is kept alongside `plate_text_llm`
-  as a cross-check regardless.
+  slot/port pointing at its own `.gguf` + `mmproj` pair, one slot per Frigate object label (or
+  shared across labels via a YAML anchor in `profiles.yaml`, e.g. `car`/`truck` sharing one
+  vehicle slot). There is no structured attribute schema requested of the model at all -- the
+  prompt asks for whatever's relevant to that label (color/body type/plate for a car, clothing for
+  a person, anything at all for a dog) and the model's plain-text answer is stored as-is. Frigate's
+  own LPR read (`raw_events.sub_label`) still exists on every row regardless of what the VLM
+  prompt for that label asks about, but there's no dedicated `plate_text_llm` column to
+  cross-check it against anymore -- a plate reference the VLM includes just lives inside its free
+  text `description`, same as any other detail.
 - **Postgres**: `postgres-projects` container, database `home_automation`, schema `yard_stats`
   (schema-per-project convention — future unrelated projects get their own schema).
+
+### Universal sightings -- one table per grouping level, not one per object type
+
+There is exactly one AI-analysis result shape in this project: `yard_stats.sightings`
+(`raw_event_id`, `object_label`, `description`, `embedding`, `created_at`) for the events stage,
+and `yard_stats.visit_sightings` (same shape, keyed by `visit_id` instead) for the alerts stage.
+Neither table has a single structured column beyond `object_label` (the Frigate label the row
+came from, e.g. `car`/`truck`/`person`/`dog`) -- `description` is always plain free text, whatever
+the VLM said in response to that label's `profiles.yaml` prompt. There is no `vehicle_sightings`/
+`person_sightings` split, no `sighting_type` discriminator, and no per-type parsing/JSON-schema
+step anywhere in the pipeline: a car, a person, a dog, and any future label all flow through the
+exact same `db.complete_sighting`/`complete_visit_sighting` insert and the exact same
+`ai_worker.py`/`alert_ai_worker.py` code path. Adding support for a brand-new object type (e.g.
+`cat`, `package`) is purely a `profiles.yaml` edit (one more `object_types` entry with its own
+`chat_path`/`event_prompt`/`alert_prompt`) -- no schema migration, no new table, no code change of
+any kind. This was a deliberate from-scratch redesign, not an incremental migration: the prior
+`vehicle_sightings`/`person_sightings`/`visit_vehicle_sightings`/`visit_person_sightings` tables
+(with their structured color/body_type/make_guess/model_guess/notable_features/plate_text_llm/
+plate_text_frigate/notes columns) were dropped entirely, along with every n8n workflow node and
+Python function that assumed a two-category (vehicle/person) world. There is no compatibility
+shim and no migration path from the old shape -- a deployment upgrading across this change starts
+with an empty `sightings`/`visit_sightings` table, same as a from-scratch install.
 
 ### Query/report/AI-queue API
 
 `ingest-worker`'s FastAPI app has two tiers: `/health`, `/status`, `/crop/{id}`, `/retention/run`
 are unauthenticated admin/debug endpoints (unchanged since the original split). Everything else --
-`/events`, `/sightings/vehicles`, `/sightings/persons`, `/stats/summary`, `/reports/generate`,
+`/events`, `/sightings`, `/stats/summary`, `/reports/generate`,
 `/ai-queue/claim` / `/ai-queue/{id}/fail`, and `/retention/purge` -- requires an `X-API-Key` header
-(`config.API_KEY`) since they expose queryable sighting data (including plate text), mutate the
+(`config.API_KEY`) since they expose queryable sighting data, mutate the
 AI-stage queue, or bulk-delete rows over the network. `ingest-worker` never calls an LLM to serve
 any of these — the write endpoints just execute the claim/insert/retry/delete mechanics; the VLM
 call and prompt still live entirely in n8n, which posts the result back.
@@ -174,13 +202,13 @@ explicitly. A second mode, `only_media` (defaults to `true`), decides *what* get
 - **`only_media=true`** (default) -- `db.purge_media_older_than`: deletes stored video files off
   disk and clears the stored image/GIF columns (`crop_image_base64`/`preview_gif_base64` on both
   `raw_events` and `visits`) for rows older than the cutoff, but keeps every row and all its
-  text/structured fields (AI analysis, plate reads, descriptions, embeddings) -- old data stays
+  text fields (AI analysis description, embeddings) -- old data stays
   fully searchable via `/events`'/`/visits`' `q` filter and `/search/semantic`, just with the media
-  payload gone. Never touches `vehicle_sightings`/`person_sightings`/`visit_vehicle_sightings`/
-  `visit_person_sightings` at all -- none of those tables carry media columns of their own.
+  payload gone. Never touches `sightings`/`visit_sightings` at all -- neither table carries media
+  columns of its own.
 - **`only_media=false`** -- `db.purge_older_than` (today's original behavior): deletes the rows
   entirely -- same FK-safe child-before-parent delete order as `db.run_retention_cleanup`, extended
-  to also delete `visit_vehicle_sightings`/`visit_person_sightings` before `visits` (added
+  to also delete `visit_sightings` before `visits` (added
   alongside the alert AI stage -- see below) and to decouple `raw_events.visit_id` from a
   to-be-deleted `visit` *before* deleting that `visit`, not after. On a real `confirm=true` run,
   the endpoint also rebuilds both HNSW indexes afterward (`db.reindex_vector_indexes`) -- a full
@@ -223,8 +251,8 @@ no model in this setup analyzes video directly; `require_video` only changes whi
 eligible to claim, not what gets sent to the VLM.
 
 The optional `source` param (`events`, the default, or `visits`) lets n8n A/B which grouping level
-the AI stage analyzes, without touching completion at all -- `POST /sightings/vehicles|persons`
-still mark the exact same claimed raw_event's `ai_status='done'` either way, since this is purely
+the AI stage analyzes, without touching completion at all -- `POST /sightings`
+still marks the exact same claimed raw_event's `ai_status='done'` either way, since this is purely
 a claim-time filter (`db.claim_ai_batch`'s `only_visit_representative` param), not a schema or
 queue-state change (no `ai_status` column was added to `visits`). `source=visits` skips analyzing
 every duplicate det_id a visit (see "Visit grouping" below) already grouped together -- one
@@ -261,12 +289,13 @@ event -- a different, display-only "representative" used by `list_visits`, unrel
 events actually got analyzed) -- the visit branch always fetches, since one object type's sighting
 can be ready while another's is still pending.
 
-`vehicleFields` renders as one combined "Description" line (color + body type + make + model, then
-notable_features, then plate) instead of a Color/Body type/Make/Model/Plate table -- reads like the
-Person side's single Description line rather than a spreadsheet of individual fields a reader has
-to scan across. Same combination logic as `report.py`'s `_vehicle_summary`, kept in sync
-deliberately (both exist to answer the same "describe this sighting in one line" need, just for
-different surfaces -- the web UI lightbox vs. the alerts report).
+The web UI's lightbox renders a sighting's `description` directly, as one plain-text line -- there
+is no per-field table (Color/Body type/Make/Model/Plate or similar) to render at all, since the
+universal `sightings`/`visit_sightings` schema has no structured fields beyond `object_label`.
+This is the same free-text line every other surface (the alerts report, Telegram, semantic search)
+reads and embeds -- there's exactly one representation of "what did the VLM say about this
+sighting," not a structured form the UI reflows and a separate summary line the report/embedding
+code builds from it.
 
 The optional `visits_only` param (default `false`, only meaningful alongside `source=visits`)
 drops that ungrouped-event fallback entirely -- with it set, a raw_event Frigate's review never
@@ -292,11 +321,12 @@ the claimed rows, which then sat until `stale_minutes` reaped them back to `retr
 repeated -- confirmed by reproducing the exact 500 locally, then confirming claims complete
 cleanly end-to-end once the two computed columns were added to the `RETURNING` clause.)
 
-`POST /sightings/vehicles` and
-`POST /sightings/persons` insert the sighting and mark `ai_status='done'` in one DB transaction
-(`db.complete_vehicle_sighting`/`complete_person_sighting`, temporarily flipping the module
-connection to `autocommit=False`) -- this closes a small gap the old two-Postgres-node version had,
-where a crash between Insert and Mark Done left the row `processing` until the next reap.
+`POST /sightings` inserts the sighting (any `object_label`) and marks `ai_status='done'` in one DB
+transaction (`db.complete_sighting`, temporarily flipping the module connection to
+`autocommit=False`) -- this closes a small gap the old two-Postgres-node version had, where a
+crash between Insert and Mark Done left the row `processing` until the next reap. One endpoint
+handles every object type -- there's no `/sightings/vehicles` vs `/sightings/persons` split to
+route between, since the row shape is identical regardless of label.
 
 `/reports/generate` replaced what used to be two Postgres query nodes plus a Code-node HTML
 builder inside `n8n/daily-report.json` (`report.py` now owns that logic) — this also fixed a real
@@ -320,22 +350,23 @@ the default) and `n8n/alerts-report.json` (visits, `source=visits`) can both run
 schedules without any conflict.
 
 `source=visits`'s HTML also renders differently from `source=events`'s, not just differently
-dedup'd: `report.py`'s `_group_by_visit` groups a visit's vehicle and person sightings into one
-combined alert row (image, time, camera, a Vehicle summary column, a Person summary column)
-instead of two disjoint Vehicles/Persons tables -- a visit's car and person sightings (e.g. someone
-getting out of their car) are the same real-world activity, so the alerts report shows them
-together rather than as two separately-scrolled, unrelated-looking rows a reader has to manually
-reassociate by timestamp. Grouping key is `visit_id` (added to `get_report_data`'s SELECT for
-exactly this), falling back to the raw_event's own id for a sighting that was never grouped into a
-visit at all (a group of one, same as today). The earliest sighting in a group represents its
-time/camera/image (`crop_image_base64` is already consistently the visit's own thumb-crop across
-every sighting in the group once `VISIT_THUMB_CROP_ENABLED` and done -- see the `COALESCE` above --
-so this only matters for picking which event's own crop to show when it isn't). `_vehicle_summary`/
-`_person_summary` flatten each sighting's structured fields (color/body/make/model/notable_features
-/plate, or description) into one short line per sighting, joined with `; ` if a visit somehow has
-more than one of the same type. `source=events` (the default, `n8n/daily-report.json`) keeps the
-original separate-tables rendering -- there's no visit grouping concept to apply there, every
-sighting already stands alone.
+dedup'd: `report.py`'s `_group_by_visit` groups every sighting a visit produced (any mix of object
+labels -- a car and a person, two cars, whatever Frigate actually grouped) into one combined alert
+row (image, time, camera, one "Sightings" column) instead of one row per sighting -- a visit's
+several sightings (e.g. someone getting out of their car) are the same real-world activity, so the
+alerts report shows them together rather than as separately-scrolled, unrelated-looking rows a
+reader has to manually reassociate by timestamp. Grouping key is `visit_id` (added to
+`get_report_data`'s SELECT for exactly this), falling back to the raw_event's own id for a sighting
+that was never grouped into a visit at all (a group of one, same as today). The earliest sighting
+in a group represents its time/camera/image (`crop_image_base64` is already consistently the
+visit's own thumb-crop across every sighting in the group once `VISIT_THUMB_CROP_ENABLED` and done
+-- see the `COALESCE` above -- so this only matters for picking which event's own crop to show when
+it isn't). `_build_alert_rows` joins each group's sightings into one labeled line per sighting
+(`"{object_label}: {description}"`, e.g. `"car: orange suv, roof rails, plate 10MO407"` /
+`"person: dark jacket"`), joined with `; ` -- there's no separate summary-flattening step, since
+`description` already is the one-line summary for every object type. `source=events` (the default,
+`n8n/daily-report.json`) renders one row per sighting with its own Type/Description columns --
+there's no visit grouping concept to apply there, every sighting already stands alone.
 
 ### One AI-stage n8n processing workflow, not two
 
@@ -368,7 +399,7 @@ below for the sibling stage that analyzes the grid. (Renamed from the original s
 `AI_STAGE_ENABLED` once a second, independent stage existed to split from -- see that section for
 why the split happened and the real gap it fixes.) It calls the exact same three `db.py`
 functions n8n's HTTP calls already wrap -- `claim_ai_batch`, `fail_ai_event`,
-`complete_vehicle_sighting`/`complete_person_sighting` -- directly rather than over HTTP, so **no
+`complete_sighting` -- directly rather than over HTTP, so **no
 `db.py`/`api.py`/schema change was needed at all** for the queue mechanics. `claim_ai_batch` already
 folds reap-stale + count-in-progress + capacity + claim into one call (unlike crop/video's claim
 functions), so `ai_worker.run_once` is simpler than `crop_worker.run_once` -- just one call plus a
@@ -388,37 +419,38 @@ to -- so editing it and restarting the container is enough to change prompts/mod
 rebuild needed. `frigate/ingest-worker/profiles.yaml` is a separate copy still baked into the image
 via the Dockerfile's `COPY . .` (same as `schema.sql`) purely as a fallback default for if that
 bind mount is ever removed -- the two aren't linked, keep them in sync by hand if you edit one.
-Two-level structure: `object_types` maps a Frigate
-object label (`raw_events.objects`) to a `sighting_type` ("vehicle" or "person" -- which table/
-prompt/parsing shape to use); `vehicle`/`person` sections hold that type's `chat_path` (appended to
-`LLAMA_PROXY_BASE_URL` -- `llama_slot_proxy`'s convention is one URL path segment per model slot,
-e.g. `/spare/v1/chat/completions`, not a `model` field in the request body), shared by both stages,
-plus **two** separate prompts rather than one: `event_prompt` (this stage -- framed for the single
-static frame it actually receives) and `alert_prompt` (the alert stage below -- framed for the
-composite grid it receives instead). Originally a single `prompt` field, ported verbatim from
-`metadata-processor.json`'s `Call Qwen (Attributes + Plate)`/`Call VLM (Person)` nodes and already
-written as if it were receiving a 2x2 grid -- split in two once it became clear this stage never
-actually sent one (see "Alert AI stage" below). Keep `event_prompt` in sync with
-`metadata-processor.json`'s own node if you're switching between the two flows, so analysis quality
-doesn't change with the switch -- that n8n workflow only ever sends a single-frame crop today, same
-as this stage's `event_prompt`, never the grid. **A Frigate object label with no `object_types` entry (e.g. `dog`, which
-has no matching sightings table) is simply never claimed by this stage at all** -- its
-`object_types` keys become exactly the `object_types` list passed to `claim_ai_batch`, so an
-unmapped type's rows just stay `ai_status='new'` indefinitely, the same as if the stage were off for
-that one type. Not a bug to fix -- there's nowhere to store a "dog sighting" today.
+**Flat structure, one level, universal across every object type**: `object_types` maps a Frigate
+object label (`raw_events.objects`, e.g. `car`, `truck`, `person`, or any future label like `dog`)
+directly to that label's own `{chat_path, timeout_seconds, event_prompt, alert_prompt}` -- there is
+no intermediate `sighting_type`/"vehicle-or-person" grouping level, and no separate
+`vehicle:`/`person:` sections holding shared config. `chat_path` is appended to
+`LLAMA_PROXY_BASE_URL` (`llama_slot_proxy`'s convention is one URL path segment per model slot,
+e.g. `/spare/v1/chat/completions`, not a `model` field in the request body); two labels that should
+share one model/prompt (e.g. `car` and `truck`) just point at the same YAML anchor
+(`&vehicle_profile`/`*vehicle_profile`) rather than needing a grouping concept in the schema.
+`event_prompt` (this stage -- framed for the single static frame it actually receives) and
+`alert_prompt` (the alert stage below -- framed for the composite grid it receives instead) are
+plain free-text instructions, e.g. "describe the vehicle's color, body type, and the license plate
+text if visible" or "describe their clothing colors and what they appear to be doing" -- the model's
+answer is stored verbatim as `description`, with **no JSON schema requested and no response
+parsing at all**. This is deliberate, not a simplification left for later: a fixed JSON
+schema/per-field parser is exactly the kind of per-type structure this redesign removed -- adding a
+new object type is a `profiles.yaml` edit alone, never a new parser function. **A Frigate object
+label with no `object_types` entry (e.g. a label you haven't written a prompt for yet) is simply
+never claimed by this stage at all** -- its `object_types` keys become exactly the `object_types`
+list passed to `claim_ai_batch`, so an unmapped type's rows just stay `ai_status='new'`
+indefinitely, the same "nothing to do" treatment described below for the alert stage.
 
-Vehicle response parsing (`ai_worker.parse_vehicle_response`) is a straight Python port of
-`Parse VLM Responses (Vehicle)`'s JS -- regex-extract the `{...}` JSON blob, `json.loads`, the same
-plate-text sanitizer (`_sanitize_plate`: a clean short token passes through as-is, a narrative
-answer gets the most plate-like token pulled out of it instead). Embed text reuses
-`report._vehicle_summary`/`report._person_summary` directly (`ai_worker.py` imports `report`)
-instead of a third copy of that combination logic -- n8n's `Build Embedding Text (Vehicle)`/
-`(Person)` nodes are the second copy, `report.py`'s own use in the alerts report is the first; all
-three now describe a sighting in the exact same one-line format. An embedding-call failure falls
-back to `embedding=None` rather than losing the whole sighting (same decision as the n8n version's
-`continueErrorOutput` nodes) -- only a chat-call/parsing failure routes to
-`db.fail_ai_event(event_id, config.AI_STAGE_MAX_ATTEMPTS)`, mirroring `crop_worker.py`'s
-except-block pattern exactly.
+`ai_worker.parse_sighting_response` is a two-line function: pull `response["choices"][0]
+["message"]["content"]` as-is for `description`, and `row["objects"]` as-is for `object_label` --
+there is no regex/JSON-extraction/plate-sanitizing step of any kind, since there's no structured
+shape to extract. Embed text is just that same `description` string, passed straight to
+`_embed_text` -- `report.py` no longer has a `_vehicle_summary`/`_person_summary` combination step
+to reuse, because `description` already **is** the one-line summary for every object type; the
+report, Telegram, and the embedding call all read the identical field. An embedding-call failure
+falls back to `embedding=None` rather than losing the whole sighting (same decision the n8n version
+used) -- only a chat-call failure routes to `db.fail_ai_event(event_id,
+config.AI_STAGE_MAX_ATTEMPTS)`, mirroring `crop_worker.py`'s except-block pattern exactly.
 
 `LLAMA_PROXY_BASE_URL`/`LLAMA_PROXY_TOKEN`/`LLAMA_PROXY_EMBED_PATH` point this stage at
 `llama_slot_proxy` directly, the same host n8n's VLM nodes already call -- `LLAMA_PROXY_TOKEN` is
@@ -511,53 +543,38 @@ count-in-progress + CTE-`FOR UPDATE SKIP LOCKED` shape every other claim functio
 uses, newest-`start_ts`-first, with the same optional `max_age_hours` throughput safety valve
 `claim_ai_batch`/`claim_video_batch` already have.
 
-#### Storage: new tables, not new columns on existing ones
+#### Storage: `visit_sightings`, the visit-level twin of `sightings`
 
-`visit_vehicle_sightings`/`visit_person_sightings` -- new tables, same shape as
-`vehicle_sightings`/`person_sightings` (including their own nullable `embedding vector(N)` +
-HNSW index, sized off the same `EMBEDDING_DIMENSIONS`/`_ensure_embedding_dimension()` machinery),
-but keyed by `visit_id` instead of `raw_event_id`. Chosen over reusing the existing tables (adding
-a nullable `visit_id` + making `raw_event_id` nullable + a source discriminator) specifically
-because every other alerts-vs-events split in this project already keeps the two flows' storage
-fully separate rather than overloading one table/column set for both (`STORE_VIDEO_ALERTS`'s own
-`video_path`/storage directory, `visits.crop_image_base64`/`preview_gif_base64` vs.
-`raw_events.crop_image_base64`) -- this is purely additive, so zero risk to any existing query
-against `vehicle_sightings`/`person_sightings` (`report.py`, `/search/semantic`, the web UI's
-per-event lightbox, `/embeddings/backfill`), none of which needed to change at all.
-`db.complete_visit_vehicle_sighting`/`complete_visit_person_sighting` mirror
-`complete_vehicle_sighting`/`complete_person_sighting`'s insert-plus-mark-done-in-one-transaction
-shape exactly, just against `visits.alert_ai_status` instead of `raw_events.ai_status`; no
-`plate_text_frigate` equivalent exists on the visit-level table -- Frigate's own LPR read is
-per-event, not per-visit. `alert_ai_worker.parse_alert_vehicle_response`/
-`parse_alert_person_response` mirror `ai_worker.parse_vehicle_response`/`parse_person_response`
-(and directly reuse `ai_worker._chat_request`/`_sanitize_plate`/`_embed_text`/`_JSON_BLOB_RE` via
-`import ai_worker`, rather than a second copy of that request/parse/embed plumbing) -- the one
-real difference is `alert_prompt` asks for and gets a `notes` field the vehicle parser now
-actually captures (a short description of what changed across the 4 frames, e.g. "pulled into the
-driveway and parked"), where `event_prompt`/`parse_vehicle_response` never asked for one at all
-(single frame, nothing to describe "across").
-
-Currently out of scope, deliberately: `/embeddings/backfill` and `/search/semantic` don't cover
-`visit_vehicle_sightings`/`visit_person_sightings` yet -- freshly-analyzed alert sightings still
-get an embedding computed inline (same `_embed_text` call every events-stage sighting already
-gets), so there's no backlog needing a backfill on day one; wiring the read/backfill side to also
-cover these two tables is a reasonable follow-up once there's real data to search, not something
-this change needed to include to be complete.
+`visit_sightings` -- same universal shape as `sightings` (`object_label`, `description`,
+`embedding`, its own nullable HNSW index sized off `EMBEDDING_DIMENSIONS`), but keyed by
+`visit_id` instead of `raw_event_id`. Chosen over reusing `sightings` (adding a nullable `visit_id`
++ making `raw_event_id` nullable + a source discriminator) specifically because every other
+alerts-vs-events split in this project already keeps the two flows' storage fully separate rather
+than overloading one table/column set for both (`STORE_VIDEO_ALERTS`'s own `video_path`/storage
+directory, `visits.crop_image_base64`/`preview_gif_base64` vs. `raw_events.crop_image_base64`).
+`db.complete_visit_sighting` mirrors `complete_sighting`'s insert-plus-mark-done-in-one-transaction
+shape exactly, just against `visits.alert_ai_status` instead of `raw_events.ai_status`.
+`alert_ai_worker.parse_alert_sighting_response` mirrors `ai_worker.parse_sighting_response` --
+same two-line "take the response content and the representative event's `objects` as-is" shape,
+no parsing of any kind either. `alert_prompt` can (and does, in the shipped vehicle/person
+prompts) ask the model to describe what changed across the 4 sampled frames (e.g. "pulled into
+the driveway and parked") -- that's just part of the free-text `description` now, not a separate
+structured `notes` field the way the old per-type schema had one.
 
 #### Web UI: `GET /visits/{id}/sightings` gains `alert_sighting`, preferred over the per-event fallback
 
-`db.get_visit_alert_sighting` (new) returns the visit's own `visit_vehicle_sightings`/
-`visit_person_sightings` row if one exists, `null` otherwise -- wired into the existing
+`db.get_visit_alert_sighting` returns the visit's own `visit_sightings`
+row if one exists, `null` otherwise -- wired into the existing
 `GET /visits/{id}/sightings` response as one more field (`alert_sighting`) alongside the unchanged
-`vehicles`/`persons` lists, rather than a second endpoint, so the web UI's visit lightbox only
+`sightings` list, rather than a second endpoint, so the web UI's visit lightbox only
 needs the one fetch it already made. `static/app.js`'s `openLightbox` now prefers
-`data.alert_sighting` when present (labeled "Vehicle (alert analysis)"/"Person (alert analysis)"
-in the lightbox) and only falls back to the per-event `vehicles`/`persons` groups when it's `null`
+`data.alert_sighting` when present (labeled "{object_label} (alert analysis)"
+in the lightbox) and only falls back to the per-event `sightings` list when it's `null`
 -- the same "richer artifact when available, graceful fallback otherwise" precedent this project
 already uses for the preview GIF/composite-grid/event-crop chain. This is deliberately a fallback,
 not an exclusive switch: a visit whose alert stage is off, or hasn't finished yet, still shows
 whatever per-event analysis already exists instead of an empty lightbox. On the Events tab (plain
-events, never visits), `GET /events/{id}`'s `vehicle_sighting`/`person_sighting` -- the events
+events, never visits), `GET /events/{id}`'s `sighting` -- the events
 stage's own result -- is unaffected and unchanged; the alert stage/`alert_sighting` field only
 ever applies to the Visits tab.
 
@@ -697,10 +714,9 @@ is given) -- `db.list_events`/`db.count_events` still apply whatever window they
 passed, they just aren't passed one for this call.
 
 `GET /events?q=<text>` free-text searches (case-insensitive substring) across the AI analysis
-result -- `vehicle_sightings`' color/body_type/make_guess/model_guess/notable_features/
-plate_text_llm/plate_text_frigate/notes, or `person_sightings`' description/notes -- via a `LEFT
-JOIN` to both tables (`SELECT DISTINCT` guards against a fan-out if either sighting table ever had
-more than one row per `raw_event_id`, which nothing enforces at the schema level). Only ever
+result -- `sightings.description`, the one free-text field every object type's sighting has -- via
+a `LEFT JOIN` to that single table (`SELECT DISTINCT` guards against a fan-out if `sightings` ever
+had more than one row per `raw_event_id`, which nothing enforces at the schema level). Only ever
 matches rows that already have a sighting, i.e. `ai_status='done'`, so it composes harmlessly with
 `has_media`'s default. Unlike `event_id`, `q` does *not* bypass the time window -- it combines
 with `start`/`end`/`hours` (and every other filter) rather than overriding them, so a search only
@@ -720,9 +736,8 @@ your model/config), so the web UI's Type filter dropdown is populated from this 
 instead of being hardcoded in the HTML; add a label to the env var and it shows up in the
 dropdown on next restart.
 
-`GET /events/{id}` also returns `vehicle_sighting`/`person_sighting` (via
-`db.get_vehicle_sighting_for_event`/`get_person_sighting_for_event`, one targeted indexed lookup
-each, tried unconditionally rather than branching on `objects` since at most one ever matches) --
+`GET /events/{id}` also returns `sighting` (via
+`db.get_sighting_for_event`, one targeted indexed lookup against the single universal table) --
 `null` until `ai_status='done'`. Kept off the `GET /events` list response deliberately (same
 reasoning as `crop_image_base64` already being list-response-only) -- the web UI's lightbox fetches
 full detail only when actually opened, not for every row in a page.
@@ -742,8 +757,8 @@ judged visually against real traffic before deciding whether to build the actual
 described above.
 
 `q` (added after the fact, once `only_visit_representative`'s dedup became object-type-aware --
-see above) matches a visit if **any** of its linked raw_events has a vehicle_sighting/
-person_sighting whose AI analysis text matches -- same fields/ILIKE substring match `GET /events`'
+see above) matches a visit if **any** of its linked raw_events has a sighting
+whose AI analysis text matches -- same fields/ILIKE substring match `GET /events`'
 own `q` uses (`db.list_visits`'s `EXISTS` subquery against a fresh `raw_events`/sighting join, not
 a condition on the row `list_visits`'s own CTE already joined in for `representative_event_id`/
 `event_count` -- a visit's match can come from a *different* linked event than whichever one
@@ -1275,7 +1290,7 @@ passed as real query params to the existing read API) and **semantic/fuzzy match
 AI-written sighting text for asks that don't map to a column ("anything unusual", "a red truck with
 a ladder rack"). Embeddings are generated by **n8n**, not `ingest-worker` -- preserves the existing
 "`ingest-worker` never calls an LLM" boundary (see above) -- and stored as a `vector` column
-directly on `vehicle_sightings`/`person_sightings` via **pgvector**, not a separate vector DB. This
+directly on `sightings`/`visit_sightings` via **pgvector**, not a separate vector DB. This
 keeps the project's "own Postgres instance/schema, no new moving parts" philosophy, and means
 embeddings are swept for free by the existing retention-cleanup delete (`run_retention_cleanup`/
 `purge_older_than`) with no separate sync-on-delete logic needed -- a row's embedding lives and
@@ -1288,10 +1303,11 @@ capability) instead of plain `postgres:16`; the CI workflow's Postgres service c
 switched the same way, for the same reason the ffmpeg CI gap got fixed -- a capability the code now
 depends on has to actually be present in the CI service container, not just assumed. `schema.sql`
 adds `CREATE EXTENSION IF NOT EXISTS vector;` near the top (idempotent, applied by `ensure_schema()`
-on every startup like everything else in that file) plus a nullable `embedding vector(1024)` column
-on both sighting tables (1024 = `Qwen3-Embedding-0.6B-GGUF`'s output size, the embedding model
-chosen for this -- one more slot in the user's existing `llama_slot_proxy` multi-model setup, no
-`mmproj` needed since it's text-only) with an HNSW cosine-distance index on each (`vector_cosine_ops` --
+on every startup like everything else in that file) plus a nullable `embedding vector(N)` column
+on both `sightings` and `visit_sightings` (N = `config.EMBEDDING_DIMENSIONS`, deployment-configurable
+since the exact embedding model in use varies -- 1024 for `Qwen3-Embedding-0.6B-GGUF`, 768 for
+`nomic-embed-text-v1.5`, etc. -- one more slot in the user's existing `llama_slot_proxy` multi-model
+setup, no `mmproj` needed since it's text-only) with an HNSW cosine-distance index on each (`vector_cosine_ops` --
 HNSW rather than ivfflat since it needs no existing rows to "train" on, safe to create immediately
 against a column that starts empty).
 
@@ -1300,18 +1316,20 @@ psycopg2 as a plain string param and cast with `::vector` in SQL (`_vector_liter
 depending on the separate `pgvector` package's connection-level type adapter -- avoids that
 package's own registration-ordering hazard (it needs the extension already created in the database
 before it can register) for a column this code only ever writes or ranks by distance, never reads
-back as a Python list. `complete_vehicle_sighting`/`complete_person_sighting` both gained an
+back as a Python list. `complete_sighting`/`complete_visit_sighting` both take an
 optional `embedding` parameter, stored in the same existing transaction -- no new queue stage, since
-n8n computes the vector *before* calling `POST /sightings/vehicles|persons`, the same request/
-response shape as today plus one more optional field. Omitted or null just means that sighting
-isn't semantically searchable, not an error -- this is how every pre-existing sighting row (from
-before this feature existed) behaves until/unless backfilled.
+n8n (or the internal AI stage) computes the vector *before* calling `POST /sightings`, the same
+request/response shape as today plus one more optional field. Omitted or null just means that
+sighting isn't semantically searchable, not an error -- this is how every pre-existing sighting row
+(from before this feature existed) behaves until/unless backfilled.
 
 **`POST /search/semantic`** (`X-API-Key` protected, `db.semantic_search_sightings`): cosine-distance
-(`<=>`) ordered search across whichever of `vehicle_sightings`/`person_sightings` `object_types`
-selects (default both), filtered by the caller-resolved `start`/`end` window -- a POST, not GET,
-since a 1024-float array doesn't belong in a query string. `embedding IS NOT NULL` naturally excludes
-sightings that predate this feature or came from an n8n run that didn't attach one; that's a
+(`<=>`) ordered search against `sightings`, filtered by the caller-resolved
+`object_types`/`start`/`end` window -- `object_types` filters `sightings.object_label = ANY(...)`
+directly now (any Frigate label, not a "vehicle"/"person" pseudo-category), since there's only one
+table to search regardless of which types are requested. A POST, not GET, since a
+multi-hundred-float array doesn't belong in a query string. `embedding IS NOT NULL` naturally
+excludes sightings that predate this feature or came from a run that didn't attach one; that's a
 narrower result set, not an error. Rows without their own embedding just aren't candidates, same as
 `GET /events`' `q` only ever matching rows that already have a sighting.
 
@@ -1319,14 +1337,15 @@ narrower result set, not an error. Rows without their own embedding just aren't 
 in `embedding` for sightings that existed before this feature did, or came from any run that didn't
 attach one -- same dry-run-by-default shape `/retention/purge` already uses (`confirm` defaults to
 `false`, previews `db.count_sightings_missing_embedding()`'s counts with no embedding calls made;
-`confirm=true` actually processes up to `limit` rows per sighting type, call it repeatedly until
+`confirm=true` actually processes up to `limit` rows per table, call it repeatedly until
 both counts reach zero). Deliberately independent of `AI_EVENTS_STAGE_ENABLED`/`process_claimed_event` --
-it only ever re-embeds a sighting's own already-stored fields (`db.get_vehicle_sightings_missing_
-embedding`/`get_person_sightings_missing_embedding`), never re-runs the VLM, so it works whether
+it only ever re-embeds a sighting's own already-stored `description` (`db.get_sightings_missing_
+embedding`/`get_visit_sightings_missing_embedding`), never re-runs the VLM, so it works whether
 `metadata-processor.json` or the internal AI stage is your primary AI flow, or neither is currently
-running. Reuses the exact same `report._vehicle_summary`/`_person_summary` combination logic and
-`ai_worker._embed_text` helper `process_claimed_event`'s own embed step already uses, so a
-backfilled row's embedding means the same thing as a freshly-computed one. Requires
+running. Embeds `description` directly (no combination step needed -- it's already the one-line
+summary for every object type) via the same `ai_worker._embed_text` helper
+`process_claimed_event`'s own embed step already uses, so a backfilled row's embedding means the
+same thing as a freshly-computed one. Requires
 `LLAMA_PROXY_BASE_URL` to be set regardless of `AI_EVENTS_STAGE_ENABLED` (400 if it isn't, checked before
 any row is touched) -- this is the one place a plain n8n-only deployment still needs that env var,
 specifically to backfill.
@@ -1339,20 +1358,22 @@ somewhat newer than the nominal `RETENTION_MONTHS` cutoff, since the scheduled s
 slow cadence -- this reflects what's actually still in the database right now, not the configured
 policy alone.
 
-`n8n/metadata-processor.json` gained one step per branch, right before each existing final POST:
-**Build Embedding Text (Person/Vehicle)** (code node) combines the sighting's fields into one line
--- the vehicle side reuses the exact same color/body/make/model + notable_features + plate
-combination `report.py`'s `_vehicle_summary` already uses for the alerts report's one-line
-description, so the text that gets embedded matches what a human would read about the same sighting,
-not a separately-invented format -- then **Call Embedding Model (Person/Vehicle)** (HTTP node) POSTs
-it to the new embedding slot, following the existing VLM-call nodes' convention (hardcoded
-`REPLACE_WITH_...` placeholders, no credentials block, since it's unauthenticated on the LAN like
-every other `llama_slot_proxy` call in this project). Both nodes use `onError: continueErrorOutput`
-wired straight into the existing `Insert Person/Vehicle Sighting (API)` node either way (success or
-error output) -- an embedding failure shouldn't lose an already-computed sighting, so the Insert
-node's `embedding` field falls back to `null` via optional chaining
-(`$('Call Embedding Model...').item.json.data?.[0]?.embedding ?? null`) rather than routing through
-`Handle Failure (API)` the way a real VLM-call failure does.
+n8n's metadata-processor workflow calls the embedding slot with the VLM's `description` response
+directly, right before the final `POST /sightings` -- there's no separate "build a summary line"
+code node needed, since the raw model output already is the one-line description to embed, for
+any object type. An embedding-call failure falls back to `embedding: null` rather than losing an
+already-computed sighting (`onError: continueErrorOutput` wired straight into the Insert node
+either way), the same "never lose the sighting over an embedding hiccup" decision the internal AI
+stage makes in Python.
+
+**Note:** `n8n/metadata-processor.json` still reflects the old vehicle/person shape (separate
+`Call Qwen (Attributes + Plate)`/`Call VLM (Person)` branches, JSON-schema prompts, and
+`POST /sightings/vehicles|persons`) and has not yet been reworked for the universal `/sightings`
+API described in this document -- it needs its own follow-up pass (new prompts per
+`profiles.yaml`'s `event_prompt`s, one shared POST node instead of two) before it can run against
+this schema again. `ai_worker.py` (the internal AI stage, always in sync with this document since
+it lives in this same repo) is the reference implementation for the universal shape in the
+meantime.
 
 **`n8n/yard-stats-qa.json`** was upgraded in place (same `Ask Webhook`/`Respond` shape any existing
 caller already uses) from a naive "dump the last 200 rows, ask once" workflow -- which had no time
@@ -1404,8 +1425,7 @@ Registered before the mount so it isn't shadowed; `static/admin.js`/shared `stat
 still served fine through the mount itself (`/ui/admin.js`, `/ui/style.css`).
 
 **`GET /admin/overview`** is the dashboard's one fast-loading call -- row counts (`raw_events`/
-`visits`/`vehicle_sightings`/`person_sightings`, plus `visit_vehicle_sightings`/
-`visit_person_sightings` once the alert AI stage existed), per-stage queue status breakdown (`db.
+`visits`/`sightings`/`visit_sightings`), per-stage queue status breakdown (`db.
 get_stage_counts()`: crop/video/ai on `raw_events`, video/thumb_crop/alert_ai on `visits`),
 embedding coverage (reuses `count_sightings_missing_embedding`), DB size (`db.get_db_size_info()` --
 `pg_database_size` total plus `pg_total_relation_size` per `yard_stats` table, so it matches what
@@ -1483,17 +1503,20 @@ irreversible once confirmed.
   (see "Visit preview" above). `alert_ai_status`/`alert_ai_status_changed_at`/
   `alert_ai_attempt_count` (see "Alert AI stage" above) are this visit's own sixth queue stage,
   entirely independent of any linked raw_event's `ai_status`.
-- `vehicle_sightings` / `person_sightings` — one row per AI-analyzed event. `vehicle_sightings`
-  keeps `plate_text_frigate` (from `raw_events.sub_label`) next to `plate_text_llm` (the OCR
-  model's read) as a cross-check. Both also carry a nullable `embedding vector(1024)` (pgvector,
-  `Qwen3-Embedding-0.6B-GGUF`) for `POST /search/semantic` -- see "Semantic search and the Q&A
-  agent" above.
-- `visit_vehicle_sightings` / `visit_person_sightings` — one row per alert-AI-analyzed visit (see
-  "Alert AI stage" above), keyed by `visit_id` instead of `raw_event_id` -- same shape as
-  `vehicle_sightings`/`person_sightings` (including their own nullable `embedding vector(1024)` +
-  HNSW index) minus `plate_text_frigate` (no per-visit LPR read exists), plus a `notes` field
-  `alert_prompt` actually populates with a description of what changed across the visit's 4
-  sampled frames.
+- `sightings` — one row per AI-analyzed event, **any** object label (`object_label`, straight from
+  `raw_events.objects` -- car, truck, person, dog, whatever `profiles.yaml` maps). `description` is
+  the VLM's plain free-text answer to that label's `event_prompt` -- there is no structured
+  per-type column of any kind (no `color`/`body_type`/`plate_text_llm`/`notes`, etc.); a plate
+  reference, if the model mentions one, just lives inside `description` like any other detail.
+  Frigate's own LPR read (`raw_events.sub_label`) still exists on the event row itself regardless
+  of what a given label's prompt asks about, but there's no dedicated cross-check column against
+  it anymore. Also carries a nullable `embedding vector(N)` (pgvector, N = `EMBEDDING_DIMENSIONS`)
+  for `POST /search/semantic` -- see "Semantic search and the Q&A agent" above.
+- `visit_sightings` — one row per alert-AI-analyzed visit (see "Alert AI stage" above), same
+  universal shape as `sightings` (`object_label`, `description`, its own nullable `embedding
+  vector(N)` + HNSW index) but keyed by `visit_id` instead of `raw_event_id`. `description` can
+  include a note about what changed across the visit's 4 sampled frames if `alert_prompt` asks for
+  one -- that's just part of the same free-text field, not a separate structured column.
 
 ### Prerequisites this plan assumes
 

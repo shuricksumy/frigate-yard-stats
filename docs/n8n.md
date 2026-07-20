@@ -75,9 +75,15 @@ Every workflow imports **disabled**. Before flipping it on:
    first HTTP Request node into `ingest-worker`, since a wrong host/port or missing API key shows
    up immediately here.
 3. For `metadata-processor.json` specifically: run it once, then check
-   `http://<host>:8080/ui` (or `/sightings/vehicles` / `/sightings/persons` via Swagger) to confirm
+   `http://<host>:8080/ui` (or `POST /sightings` via Swagger) to confirm
    a real sighting actually got written with sensible-looking values, not just "the HTTP calls
-   didn't error."
+   didn't error." **Note:** this workflow still targets the old two-category (vehicle/person)
+   shape (`/sightings/vehicles`/`/sightings/persons`, JSON-schema prompts) and has not yet been
+   reworked for the universal `sightings` schema/API described in CLAUDE.md — it needs its own
+   update (one shared `POST /sightings` call, free-text prompts per `profiles.yaml`) before it can
+   run against a database created from the current `schema.sql`. The internal AI stage
+   (`ai_worker.py`/`AI_EVENTS_STAGE_ENABLED`) is the reference implementation for the universal
+   shape in the meantime — see [configuration.md](configuration.md#internal-ai-stages-alternative-to-n8ns-metadata-processorjson).
 4. Only once a manual run looks right, toggle the workflow **Active** (top-right in the workflow
    editor) to let its trigger (schedule or, for the metadata processor, "every minute") take over.
 

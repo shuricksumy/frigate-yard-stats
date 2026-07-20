@@ -1,6 +1,6 @@
 """Tests for the alert AI stage (AI_ALERTS_ENABLED): db.py's visits.alert_ai_status queue
-functions (claim_alert_ai_batch/complete_visit_vehicle_sighting/complete_visit_person_sighting/
-fail_alert_ai_event/get_visit_alert_sighting) and alert_ai_worker.py's parsing/processing logic.
+functions (claim_alert_ai_batch/complete_visit_sighting/fail_alert_ai_event/
+get_visit_alert_sighting) and alert_ai_worker.py's parsing/processing logic.
 
 Requires a reachable Postgres with schema.sql applied -- see test_db_video_queue.py's module
 docstring for setup notes. Additionally requires pgvector (pgvector/pgvector:pg16), same as
@@ -21,14 +21,15 @@ import config  # noqa: E402
 import db  # noqa: E402
 
 PROFILE = {
-    "object_types": {"car": {"sighting_type": "vehicle"}, "person": {"sighting_type": "person"}},
-    "vehicle": {
-        "chat_path": "/vehicle-slot/v1/chat/completions",
-        "event_prompt": "vehicle event prompt", "alert_prompt": "vehicle alert prompt",
-    },
-    "person": {
-        "chat_path": "/person-slot/v1/chat/completions",
-        "event_prompt": "person event prompt", "alert_prompt": "person alert prompt",
+    "object_types": {
+        "car": {
+            "chat_path": "/vehicle-slot/v1/chat/completions",
+            "event_prompt": "vehicle event prompt", "alert_prompt": "vehicle alert prompt",
+        },
+        "person": {
+            "chat_path": "/person-slot/v1/chat/completions",
+            "event_prompt": "person event prompt", "alert_prompt": "person alert prompt",
+        },
     },
 }
 
@@ -72,8 +73,7 @@ def _make_visit_with_grid_ready(objects="car", camera="pytest-alert-cam", alert_
 
 
 def _cleanup_visit(visit_id, *event_ids):
-    db._execute("DELETE FROM yard_stats.visit_vehicle_sightings WHERE visit_id = %s", (visit_id,))
-    db._execute("DELETE FROM yard_stats.visit_person_sightings WHERE visit_id = %s", (visit_id,))
+    db._execute("DELETE FROM yard_stats.visit_sightings WHERE visit_id = %s", (visit_id,))
     db._execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", (list(event_ids),))
     db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
 
@@ -130,36 +130,32 @@ def test_claim_alert_ai_batch_respects_parallel_limit_via_in_progress_count(conn
         _cleanup_visit(visit_id, event_id)
 
 
-# ---- db.complete_visit_vehicle_sighting / complete_visit_person_sighting ----
+# ---- db.complete_visit_sighting ----
 
-def test_complete_visit_vehicle_sighting_marks_alert_ai_status_done(conn_ok):
+def test_complete_visit_sighting_marks_alert_ai_status_done(conn_ok):
     visit_id, event_id = _make_visit_with_grid_ready()
     try:
-        db.complete_visit_vehicle_sighting(
-            visit_id, color="orange", body_type="suv", make_guess="Dacia", make_confidence="high",
-            model_guess="Duster", model_confidence="medium", notable_features="roof rails",
-            plate_text_llm="10MG407", plate_confidence="high", notes="pulled in and parked",
-        )
+        db.complete_visit_sighting(visit_id, "car", "orange Dacia Duster, roof rails, pulled in and parked")
         updated = db.get_visit(visit_id)
         assert updated["alert_ai_status"] == "done"
         rows = db._execute(
-            "SELECT color, notes FROM yard_stats.visit_vehicle_sightings WHERE visit_id = %s",
+            "SELECT object_label, description FROM yard_stats.visit_sightings WHERE visit_id = %s",
             (visit_id,), fetch=True,
         )
-        assert rows[0]["color"] == "orange"
-        assert rows[0]["notes"] == "pulled in and parked"
+        assert rows[0]["object_label"] == "car"
+        assert rows[0]["description"] == "orange Dacia Duster, roof rails, pulled in and parked"
     finally:
         _cleanup_visit(visit_id, event_id)
 
 
-def test_complete_visit_person_sighting_marks_alert_ai_status_done(conn_ok):
+def test_complete_visit_sighting_works_for_any_object_label(conn_ok):
     visit_id, event_id = _make_visit_with_grid_ready(objects="person")
     try:
-        db.complete_visit_person_sighting(visit_id, description="walked to the door", notes=None)
+        db.complete_visit_sighting(visit_id, "person", "walked to the door")
         updated = db.get_visit(visit_id)
         assert updated["alert_ai_status"] == "done"
         rows = db._execute(
-            "SELECT description FROM yard_stats.visit_person_sightings WHERE visit_id = %s",
+            "SELECT description FROM yard_stats.visit_sightings WHERE visit_id = %s",
             (visit_id,), fetch=True,
         )
         assert rows[0]["description"] == "walked to the door"
@@ -200,42 +196,34 @@ def test_get_visit_alert_sighting_returns_none_when_not_analyzed(conn_ok):
         _cleanup_visit(visit_id, event_id)
 
 
-def test_get_visit_alert_sighting_returns_vehicle_result(conn_ok):
+def test_get_visit_alert_sighting_returns_result(conn_ok):
     visit_id, event_id = _make_visit_with_grid_ready()
     try:
-        db.complete_visit_vehicle_sighting(
-            visit_id, color="red", body_type="sedan", make_guess=None, make_confidence=None,
-            model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
-            plate_confidence=None, notes=None,
-        )
+        db.complete_visit_sighting(visit_id, "car", "red sedan")
         result = db.get_visit_alert_sighting(visit_id)
-        assert result["sighting_type"] == "vehicle"
-        assert result["color"] == "red"
+        assert result["object_label"] == "car"
+        assert result["description"] == "red sedan"
     finally:
         _cleanup_visit(visit_id, event_id)
 
 
-# ---- alert_ai_worker.parse_alert_vehicle_response / parse_alert_person_response ----
+# ---- alert_ai_worker.parse_alert_sighting_response ----
 
-def test_parse_alert_vehicle_response_extracts_notes_field():
-    response = {"choices": [{"message": {"content":
-        '{"color": "blue", "body_type": "hatchback", "notes": "drove past left to right"}'
-    }}]}
-    fields = alert_ai_worker.parse_alert_vehicle_response(response, {"id": 5})
-    assert fields["visit_id"] == 5
-    assert fields["color"] == "blue"
-    assert fields["notes"] == "drove past left to right"
+def test_parse_alert_sighting_response_uses_raw_content_and_objects_label():
+    response = {"choices": [{"message": {"content": "blue hatchback, drove past left to right"}}]}
+    fields = alert_ai_worker.parse_alert_sighting_response(response, {"id": 5, "objects": "car"})
+    assert fields == {"visit_id": 5, "object_label": "car", "description": "blue hatchback, drove past left to right"}
 
 
-def test_parse_alert_person_response_uses_raw_content():
+def test_parse_alert_sighting_response_person():
     response = {"choices": [{"message": {"content": "wearing a red jacket, walking toward the door"}}]}
-    fields = alert_ai_worker.parse_alert_person_response(response, {"id": 7})
-    assert fields == {"visit_id": 7, "description": "wearing a red jacket, walking toward the door", "notes": None}
+    fields = alert_ai_worker.parse_alert_sighting_response(response, {"id": 7, "objects": "person"})
+    assert fields == {"visit_id": 7, "object_label": "person", "description": "wearing a red jacket, walking toward the door"}
 
 
 # ---- alert_ai_worker.process_claimed_visit (mocked chat call, no real network) ----
 
-def test_process_claimed_visit_vehicle_success(monkeypatch):
+def test_process_claimed_visit_success(monkeypatch):
     monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
 
     class _Resp:
@@ -243,7 +231,7 @@ def test_process_claimed_visit_vehicle_success(monkeypatch):
             pass
 
         def json(self):
-            return {"choices": [{"message": {"content": '{"color": "orange", "notes": "parked"}'}}]}
+            return {"choices": [{"message": {"content": "orange suv, parked"}}]}
 
     calls = []
 
@@ -253,7 +241,7 @@ def test_process_claimed_visit_vehicle_success(monkeypatch):
 
     monkeypatch.setattr(alert_ai_worker.ai_worker.requests, "post", fake_post)
     inserted = []
-    monkeypatch.setattr(db, "complete_visit_vehicle_sighting", lambda *a, **k: inserted.append(a) or 1)
+    monkeypatch.setattr(db, "complete_visit_sighting", lambda *a, **k: inserted.append(a) or 1)
     failed = []
     monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: failed.append((a, k)))
 
@@ -261,13 +249,14 @@ def test_process_claimed_visit_vehicle_success(monkeypatch):
     alert_ai_worker.process_claimed_visit(row, PROFILE)
 
     assert len(inserted) == 1
+    assert inserted[0][:3] == (9, "car", "orange suv, parked")
     assert not failed
     assert calls[0] == "http://llama.test/vehicle-slot/v1/chat/completions"
 
 
 def test_process_claimed_visit_unmapped_object_type_is_skipped(monkeypatch):
     inserted = []
-    monkeypatch.setattr(db, "complete_visit_vehicle_sighting", lambda *a, **k: inserted.append(a))
+    monkeypatch.setattr(db, "complete_visit_sighting", lambda *a, **k: inserted.append(a))
     failed = []
     monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: failed.append((a, k)))
 

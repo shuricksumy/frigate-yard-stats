@@ -60,6 +60,11 @@ def test_get_table_row_counts_reflects_inserted_row(conn_ok):
         _cleanup_event(event_id)
 
 
+def test_get_table_row_counts_has_universal_sighting_tables(conn_ok):
+    result = db.get_table_row_counts()
+    assert set(result.keys()) == {"raw_events", "visits", "sightings", "visit_sightings"}
+
+
 def test_get_stage_counts_has_expected_shape(conn_ok):
     result = db.get_stage_counts()
     assert set(result.keys()) == {"raw_events", "visits"}
@@ -113,7 +118,7 @@ def test_get_db_size_info_returns_positive_total_and_known_tables(conn_ok):
     result = db.get_db_size_info()
     assert result["database_bytes"] > 0
     table_names = {row["table"] for row in result["tables"]}
-    assert {"raw_events", "visits", "vehicle_sightings", "person_sightings"} <= table_names
+    assert {"raw_events", "visits", "sightings", "visit_sightings"} <= table_names
 
 
 def test_get_vector_index_status_reports_valid_indexes(conn_ok):
@@ -121,14 +126,14 @@ def test_get_vector_index_status_reports_valid_indexes(conn_ok):
     assert result["extension_installed"] is True
     assert result["embedding_dimensions"] == config.EMBEDDING_DIMENSIONS
     index_names = {row["index"] for row in result["indexes"]}
-    assert "yard_stats.idx_vehicle_sightings_embedding" in index_names
-    assert "yard_stats.idx_person_sightings_embedding" in index_names
+    assert "yard_stats.idx_sightings_embedding" in index_names
+    assert "yard_stats.idx_visit_sightings_embedding" in index_names
     assert all(row["indisvalid"] for row in result["indexes"])
 
 
 def test_reindex_vector_indexes_runs_without_error(conn_ok):
     result = db.reindex_vector_indexes()
-    assert set(result) == {"idx_vehicle_sightings_embedding", "idx_person_sightings_embedding"}
+    assert set(result) == {"idx_sightings_embedding", "idx_visit_sightings_embedding"}
 
 
 # ---- admin.dir_size_bytes ----

@@ -1,76 +1,43 @@
-import json
 import logging
 import time
 
 import ai_worker
 import config
 import db
-import report
 
 logger = logging.getLogger(__name__)
 
 
-def parse_alert_vehicle_response(response: dict, row: dict) -> dict:
-    # Same shape as ai_worker.parse_vehicle_response, but alert_prompt asks for one extra field
-    # ("notes" -- a short description of what changed across the grid's 4 frames) that
-    # event_prompt never does, and there's no plate_text_frigate equivalent (Frigate's own LPR
-    # read is per-event, this is per-visit).
-    text = response["choices"][0]["message"]["content"]
-    match = ai_worker._JSON_BLOB_RE.search(text)
-    parsed = json.loads(match.group(0)) if match else {}
+def parse_alert_sighting_response(response: dict, row: dict) -> dict:
+    # Same shape as ai_worker.parse_sighting_response, just keyed by visit_id instead of
+    # raw_event_id -- no JSON parsing, no per-type branching. alert_prompt already asks the model
+    # to cover both static attributes and what changed across the grid's 4 frames in one flowing
+    # answer, so the whole chat response is the description verbatim, same as the event-level path.
     return {
         "visit_id": row["id"],
-        "color": parsed.get("color"),
-        "body_type": parsed.get("body_type"),
-        "make_guess": parsed.get("make"),
-        "make_confidence": parsed.get("make_confidence"),
-        "model_guess": parsed.get("model"),
-        "model_confidence": parsed.get("model_confidence"),
-        "notable_features": parsed.get("notable_features"),
-        "plate_text_llm": ai_worker._sanitize_plate(parsed.get("plate_text")),
-        "plate_confidence": None,
-        "notes": parsed.get("notes"),
-    }
-
-
-def parse_alert_person_response(response: dict, row: dict) -> dict:
-    return {
-        "visit_id": row["id"],
+        "object_label": row.get("objects"),
         "description": response["choices"][0]["message"]["content"],
-        "notes": None,
     }
 
 
 def process_claimed_visit(row: dict, profile: dict) -> None:
     visit_id = row["id"]
-    mapping = profile.get("object_types", {}).get(row.get("objects"))
-    if mapping is None:
+    type_config = profile.get("object_types", {}).get(row.get("objects"))
+    if type_config is None:
         # Shouldn't happen -- run_once only ever asks claim_alert_ai_batch for mapped types -- but
         # guard rather than crash the poll loop on an unexpected row.
         logger.warning("Claimed visit id=%s has unmapped representative object type %r, skipping", visit_id, row.get("objects"))
         return
-    sighting_type = mapping["sighting_type"]
-    type_config = profile[sighting_type]
     timeout = type_config.get("timeout_seconds", config.AI_STAGE_DEFAULT_TIMEOUT_SECONDS)
 
     try:
         response = ai_worker._chat_request(
             type_config["chat_path"], type_config["alert_prompt"], row["crop_image_base64"], timeout,
         )
-        if sighting_type == "vehicle":
-            fields = parse_alert_vehicle_response(response, row)
-            embedding = ai_worker._embed_text(report._vehicle_summary(fields))
-            db.complete_visit_vehicle_sighting(
-                fields["visit_id"], fields["color"], fields["body_type"], fields["make_guess"],
-                fields["make_confidence"], fields["model_guess"], fields["model_confidence"],
-                fields["notable_features"], fields["plate_text_llm"], fields["plate_confidence"],
-                fields["notes"], embedding,
-            )
-        else:
-            fields = parse_alert_person_response(response, row)
-            embedding = ai_worker._embed_text(report._person_summary(fields))
-            db.complete_visit_person_sighting(fields["visit_id"], fields["description"], fields["notes"], embedding)
-        logger.info("Alert AI analysis done for visit id=%s sighting_type=%s", visit_id, sighting_type)
+        fields = parse_alert_sighting_response(response, row)
+        embedding = ai_worker._embed_text(fields["description"])
+        db.complete_visit_sighting(fields["visit_id"], fields["object_label"], fields["description"], embedding)
+        logger.info("Alert AI analysis done for visit id=%s object_label=%s", visit_id, fields["object_label"])
 
     except Exception:
         logger.exception("Alert AI analysis failed for visit id=%s det_id=%s", visit_id, row.get("det_id"))

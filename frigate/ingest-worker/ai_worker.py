@@ -1,6 +1,4 @@
-import json
 import logging
-import re
 import time
 
 import requests
@@ -8,34 +6,13 @@ import yaml
 
 import config
 import db
-import report
 
 logger = logging.getLogger(__name__)
-
-_JSON_BLOB_RE = re.compile(r"\{.*\}", re.DOTALL)
-_PLATE_TOKEN_RE = re.compile(r"[A-Z0-9-]{4,14}")
 
 
 def load_profile(path: str) -> dict:
     with open(path) as f:
         return yaml.safe_load(f)
-
-
-def _sanitize_plate(text: str | None) -> str | None:
-    # Ported verbatim from n8n/metadata-processor.json's "Parse VLM Responses (Vehicle)" node --
-    # defensive against the model ignoring the "ONLY the plate's characters" instruction and
-    # writing a narrative explanation into plate_text instead (seen in real data). A clean short
-    # token passes through as-is; anything with whitespace/newlines or over 15 chars gets the most
-    # plate-like token pulled out of it instead.
-    if not text:
-        return None
-    trimmed = str(text).strip()
-    if not trimmed:
-        return None
-    if not re.search(r"\s", trimmed) and len(trimmed) <= 15:
-        return trimmed
-    tokens = _PLATE_TOKEN_RE.findall(trimmed)
-    return tokens[-1] if tokens else trimmed
 
 
 def _chat_request(chat_path: str, prompt: str, crop_image_base64: str, timeout: float) -> dict:
@@ -66,38 +43,22 @@ def _chat_request(chat_path: str, prompt: str, crop_image_base64: str, timeout: 
     return resp.json()
 
 
-def parse_vehicle_response(response: dict, row: dict) -> dict:
-    text = response["choices"][0]["message"]["content"]
-    match = _JSON_BLOB_RE.search(text)
-    parsed = json.loads(match.group(0)) if match else {}
+def parse_sighting_response(response: dict, row: dict) -> dict:
+    # No JSON parsing, no per-type branching -- the whole chat response is the sighting's
+    # description verbatim. Whatever profiles.yaml's event_prompt asked the model to mention
+    # (color, plate, breed, clothing, whatever) is already in that text; there's nothing left to
+    # extract into separate columns in this universal model.
     return {
         "raw_event_id": row["id"],
-        "color": parsed.get("color"),
-        "body_type": parsed.get("body_type"),
-        "make_guess": parsed.get("make"),
-        "make_confidence": parsed.get("make_confidence"),
-        "model_guess": parsed.get("model"),
-        "model_confidence": parsed.get("model_confidence"),
-        "notable_features": parsed.get("notable_features"),
-        "plate_text_llm": _sanitize_plate(parsed.get("plate_text")),
-        "plate_text_frigate": row.get("sub_label"),
-        "plate_confidence": None,
-        "notes": None,
-    }
-
-
-def parse_person_response(response: dict, row: dict) -> dict:
-    return {
-        "raw_event_id": row["id"],
+        "object_label": row.get("objects"),
         "description": response["choices"][0]["message"]["content"],
-        "notes": None,
     }
 
 
 def _embed_text(text: str | None) -> list[float] | None:
     # An embedding failure shouldn't lose an already-computed sighting -- same decision made for
-    # n8n's Call Embedding Model (Vehicle)/(Person) nodes (continueErrorOutput, falls back to
-    # null). Never raises; the sighting still gets inserted, just not semantically searchable.
+    # n8n's Call Embedding Model nodes (continueErrorOutput, falls back to null). Never raises;
+    # the sighting still gets inserted, just not semantically searchable.
     if not text:
         return None
     try:
@@ -125,65 +86,48 @@ def _embed_text(text: str | None) -> list[float] | None:
 def run_embedding_backfill(limit: int) -> dict:
     # POST /embeddings/backfill's confirm=true path -- fills in the embedding column for
     # sightings that existed before semantic search did (or came from a run that didn't attach
-    # one). Deliberately independent of AI_EVENTS_STAGE_ENABLED/process_claimed_event -- this only ever
-    # re-embeds each sighting's own already-stored fields, never re-runs the VLM, so it works
-    # whether metadata-processor.json or this stage is your primary AI flow, or the AI stage isn't
-    # running at all right now. Reuses the exact combination logic report.py's alerts report and
-    # process_claimed_event's own embed step already use, so a backfilled row's embedding means
-    # the same thing as a freshly-computed one.
+    # one). Deliberately independent of AI_EVENTS_STAGE_ENABLED/process_claimed_event -- this only
+    # ever re-embeds each sighting's own already-stored description, never re-runs the VLM. Covers
+    # both event-level and visit-level sightings now -- one universal shape, one backfill loop
+    # each, no more vehicle/person split to run twice.
     if not config.LLAMA_PROXY_BASE_URL:
         raise RuntimeError("LLAMA_PROXY_BASE_URL is not configured")
 
-    result = {"vehicles_processed": 0, "vehicles_updated": 0, "persons_processed": 0, "persons_updated": 0}
+    result = {"sightings_processed": 0, "sightings_updated": 0, "visit_sightings_processed": 0, "visit_sightings_updated": 0}
 
-    for row in db.get_vehicle_sightings_missing_embedding(limit):
-        result["vehicles_processed"] += 1
-        embedding = _embed_text(report._vehicle_summary(row))
+    for row in db.get_sightings_missing_embedding(limit):
+        result["sightings_processed"] += 1
+        embedding = _embed_text(row["description"])
         if embedding is not None:
-            db.update_vehicle_sighting_embedding(row["id"], embedding)
-            result["vehicles_updated"] += 1
+            db.update_sighting_embedding(row["id"], embedding)
+            result["sightings_updated"] += 1
 
-    for row in db.get_person_sightings_missing_embedding(limit):
-        result["persons_processed"] += 1
-        embedding = _embed_text(report._person_summary(row))
+    for row in db.get_visit_sightings_missing_embedding(limit):
+        result["visit_sightings_processed"] += 1
+        embedding = _embed_text(row["description"])
         if embedding is not None:
-            db.update_person_sighting_embedding(row["id"], embedding)
-            result["persons_updated"] += 1
+            db.update_visit_sighting_embedding(row["id"], embedding)
+            result["visit_sightings_updated"] += 1
 
     return result
 
 
 def process_claimed_event(row: dict, profile: dict) -> None:
     event_id = row["id"]
-    mapping = profile.get("object_types", {}).get(row.get("objects"))
-    if mapping is None:
+    type_config = profile.get("object_types", {}).get(row.get("objects"))
+    if type_config is None:
         # Shouldn't happen -- run_once only ever asks claim_ai_batch for mapped types -- but guard
         # rather than crash the poll loop on an unexpected row.
         logger.warning("Claimed raw_event id=%s has unmapped object type %r, skipping", event_id, row.get("objects"))
         return
-    sighting_type = mapping["sighting_type"]
-    type_config = profile[sighting_type]
     timeout = type_config.get("timeout_seconds", config.AI_STAGE_DEFAULT_TIMEOUT_SECONDS)
 
     try:
         response = _chat_request(type_config["chat_path"], type_config["event_prompt"], row["crop_image_base64"], timeout)
-        if sighting_type == "vehicle":
-            fields = parse_vehicle_response(response, row)
-            # Reuses report._vehicle_summary rather than a third copy of the same combination
-            # logic (n8n's Build Embedding Text (Vehicle) node is the second) -- same one-line
-            # description a human reads in the alerts report is what gets embedded here too.
-            embedding = _embed_text(report._vehicle_summary(fields))
-            db.complete_vehicle_sighting(
-                fields["raw_event_id"], fields["color"], fields["body_type"], fields["make_guess"],
-                fields["make_confidence"], fields["model_guess"], fields["model_confidence"],
-                fields["notable_features"], fields["plate_text_llm"], fields["plate_text_frigate"],
-                fields["plate_confidence"], fields["notes"], embedding,
-            )
-        else:
-            fields = parse_person_response(response, row)
-            embedding = _embed_text(report._person_summary(fields))
-            db.complete_person_sighting(fields["raw_event_id"], fields["description"], fields["notes"], embedding)
-        logger.info("AI analysis done for raw_event id=%s sighting_type=%s", event_id, sighting_type)
+        fields = parse_sighting_response(response, row)
+        embedding = _embed_text(fields["description"])
+        db.complete_sighting(fields["raw_event_id"], fields["object_label"], fields["description"], embedding)
+        logger.info("AI analysis done for raw_event id=%s object_label=%s", event_id, fields["object_label"])
 
     except Exception:
         logger.exception("AI analysis failed for raw_event id=%s det_id=%s", event_id, row.get("det_id"))
@@ -191,7 +135,7 @@ def process_claimed_event(row: dict, profile: dict) -> None:
 
 
 def run_once(profile: dict) -> None:
-    # object_types keys are exactly the mapped types (see profiles.yaml's own comment) -- a type
+    # object_types keys are exactly the mapped labels (see profiles.yaml's own comment) -- a label
     # with no entry is never included here, so claim_ai_batch is simply never asked for it, and
     # ai_status stays 'new' for those rows indefinitely rather than erroring.
     object_types = list(profile.get("object_types", {}).keys())

@@ -19,43 +19,27 @@ class EventSummary(BaseModel):
     score: float | None
 
 
-class VehicleSighting(BaseModel):
+class Sighting(BaseModel):
+    # Universal shape -- one row per AI-analyzed event, any object type. object_label carries the
+    # actual Frigate label (car/truck/person/dog/whatever profiles.yaml has a prompt for);
+    # description is the VLM's own free-text answer, whatever profiles.yaml's event_prompt asked
+    # it to describe for that label. No per-type fields (color/plate/etc.) -- see CLAUDE.md's
+    # "Universal sightings" section for why.
     id: int
     raw_event_id: int
     camera: str
     zone: str | None
     start_ts: datetime
-    color: str | None
-    body_type: str | None
-    make_guess: str | None
-    make_confidence: str | None
-    model_guess: str | None
-    model_confidence: str | None
-    notable_features: str | None
-    plate_text_llm: str | None
-    plate_text_frigate: str | None
-    plate_confidence: str | None
-    notes: str | None
-
-
-class PersonSighting(BaseModel):
-    id: int
-    raw_event_id: int
-    camera: str
-    zone: str | None
-    start_ts: datetime
+    object_label: str | None
     description: str | None
-    notes: str | None
 
 
 class EventDetail(EventSummary):
     det_id: str | None
     crop_image_base64: str | None
     created_at: datetime
-    # Populated only once ai_status='done' and a matching row exists -- at most one of the two is
-    # ever non-null (a raw_event is either a vehicle or a person, never both).
-    vehicle_sighting: VehicleSighting | None = None
-    person_sighting: PersonSighting | None = None
+    # Populated only once ai_status='done' and a matching row exists.
+    sighting: Sighting | None = None
 
 
 class VisitSummary(BaseModel):
@@ -78,41 +62,26 @@ class VisitSummary(BaseModel):
     has_video: bool
 
 
-class AlertVehicleSighting(BaseModel):
-    sighting_type: str
+class AlertSighting(BaseModel):
+    # The visit's own alert-stage (composite grid) analysis -- same universal shape as Sighting,
+    # just keyed by visit_id instead of raw_event_id.
     id: int
     visit_id: int
-    color: str | None
-    body_type: str | None
-    make_guess: str | None
-    make_confidence: str | None
-    model_guess: str | None
-    model_confidence: str | None
-    notable_features: str | None
-    plate_text_llm: str | None
-    plate_confidence: str | None
-    notes: str | None
-
-
-class AlertPersonSighting(BaseModel):
-    sighting_type: str
-    id: int
-    visit_id: int
+    object_label: str | None
     description: str | None
-    notes: str | None
 
 
 class VisitSightings(BaseModel):
-    # One representative sighting per distinct object type the visit grouped together (see
-    # claim_ai_batch's only_visit_representative comment in db.py) -- e.g. a car and a person in
-    # the same visit each show up here, rather than just whichever was analyzed first.
-    vehicles: list[VehicleSighting]
-    persons: list[PersonSighting]
-    # The visit's own alert-stage (2x2 grid) analysis (AI_ALERTS_ENABLED), independent of the
-    # per-event vehicles/persons above -- null until that stage has produced one (feature off, or
-    # this visit's grid isn't ready/analyzed yet). The web UI prefers this when present, falling
-    # back to vehicles/persons otherwise.
-    alert_sighting: AlertVehicleSighting | AlertPersonSighting | None = None
+    # Every sighting linked to this visit, not just the representative event's -- claim_ai_batch's
+    # only_visit_representative partitions by (visit_id, objects), so a visit can have more than
+    # one analyzed event: one representative per distinct object type (a car and a person in the
+    # same visit each get their own sighting), not just one per visit. One universal list now --
+    # there's no vehicles/persons split anywhere in this model.
+    sightings: list[Sighting]
+    # The visit's own alert-stage analysis (AI_ALERTS_ENABLED), independent of sightings above --
+    # null until that stage has produced one (feature off, or this visit's grid isn't ready yet).
+    # The web UI prefers this when present, falling back to sightings otherwise.
+    alert_sighting: AlertSighting | None = None
 
 
 class CameraCount(BaseModel):
@@ -134,8 +103,7 @@ class StatsSummary(BaseModel):
     start: datetime
     end: datetime
     total_events: int
-    total_vehicle_sightings: int
-    total_person_sightings: int
+    total_sightings: int
     by_camera: list[CameraCount]
     by_object_type: list[ObjectTypeCount]
     by_day: list[DayCount]
@@ -146,34 +114,20 @@ class ReportResponse(BaseModel):
     end: datetime
     html: str
     caption: str
-    car_count: int
-    person_count: int
+    sighting_count: int
 
 
-class VehicleSightingCreate(BaseModel):
+class SightingCreate(BaseModel):
+    # Replaces the former VehicleSightingCreate/PersonSightingCreate split -- one universal
+    # completion shape, POSTed by n8n's own AI-analysis workflow (or the internal ai_worker.py,
+    # which calls db.complete_sighting directly rather than over HTTP).
     raw_event_id: int
-    color: str | None = None
-    body_type: str | None = None
-    make_guess: str | None = None
-    make_confidence: str | None = None
-    model_guess: str | None = None
-    model_confidence: str | None = None
-    notable_features: str | None = None
-    plate_text_llm: str | None = None
-    plate_text_frigate: str | None = None
-    plate_confidence: str | None = None
-    notes: str | None = None
+    object_label: str | None = None
+    description: str | None = None
     # Optional: n8n (or the internal AI stage's own _embed_text) computes this (currently
     # Qwen3-Embedding-0.6B-GGUF, 1024 dims -- must match config.EMBEDDING_DIMENSIONS/schema.sql's
     # embedding columns) before calling this endpoint. Omitted or null means this sighting just
     # isn't semantically searchable, not an error.
-    embedding: list[float] | None = None
-
-
-class PersonSightingCreate(BaseModel):
-    raw_event_id: int
-    description: str | None = None
-    notes: str | None = None
     embedding: list[float] | None = None
 
 
@@ -189,24 +143,19 @@ class SemanticSearchRequest(BaseModel):
     embedding: list[float]
     start: datetime | None = None
     end: datetime | None = None
+    # Filters by the actual Frigate label (object_label) directly now -- e.g. ["car", "dog"] --
+    # rather than the old pseudo-categories ("vehicle"/"person") the two-table split required.
     object_types: list[str] | None = None
     limit: int = 10
 
 
 class SemanticSearchResult(BaseModel):
-    sighting_type: str
     sighting_id: int
     raw_event_id: int
     start_ts: datetime
     camera: str
     objects: str | None
-    color: str | None = None
-    body_type: str | None = None
-    make_guess: str | None = None
-    model_guess: str | None = None
-    notable_features: str | None = None
-    plate_text_llm: str | None = None
-    plate_text_frigate: str | None = None
+    object_label: str | None
     description: str | None = None
     distance: float
 

@@ -118,8 +118,8 @@ like *"cars seen last week"* still goes through the normal structured filters (t
 object type) since that maps cleanly to real fields.
 
 Under the hood this uses **pgvector** (a Postgres extension), not a separate vector database — the
-embeddings live as one more column right alongside everything else in the same `vehicle_sightings`/
-`person_sightings` tables, so there's no extra service to run or keep in sync. The actual embedding
+embeddings live as one more column right alongside everything else in the same universal `sightings`/
+`visit_sightings` tables, so there's no extra service to run or keep in sync. The actual embedding
 model is one more slot on your locally-hosted VLM setup (e.g.
 [`llama-slot-proxy`](https://github.com/shuricksumy/llama-slot-proxy)) — see
 [`docs/configuration.md`](docs/configuration.md) for `LLAMA_PROXY_EMBED_PATH`/

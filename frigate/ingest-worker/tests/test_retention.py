@@ -2,15 +2,13 @@
 purge_older_than (the full ad-hoc purge, POST /retention/purge's only_media=false), and
 purge_media_older_than (the media-only ad-hoc purge, only_media=true, the default).
 
-No prior test coverage existed for any of these before this file -- confirmed live that both
-run_retention_cleanup and purge_older_than raised psycopg2.errors.ForeignKeyViolation deleting
-visits while a still-linked raw_event's visit_id pointed at them (raw_events.visit_id references
-visits(id), the opposite direction from the delete order), and would have hit a second violation
-from visit_vehicle_sightings/visit_person_sightings (added alongside the alert AI stage) once any
-visit with an alert-stage sighting reached its cutoff. Both fixed by nulling raw_events.visit_id
-for affected rows before deleting visits, and deleting visit_vehicle_sightings/
-visit_person_sightings before visits, same child-before-parent shape the rest of this file already
-used for vehicle_sightings/person_sightings before raw_events.
+Confirmed live that both run_retention_cleanup and purge_older_than raised
+psycopg2.errors.ForeignKeyViolation deleting visits while a still-linked raw_event's visit_id
+pointed at them (raw_events.visit_id references visits(id), the opposite direction from the
+delete order), and would have hit a second violation from visit_sightings once any visit with an
+alert-stage sighting reached its cutoff. Both fixed by nulling raw_events.visit_id for affected
+rows before deleting visits, and deleting visit_sightings before visits, same child-before-parent
+shape the rest of this file already used for sightings before raw_events.
 
 Requires a reachable Postgres with schema.sql applied -- see test_db_video_queue.py's module
 docstring for setup notes. Additionally requires pgvector, same as test_semantic_search.py.
@@ -67,16 +65,12 @@ def _make_old_visit_with_everything(days_old=100, camera="pytest-retention-cam")
         "video_path = '/data/video-alerts/fake.mp4' WHERE id = %s",
         (_old_ts(days_old), visit_id),
     )
-    db.complete_visit_vehicle_sighting(
-        visit_id, color="red", body_type="sedan", make_guess=None, make_confidence=None,
-        model_guess=None, model_confidence=None, notable_features=None, plate_text_llm=None,
-        plate_confidence=None, notes=None,
-    )
+    db.complete_visit_sighting(visit_id, "car", "red sedan")
     return event_id, visit_id
 
 
 def _cleanup(event_id, visit_id):
-    db._execute("DELETE FROM yard_stats.visit_vehicle_sightings WHERE visit_id = %s", (visit_id,))
+    db._execute("DELETE FROM yard_stats.visit_sightings WHERE visit_id = %s", (visit_id,))
     db._execute("DELETE FROM yard_stats.raw_events WHERE id = %s", (event_id,))
     db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
 
@@ -88,7 +82,7 @@ def test_purge_older_than_deletes_visit_with_linked_raw_event_and_alert_sighting
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=60)
         preview = db.purge_older_than(cutoff, execute=False)
-        assert preview["visit_vehicle_sightings"] >= 1
+        assert preview["visit_sightings"] >= 1
         assert preview["visits"] >= 1
         assert preview["raw_events"] >= 1
 
@@ -168,8 +162,8 @@ def test_purge_media_older_than_clears_media_but_keeps_rows_and_text(conn_ok):
 
         sighting = db.get_visit_alert_sighting(visit_id)
         assert sighting is not None  # alert-stage text analysis fully preserved
-        assert sighting["color"] == "red"
-        assert sighting["body_type"] == "sedan"
+        assert sighting["object_label"] == "car"
+        assert sighting["description"] == "red sedan"
     finally:
         _cleanup(event_id, visit_id)
 
@@ -193,7 +187,7 @@ def test_purge_media_older_than_does_not_delete_sighting_rows(conn_ok):
         db.purge_media_older_than(cutoff, execute=True)
         # The row-deleting full purge counts these -- the media-only purge must never remove them.
         rows = db._execute(
-            "SELECT count(*)::int AS c FROM yard_stats.visit_vehicle_sightings WHERE visit_id = %s",
+            "SELECT count(*)::int AS c FROM yard_stats.visit_sightings WHERE visit_id = %s",
             (visit_id,), fetch=True,
         )
         assert rows[0]["c"] == 1

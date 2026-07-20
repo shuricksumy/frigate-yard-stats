@@ -196,27 +196,25 @@ def get_visit_sightings(visit_id: int):
     """Every AI analysis result linked to this visit, not just the representative event's --
     claim_ai_batch analyzes one representative event per distinct object type a visit grouped
     together (see its only_visit_representative comment), so a visit spanning e.g. a car and a
-    person has one vehicle_sighting and one person_sighting here, not just whichever was analyzed
-    first. GET /events/{id} still only ever returns a single event's own sighting; this is the
-    visit-scoped combined view the web UI's lightbox uses instead. alert_sighting is the visit's
-    own AI_ALERTS_ENABLED analysis of its composite grid, independent of vehicles/persons above --
-    null until that stage has produced one for this visit."""
+    person has one sighting each here, not just whichever was analyzed first. GET /events/{id}
+    still only ever returns a single event's own sighting; this is the visit-scoped combined view
+    the web UI's lightbox uses instead. alert_sighting is the visit's own AI_ALERTS_ENABLED
+    analysis of its composite grid, independent of sightings above -- null until that stage has
+    produced one for this visit."""
     if db.get_visit(visit_id) is None:
         raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
-    return {**db.get_sightings_for_visit(visit_id), "alert_sighting": db.get_visit_alert_sighting(visit_id)}
+    return {"sightings": db.get_sightings_for_visit(visit_id), "alert_sighting": db.get_visit_alert_sighting(visit_id)}
 
 
 @app.get("/events/{event_id}", response_model=schemas.EventDetail, tags=["events"], dependencies=[Depends(require_api_key)])
 def get_event(event_id: int):
     """Single event's full detail, including its stored crop_image_base64 and, once
-    ai_status='done', the AI analysis result (vehicle_sighting or person_sighting -- at most one
-    is ever populated)."""
+    ai_status='done', the AI analysis result."""
     row = db.get_raw_event(event_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"raw_event {event_id} not found")
     row = dict(row)
-    row["vehicle_sighting"] = db.get_vehicle_sighting_for_event(event_id)
-    row["person_sighting"] = db.get_person_sighting_for_event(event_id)
+    row["sighting"] = db.get_sighting_for_event(event_id)
     return row
 
 
@@ -348,29 +346,20 @@ def get_visit_video(visit_id: int):
     return FileResponse(video_path, media_type="video/mp4", filename=os.path.basename(video_path))
 
 
-@app.get("/sightings/vehicles", response_model=list[schemas.VehicleSighting], tags=["sightings"], dependencies=[Depends(require_api_key)])
-def get_vehicle_sightings(
+@app.get("/sightings", response_model=list[schemas.Sighting], tags=["sightings"], dependencies=[Depends(require_api_key)])
+def get_sightings(
     camera: str | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
-    plate_text: str | None = Query(None, description="Substring match against either plate_text_llm or plate_text_frigate"),
+    object_label: str | None = Query(None, description="Exact match against the Frigate object label (e.g. 'car', 'dog') -- omit for every type"),
+    q: str | None = Query(None, description="Substring match against the sighting's description"),
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
-    """Vehicle sightings, most recent first -- e.g. ?limit=10 for the last 10 cars."""
-    return db.get_vehicle_sightings(camera, start, end, plate_text, limit, offset)
-
-
-@app.get("/sightings/persons", response_model=list[schemas.PersonSighting], tags=["sightings"], dependencies=[Depends(require_api_key)])
-def get_person_sightings(
-    camera: str | None = None,
-    start: datetime | None = None,
-    end: datetime | None = None,
-    limit: int = Query(20, ge=1, le=200),
-    offset: int = Query(0, ge=0),
-):
-    """Person sightings, most recent first."""
-    return db.get_person_sightings(camera, start, end, limit, offset)
+    """Sightings, most recent first -- e.g. ?object_label=car&limit=10 for the last 10 cars.
+    Replaces the former /sightings/vehicles and /sightings/persons (one universal list now, no
+    per-type endpoints)."""
+    return db.get_sightings(camera, start, end, object_label, q, limit, offset)
 
 
 @app.get("/stats/summary", response_model=schemas.StatsSummary, tags=["stats"], dependencies=[Depends(require_api_key)])
@@ -429,24 +418,14 @@ def claim_ai_batch(
     return {"events": events}
 
 
-@app.post("/sightings/vehicles", response_model=schemas.SightingCreated, tags=["sightings"], dependencies=[Depends(require_api_key)])
-def create_vehicle_sighting(sighting: schemas.VehicleSightingCreate):
-    """Inserts a vehicle sighting and marks the raw_event's ai_status='done' in one transaction
-    -- replaces the old Insert Vehicle Sighting + Mark Done pair of n8n Postgres nodes."""
-    sighting_id = db.complete_vehicle_sighting(
-        sighting.raw_event_id, sighting.color, sighting.body_type, sighting.make_guess,
-        sighting.make_confidence, sighting.model_guess, sighting.model_confidence,
-        sighting.notable_features, sighting.plate_text_llm, sighting.plate_text_frigate,
-        sighting.plate_confidence, sighting.notes, sighting.embedding,
-    )
-    return {"id": sighting_id, "ai_status": "done"}
-
-
-@app.post("/sightings/persons", response_model=schemas.SightingCreated, tags=["sightings"], dependencies=[Depends(require_api_key)])
-def create_person_sighting(sighting: schemas.PersonSightingCreate):
-    """Inserts a person sighting and marks the raw_event's ai_status='done' in one transaction."""
-    sighting_id = db.complete_person_sighting(
-        sighting.raw_event_id, sighting.description, sighting.notes, sighting.embedding,
+@app.post("/sightings", response_model=schemas.SightingCreated, tags=["sightings"], dependencies=[Depends(require_api_key)])
+def create_sighting(sighting: schemas.SightingCreate):
+    """Inserts a sighting and marks the raw_event's ai_status='done' in one transaction --
+    replaces the old Insert Vehicle/Person Sighting + Mark Done pair of n8n Postgres nodes, and
+    the former separate /sightings/vehicles and /sightings/persons endpoints (one universal
+    completion shape now, object_label is just data on the row)."""
+    sighting_id = db.complete_sighting(
+        sighting.raw_event_id, sighting.object_label, sighting.description, sighting.embedding,
     )
     return {"id": sighting_id, "ai_status": "done"}
 
@@ -491,10 +470,10 @@ def admin_overview():
         "row_counts": row_counts,
         "stage_counts": db.get_stage_counts(),
         "embeddings": {
-            "vehicle_sightings_missing": missing_embeddings["vehicle_sightings"],
-            "vehicle_sightings_total": row_counts["vehicle_sightings"],
-            "person_sightings_missing": missing_embeddings["person_sightings"],
-            "person_sightings_total": row_counts["person_sightings"],
+            "sightings_missing": missing_embeddings["sightings"],
+            "sightings_total": row_counts["sightings"],
+            "visit_sightings_missing": missing_embeddings["visit_sightings"],
+            "visit_sightings_total": row_counts["visit_sightings"],
         },
         "db_size": db.get_db_size_info(),
         "vector_index": db.get_vector_index_status(),

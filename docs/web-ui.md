@@ -54,15 +54,17 @@ row, toggle buttons switch between them:
 Whichever is richest and already available opens by default (Preview, then Video, then Image) —
 the toggle buttons only appear when there's actually more than one to switch between.
 
-Below the media, once AI analysis has finished, you'll see the actual extracted fields —
-color/body type/make/model/notable features/plate for a vehicle, a short description for a
-person. On the Events tab this is always the event's own single-frame analysis
+Below the media, once AI analysis has finished, you'll see the AI's description as a single line of
+plain text (whatever the VLM said in response to that object type's prompt — color/body
+type/plate for a car, clothing/activity for a person, or anything at all for any other label you've
+configured — there's no per-field table, just the model's own words). On the Events tab this is
+always the event's own single-frame analysis
 (`AI_EVENTS_STAGE_ENABLED`). On the Visits tab, it prefers that visit's own alert-stage analysis
 of the composite grid instead (`AI_ALERTS_ENABLED`, labeled "... (alert analysis)") — a richer
-result that also describes what changed across the visit, not just static attributes — falling
+result that also describes what changed across the visit, not just a static snapshot — falling
 back to the per-event analysis if the alert stage is off or hasn't finished that visit yet. A
-visit that grouped both a vehicle and a person shows both (per-event fallback only), labeled
-separately, rather than picking just one.
+visit that grouped several distinct object types (e.g. a car and a person) shows each one's
+sighting (per-event fallback only), labeled separately, rather than picking just one.
 
 On the Visits tab specifically, below that a "Connected events" strip shows every individual
 det_id Frigate's own tracker grouped into that visit (not just the deduped sighting(s) above) —
@@ -101,7 +103,7 @@ both pages). It shows:
   extension/index status, and an on-demand "Check now" button that live-tests your embedding
   backend (`LLAMA_PROXY_EMBED_PATH`) and reports whether it's reachable and returning the right
   vector size.
-- **Counts** — total events, visits, vehicle/person sightings, and retention info (how many months
+- **Counts** — total events, visits, sightings (any object type), and retention info (how many months
   you're keeping, and the oldest event still in the database).
 - **Semantic search coverage** — how many sightings have an embedding vs. don't, with buttons to
   backfill missing ones or reindex the vector database.
