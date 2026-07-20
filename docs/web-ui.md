@@ -64,6 +64,11 @@ back to the per-event analysis if the alert stage is off or hasn't finished that
 visit that grouped both a vehicle and a person shows both (per-event fallback only), labeled
 separately, rather than picking just one.
 
+On the Visits tab specifically, below that a "Connected events" strip shows every individual
+det_id Frigate's own tracker grouped into that visit (not just the deduped sighting(s) above) —
+small thumbnails in chronological order, each clickable to jump straight into that specific
+event's own lightbox.
+
 A download button next to the close button grabs whichever of video/image is currently on screen.
 
 ## What the badges mean

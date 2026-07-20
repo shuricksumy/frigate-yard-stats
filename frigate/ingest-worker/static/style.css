@@ -360,6 +360,14 @@ input:disabled, select:disabled {
 
 /* ============ Admin dashboard (admin.html/admin.js) ============ */
 
+/* The main report UI's grid of cards reflows naturally regardless of window width, but this
+   page is mostly single-column text/badges/tables, which reads worse the wider it stretches on a
+   large monitor -- capped and centered here specifically, not changed page-wide. */
+.admin-page {
+  max-width: 1100px;
+  margin: 0 auto;
+}
+
 .admin-card {
   background: var(--card);
   border: 1px solid var(--border);
@@ -431,12 +439,36 @@ input:disabled, select:disabled {
 
 .admin-table th { color: var(--muted); font-weight: 500; }
 
+.admin-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+
 .queue-row { padding-bottom: 12px; border-bottom: 1px solid var(--border); }
 .queue-row:last-child { border-bottom: none; }
 
-.queue-label {
+/* Shared "label | badges | actions" row shape (queue health rows, the two Health rows) -- the
+   label gets a fixed width so every row's badges start at the same x position, and the actions
+   group is pushed flush to the row's right edge via margin-left:auto regardless of how many
+   badges come before it, rather than just flowing after them wherever they happen to end (which
+   put e.g. each "Requeue N failed" button at a different horizontal position per row). */
+.row-label {
+  flex: 0 0 170px;
   font-weight: 600;
-  min-width: 140px;
+}
+
+.row-badges {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  flex: 1 1 240px;
+  min-width: 0;
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  white-space: nowrap;
 }
 
 .badge.ai-new { color: var(--accent); }
@@ -444,3 +476,60 @@ input:disabled, select:disabled {
 
 .btn-danger { background: #c0392b; }
 .btn-danger:hover { background: #e74c3c; }
+
+.lightbox-connected-events {
+  background: var(--card);
+  padding: 12px 16px;
+  max-width: 95vw;
+  margin-top: 8px;
+}
+
+.lightbox-connected-events h4 {
+  margin: 0 0 8px;
+  font-size: 0.8rem;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+}
+
+.connected-events-strip {
+  display: flex;
+  gap: 8px;
+  overflow-x: auto;
+  padding-bottom: 4px;
+}
+
+.connected-event-card {
+  position: relative;
+  flex: 0 0 auto;
+  width: 96px;
+  cursor: pointer;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+
+.connected-event-card img {
+  display: block;
+  width: 100%;
+  height: 72px;
+  object-fit: cover;
+  background: #22262c;
+}
+
+.connected-event-ts {
+  display: block;
+  font-size: 0.65rem;
+  color: var(--muted);
+  padding: 2px 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.connected-event-card .badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  background: rgba(0, 0, 0, 0.7);
+}

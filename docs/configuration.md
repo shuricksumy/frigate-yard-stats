@@ -64,17 +64,19 @@ analyzed:
   real trade-off, not a strict improvement: a full wide frame gives more context but makes small
   detail (plates, notable features) harder for the VLM to read. The same image is what's displayed
   in the web UI *and* sent to the VLM — there's no separate "wide for humans, cropped for the
-  model" mode. Ignored for events when `FRIGATE_SNAPSHOT_ENABLED` below is `true`.
-- `FRIGATE_SNAPSHOT_ENABLED` (default `false`) — for **events only**, uses Frigate's own
+  model" mode. Only applies for events when `FRIGATE_SNAPSHOT_ENABLED` below is `false`.
+- `FRIGATE_SNAPSHOT_ENABLED` (default **`true`**) — for **events only**, uses Frigate's own
   already-rendered event snapshot instead of seeking+cropping a frame from the record-stream clip
-  yourself. Frigate picks this frame by its own best-detection-score judgment, so it's often
-  better framed/timed than the fixed-offset guess `CROP_FRAME_OFFSET_PCT` makes — but it's a real
-  trade-off, not a strict upgrade: Frigate's snapshot is from the lower-res detect stream (typically
-  much smaller than your record stream) with a burned-in bounding-box/label/timestamp overlay this
-  Frigate version's API gives no way to turn off. `CROP_DISABLED`/`CROP_FRAME_OFFSET_PCT`/
-  `CROP_PADDING_PCT` stop applying to events when this is `true`. A visit's own composite grid
-  (`VISIT_THUMB_CROP_ENABLED`) is unaffected either way — a single Frigate snapshot has no
-  multi-frame equivalent to offer it.
+  yourself. Frigate picks this frame by its own best-detection-score judgment, so in practice it
+  beats the fixed-offset guess `CROP_FRAME_OFFSET_PCT` makes often enough to be the default —
+  accepted trade-off: Frigate's snapshot is from the lower-res detect stream (typically much
+  smaller than your record stream) with a burned-in bounding-box/label/timestamp overlay this
+  Frigate version's API gives no way to turn off (confirmed directly — `bbox=0`/`timestamp=0`/`h=`
+  query params on the snapshot endpoint have no effect at all). Set to `false` to fall back to
+  this project's original seek-based approach if that trade-off doesn't work for your footage —
+  `CROP_DISABLED`/`CROP_FRAME_OFFSET_PCT`/`CROP_PADDING_PCT` only take effect once you do. A
+  visit's own composite grid (`VISIT_THUMB_CROP_ENABLED`) is unaffected either way — a single
+  Frigate snapshot has no multi-frame equivalent to offer it.
 
 ## Camera allow-list
 

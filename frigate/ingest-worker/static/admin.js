@@ -158,6 +158,7 @@ function adminApp() {
         boolFlag("Store video (alerts)", f.store_video_alerts),
         boolFlag("Visit preview", f.visit_thumb_crop_enabled),
         boolFlag("Crop disabled", f.crop_disabled),
+        boolFlag("Frigate snapshot (events)", f.frigate_snapshot_enabled),
         modeFlag("Telegram (events)", f.telegram_events_mode),
         modeFlag("Telegram (alerts)", f.telegram_alerts_mode),
       ];

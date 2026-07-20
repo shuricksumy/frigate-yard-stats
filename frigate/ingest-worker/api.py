@@ -139,8 +139,9 @@ def get_events(
     video_status: str | None = None,
     has_media: bool = Query(True, description="Only return rows with a stored crop image and/or video -- default true, since a row with neither (crop_status not yet 'done', including 'skipped') has nothing to show. Pass false to see every row regardless."),
     event_id: int | None = Query(None, description="Exact-match a single event by id -- ignores the start/end/hours window entirely, since you're looking for one specific known event, not browsing a range."),
+    visit_id: int | None = Query(None, description="Every raw_event linked to one specific visit -- ignores the start/end/hours window and has_media default entirely, same reasoning as event_id: you're looking for every det_id a visit grouped, not browsing a range. Lets the web UI's visit lightbox show all connected events, not just the deduped AI-analyzed ones GET /visits/{id}/sightings returns."),
     q: str | None = Query(None, description="Free-text search (substring, case-insensitive) across the AI analysis result -- vehicle color/body_type/make/model/notable_features/plate/notes, or person description/notes. Only matches rows that already have a sighting (ai_status='done'). Combines with start/end/hours (and every other filter) rather than bypassing them -- searches within the selected window, not your whole history."),
-    hours: float = Query(1, gt=0, description="Used when start/end aren't both given -- window is the last N hours (default: last 1 hour). Ignored if event_id is given; still applies alongside q."),
+    hours: float = Query(1, gt=0, description="Used when start/end aren't both given -- window is the last N hours (default: last 1 hour). Ignored if event_id/visit_id is given; still applies alongside q."),
     limit: int = Query(20, ge=1, le=200),
     offset: int = Query(0, ge=0),
 ):
@@ -149,18 +150,18 @@ def get_events(
     responses small; use GET /events/{id} for full detail or GET /events/{id}/thumbnail for a
     small preview image. Sets an X-Total-Count response header (total rows matching the same
     filters, ignoring limit/offset) so a caller can compute a page count without a second request."""
-    if event_id is not None:
+    if event_id is not None or visit_id is not None:
         resolved_start = resolved_end = None
     else:
         resolved_start, resolved_end = _resolve_window(start, end, hours)
     total = db.count_events(
         object_type, camera, resolved_start, resolved_end,
-        crop_status, ai_status, video_status, has_media, event_id, q,
+        crop_status, ai_status, video_status, has_media, event_id, q, visit_id,
     )
     response.headers["X-Total-Count"] = str(total)
     return db.list_events(
         object_type, camera, resolved_start, resolved_end,
-        crop_status, ai_status, video_status, has_media, event_id, q, limit, offset,
+        crop_status, ai_status, video_status, has_media, event_id, q, limit, offset, visit_id,
     )
 
 
@@ -505,6 +506,7 @@ def admin_overview():
             "store_video_alerts": config.STORE_VIDEO_ALERTS,
             "visit_thumb_crop_enabled": config.VISIT_THUMB_CROP_ENABLED,
             "crop_disabled": config.CROP_DISABLED,
+            "frigate_snapshot_enabled": config.FRIGATE_SNAPSHOT_ENABLED,
             "telegram_events_mode": config.TELEGRAM_EVENTS_MODE,
             "telegram_alerts_mode": config.TELEGRAM_ALERTS_MODE,
         },

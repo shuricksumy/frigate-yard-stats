@@ -22,7 +22,7 @@
     </div>
   </div>
 
-  <div x-show="hasApiKey" style="display:none">
+  <div x-show="hasApiKey" class="admin-page" style="display:none">
     <header>
       <h1>Admin</h1>
       <div>
@@ -43,17 +43,20 @@
         </template>
       </div>
       <div class="admin-row">
-        <div>
-          <strong>Embedding backend</strong>
+        <span class="row-label">Embedding backend</span>
+        <div class="row-badges">
+          <span :class="!embedCheck ? '' : (embedCheck.ok ? 'ok-text' : 'bad-text')"
+                x-text="!embedCheck ? 'Not checked yet' : (embedCheck.ok ? 'OK -- ' + embedCheck.dimensions + ' dims' : 'FAILED -- ' + embedCheck.detail)"></span>
+        </div>
+        <div class="row-actions">
           <button @click="checkEmbeddingBackend()" :disabled="checkingEmbed">Check now</button>
-          <span x-show="embedCheck" :class="embedCheck && embedCheck.ok ? 'ok-text' : 'bad-text'" x-text="embedCheck ? (embedCheck.ok ? 'OK -- ' + embedCheck.dimensions + ' dims' : 'FAILED -- ' + embedCheck.detail) : ''"></span>
         </div>
       </div>
       <div class="admin-row" x-show="overview">
-        <div>
-          <strong>Vector index</strong>
-          -- pgvector <span x-text="overview && overview.vector_index.extension_version"></span>,
-          expects <span x-text="overview && overview.vector_index.embedding_dimensions"></span> dims
+        <span class="row-label">Vector index</span>
+        <div class="row-badges">
+          <span class="flag flag-on" x-text="'pgvector ' + (overview && overview.vector_index.extension_version)"></span>
+          <span class="flag flag-on" x-text="(overview && overview.vector_index.embedding_dimensions) + ' dims expected'"></span>
           <template x-for="idx in (overview ? overview.vector_index.indexes : [])" :key="idx.index">
             <span class="flag" :class="idx.indisvalid ? 'flag-on' : 'flag-off'" x-text="idx.index.split('.').pop() + ': ' + (idx.indisvalid ? 'valid' : 'INVALID')"></span>
           </template>
@@ -103,17 +106,21 @@
       <h2>Queue health</h2>
       <template x-for="stage in stageList()" :key="stage.table + stage.stage">
         <div class="admin-row queue-row">
-          <span class="queue-label" x-text="stage.table + ' / ' + stage.stage"></span>
-          <template x-for="[status, count] in Object.entries(stage.counts)" :key="status">
-            <span class="badge" :class="'ai-' + status" x-text="status + ': ' + count"></span>
-          </template>
-          <button
-            x-show="(stage.counts.failed || 0) > 0"
-            @click="requeueFailed(stage.table, stage.stage)"
-            :disabled="requeuing === (stage.table + stage.stage)">
-            Requeue <span x-text="stage.counts.failed"></span> failed
-          </button>
-          <span x-show="requeueResult[stage.table + stage.stage]" x-text="requeueResult[stage.table + stage.stage]"></span>
+          <span class="row-label" x-text="stage.table + ' / ' + stage.stage"></span>
+          <div class="row-badges">
+            <template x-for="[status, count] in Object.entries(stage.counts)" :key="status">
+              <span class="badge" :class="'ai-' + status" x-text="status + ': ' + count"></span>
+            </template>
+          </div>
+          <div class="row-actions">
+            <span x-show="requeueResult[stage.table + stage.stage]" x-text="requeueResult[stage.table + stage.stage]"></span>
+            <button
+              x-show="(stage.counts.failed || 0) > 0"
+              @click="requeueFailed(stage.table, stage.stage)"
+              :disabled="requeuing === (stage.table + stage.stage)">
+              Requeue <span x-text="stage.counts.failed"></span> failed
+            </button>
+          </div>
         </div>
       </template>
     </section>
@@ -128,10 +135,10 @@
       </div>
       <p class="status-line" x-show="!diskUsage">Loading disk usage&hellip;</p>
       <table class="admin-table" x-show="overview">
-        <thead><tr><th>Table</th><th>Size</th></tr></thead>
+        <thead><tr><th>Table</th><th class="num">Size</th></tr></thead>
         <tbody>
           <template x-for="t in (overview ? overview.db_size.tables : [])" :key="t.table">
-            <tr><td x-text="t.table"></td><td x-text="fmtBytes(t.bytes)"></td></tr>
+            <tr><td x-text="t.table"></td><td class="num" x-text="fmtBytes(t.bytes)"></td></tr>
           </template>
         </tbody>
       </table>

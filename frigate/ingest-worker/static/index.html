@@ -197,6 +197,21 @@
           </template>
         </template>
       </div>
+      <!-- Every raw_event this visit grouped together (Frigate's own review/tracker grouping),
+           not just the deduped AI-analyzed sighting(s) above -- click one to open its own
+           per-event lightbox. Visits only; a plain event has no connected events of its own. -->
+      <div class="lightbox-connected-events" x-show="lightboxEvent && lightboxEvent.visitId && lightboxConnectedEvents.length > 0" style="display:none">
+        <h4>Connected events (<span x-text="lightboxConnectedEvents.length"></span>)</h4>
+        <div class="connected-events-strip">
+          <template x-for="ev in lightboxConnectedEvents" :key="ev.id">
+            <div class="connected-event-card" @click="openLightbox(ev)">
+              <img :src="thumbnailUrl(ev.id)" :alt="ev.objects" loading="lazy">
+              <span class="connected-event-ts" x-text="formatTs(ev.start_ts)"></span>
+              <span class="badge" :class="'ai-' + ev.ai_status" x-text="ev.ai_status"></span>
+            </div>
+          </template>
+        </div>
+      </div>
     </div>
   </div>
 

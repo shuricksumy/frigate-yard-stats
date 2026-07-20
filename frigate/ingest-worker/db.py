@@ -1171,6 +1171,7 @@ def _build_events_query(
     has_media: bool = True,
     event_id: int | None = None,
     q: str | None = None,
+    visit_id: int | None = None,
 ) -> tuple[str, list]:
     # Factored out of list_events so count_events can reuse the exact same filters (LIMIT/OFFSET-
     # free) rather than re-deriving them in a parallel function that could silently drift out of
@@ -1197,20 +1198,27 @@ def _build_events_query(
             ps.description ILIKE %s OR ps.notes ILIKE %s
         )""")
         params.extend([term] * 10)
-    if has_media and event_id is None:
+    if has_media and event_id is None and visit_id is None:
         # Default view: hide rows with neither a crop image nor a stored video (crop_status not
         # yet 'done' -- including the 'skipped' rows has_snapshot=false produces, which will never
         # get one) so the grid isn't full of cards with nothing to show. In practice video_path is
         # never set without crop_image_base64 already being set too (claim_video_batch only claims
         # crop_status='done' rows), so this is currently equivalent to crop-image-only, but checks
         # both so it stays correct if that invariant ever changes. Pass has_media=false to see
-        # everything. Skipped entirely when event_id is given -- searching for one specific known
-        # event should find it regardless of whether it has media, same reasoning as event_id
-        # bypassing the time window at the API layer.
+        # everything. Skipped entirely when event_id/visit_id is given -- searching for one
+        # specific known event, or every event linked to one specific visit, should find them
+        # regardless of whether they have media yet, same reasoning as event_id bypassing the time
+        # window at the API layer.
         clauses.append("(re.crop_image_base64 IS NOT NULL OR re.video_path IS NOT NULL)")
     if event_id is not None:
         clauses.append("re.id = %s")
         params.append(event_id)
+    if visit_id is not None:
+        # Every raw_event linked to one specific visit -- the web UI's visit lightbox uses this to
+        # show all connected det_ids alongside the visit-level alert analysis, not just the
+        # deduped AI-analyzed representatives get_sightings_for_visit already returns.
+        clauses.append("re.visit_id = %s")
+        params.append(visit_id)
     if object_type:
         # Comma-separated ("car,truck") or a single value -- "all"/omitted means no filter.
         # `objects` is a free-text label (see mqtt_ingest.parse_payload: Frigate's single
@@ -1266,9 +1274,10 @@ def list_events(
     q: str | None = None,
     limit: int = 20,
     offset: int = 0,
+    visit_id: int | None = None,
 ) -> list:
     query, params = _build_events_query(
-        object_type, camera, start, end, crop_status, ai_status, video_status, has_media, event_id, q,
+        object_type, camera, start, end, crop_status, ai_status, video_status, has_media, event_id, q, visit_id,
     )
     return _execute(f"{query} LIMIT %s OFFSET %s", params + [limit, offset], fetch=True)
 
@@ -1284,11 +1293,12 @@ def count_events(
     has_media: bool = True,
     event_id: int | None = None,
     q: str | None = None,
+    visit_id: int | None = None,
 ) -> int:
     # Same filters as list_events, no LIMIT/OFFSET -- lets the web UI show "page X of Y" instead
     # of just "there might be more" (e.g. by comparing len(events) to limit).
     query, params = _build_events_query(
-        object_type, camera, start, end, crop_status, ai_status, video_status, has_media, event_id, q,
+        object_type, camera, start, end, crop_status, ai_status, video_status, has_media, event_id, q, visit_id,
     )
     rows = _execute(f"SELECT COUNT(*) AS count FROM ({query}) AS sub", params, fetch=True)
     return rows[0]["count"]

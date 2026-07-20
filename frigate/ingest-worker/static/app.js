@@ -67,6 +67,9 @@ function eventsApp() {
     // visit grouped together (see claim_ai_batch's only_visit_representative comment in db.py),
     // e.g. a car and a person in the same visit each get their own entry here.
     lightboxGroups: [],
+    // Every raw_event a visit grouped together (GET /events?visit_id=...), for the "Connected
+    // events" strip -- always empty for a plain event (no visitId to fetch by).
+    lightboxConnectedEvents: [],
     lightboxLoading: false,
 
     init() {
@@ -443,6 +446,7 @@ function eventsApp() {
       // than one is available) let you switch between them freely.
       this.lightboxMode = event.has_preview_gif ? "preview" : event.has_video ? "video" : "image";
       this.lightboxGroups = [];
+      this.lightboxConnectedEvents = [];
       // A visit's own ai_status (event.ai_status) only reflects its single earliest-linked
       // event -- a second, different-object-type event in the same visit can still be
       // analyzed (or still pending) independently of that one, so the visit branch always
@@ -454,9 +458,14 @@ function eventsApp() {
       this.lightboxLoading = true;
       try {
         if (event.visitId) {
-          const resp = await fetch(`/visits/${event.visitId}/sightings`, { headers: { "X-API-Key": this.apiKey } });
-          if (resp.ok) {
-            const data = await resp.json();
+          // Sightings and connected-events are independent fetches -- run them in parallel rather
+          // than one after the other, since neither depends on the other's result.
+          const [sightingsResp, eventsResp] = await Promise.all([
+            fetch(`/visits/${event.visitId}/sightings`, { headers: { "X-API-Key": this.apiKey } }),
+            fetch(`/events?visit_id=${event.visitId}&has_media=false&limit=50`, { headers: { "X-API-Key": this.apiKey } }),
+          ]);
+          if (sightingsResp.ok) {
+            const data = await sightingsResp.json();
             // Prefer the visit's own alert-stage analysis (AI_ALERTS_ENABLED, the 2x2 grid) when
             // it's ready -- it's the richer, change-aware result this whole view exists for.
             // Falls back to the per-event vehicles/persons (AI_EVENTS_STAGE_ENABLED) when the
@@ -473,6 +482,12 @@ function eventsApp() {
                 ...data.persons.map((ps) => ({ title: "Person", fields: this.personFields(ps) })),
               ];
             }
+          }
+          if (eventsResp.ok) {
+            // Earliest-first -- GET /events itself orders newest-first for normal browsing, but
+            // reading a visit's connected events chronologically (what happened, in order) reads
+            // more naturally than newest-first for this specific strip.
+            this.lightboxConnectedEvents = (await eventsResp.json()).reverse();
           }
         } else {
           const resp = await fetch(`/events/${event.id}`, { headers: { "X-API-Key": this.apiKey } });
@@ -492,6 +507,7 @@ function eventsApp() {
     closeLightbox() {
       this.lightboxEvent = null;
       this.lightboxGroups = [];
+      this.lightboxConnectedEvents = [];
     },
 
     // One combined descriptive line instead of a Color/Body type/Make/Model/... table -- reads

@@ -684,6 +684,18 @@ changes. `GET /events?event_id=<id>` exact-matches a single event and bypasses e
 (time window and `has_media` included) -- searching for one specific known event should find it
 regardless, not get filtered out by the defaults built for browsing a range.
 
+`GET /events?visit_id=<id>` is the same bypass, scoped to every raw_event a visit grouped together
+instead of one specific event -- same reasoning: a connected event's own age or crop/media state
+shouldn't hide it from "show me everything this visit grouped." Lets the web UI's visit lightbox
+show a "Connected events" strip (`static/app.js`'s `openLightbox`, fetched alongside `GET
+/visits/{id}/sightings` in parallel) -- every det_id the visit grouped, not just the deduped
+AI-analyzed representative(s) that endpoint returns, each clickable to open that specific event's
+own lightbox. `db._build_events_query`'s `has_media` clause is skipped whenever either `event_id`
+or `visit_id` is given (not just `event_id` alone); the time-window bypass itself lives one level
+up, in `GET /events`'s own handler (skips resolving `start`/`end` from `hours` at all when either
+is given) -- `db.list_events`/`db.count_events` still apply whatever window they're explicitly
+passed, they just aren't passed one for this call.
+
 `GET /events?q=<text>` free-text searches (case-insensitive substring) across the AI analysis
 result -- `vehicle_sightings`' color/body_type/make_guess/model_guess/notable_features/
 plate_text_llm/plate_text_frigate/notes, or `person_sightings`' description/notes -- via a `LEFT
@@ -909,14 +921,16 @@ present, resolution still 800x448.
 That trade-off was true then and is still true now -- what changed is the *decision*, not the
 facts: this Frigate snapshot is Frigate's own best-detection-score frame judgment (the same
 content-dependent choice CROP_FRAME_OFFSET_PCT's own comment above says can't be replicated by any
-fixed offset), so for some deployments better framing/timing outweighs the resolution/overlay cost.
-`FRIGATE_SNAPSHOT_ENABLED` (default `false`, preserves all prior behavior) makes `crop.crop_event`
-call the new `crop.fetch_frigate_snapshot_base64` instead of `crop_and_scale` -- no ffmpeg
-involved at all for this path, just the raw JPEG bytes Frigate already rendered, base64-encoded
-directly. `sub_label`/`score` still come from the same `fetch_frigate_event` call either way, since
-those aren't image-related. `CROP_DISABLED`/`CROP_FRAME_OFFSET_PCT`/`CROP_PADDING_PCT` all stop
-applying to events once this is on -- there's no frame-seeking or region-cropping happening on our
-side anymore to tune.
+fixed offset), and in practice that beats a fixed-offset seek often enough that **this is now the
+default** (`FRIGATE_SNAPSHOT_ENABLED` default `true`, flipped from the original opt-in `false`
+once the trade-off was judged worth it broadly, not just for some deployments) -- not merely an
+available option anymore. `crop.crop_event` calls `crop.fetch_frigate_snapshot_base64` instead of
+`crop_and_scale` by default -- no ffmpeg involved at all for this path, just the raw JPEG bytes
+Frigate already rendered, base64-encoded directly. `sub_label`/`score` still come from the same
+`fetch_frigate_event` call either way, since those aren't image-related. `CROP_DISABLED`/
+`CROP_FRAME_OFFSET_PCT`/`CROP_PADDING_PCT` only take effect once `FRIGATE_SNAPSHOT_ENABLED` is set
+back to `false` -- with the new default, there's no frame-seeking or region-cropping happening on
+our side to tune unless you opt back into it.
 
 **Events only, deliberately** -- a visit's own composite grid (`VISIT_THUMB_CROP_ENABLED`,
 `crop.build_visit_preview`) is completely unaffected either way, kept on this project's own
