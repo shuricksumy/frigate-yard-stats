@@ -4,7 +4,7 @@ db.get_retention_info.
 Requires a reachable Postgres with schema.sql applied -- see test_db_video_queue.py's module
 docstring for setup notes. Additionally requires the pgvector extension (the pgvector/pgvector:pg16
 image, not plain postgres:16) since schema.sql's CREATE EXTENSION IF NOT EXISTS vector and the
-vector(768) columns depend on it.
+embedding columns (sized off config.EMBEDDING_DIMENSIONS) depend on it.
 """
 import os
 import uuid
@@ -16,6 +16,7 @@ os.environ.setdefault("API_KEY", "test-key")
 
 import pytest  # noqa: E402
 
+import config  # noqa: E402
 import db  # noqa: E402
 
 
@@ -28,9 +29,10 @@ def conn_ok():
 
 
 def _vec(seed: float) -> list[float]:
-    # A cheap, deterministic 768-dim vector -- exact semantic meaning doesn't matter here, only
-    # that two vectors built from a close seed land close in cosine distance and a far seed doesn't.
-    return [seed] + [0.0] * (db.EMBEDDING_DIMENSIONS - 1)
+    # A cheap, deterministic vector sized to whatever EMBEDDING_DIMENSIONS is currently configured
+    # to -- exact semantic meaning doesn't matter here, only that two vectors built from a close
+    # seed land close in cosine distance and a far seed doesn't.
+    return [seed] + [0.0] * (config.EMBEDDING_DIMENSIONS - 1)
 
 
 def _insert_event(camera, objects="car"):

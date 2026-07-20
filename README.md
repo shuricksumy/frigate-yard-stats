@@ -81,6 +81,48 @@ the AI stage's policy (when to claim, how many attempts) is decided by n8n, via 
 `ingest-worker`'s API rather than raw SQL. See [`CLAUDE.md`](CLAUDE.md) for the full write-up of
 every stage, endpoint, and the production issues that shaped this design.
 
+## Semantic search — finding things by meaning, not exact words
+
+Every AI-analyzed sighting has a short written description (e.g. `"silver sedan, four-door, no
+visible damage, plate reads 7ABC123"` for a vehicle, or `"person in a dark jacket carrying a small
+box"` for a person). The plain `GET /events?q=...` search only matches if your search text is a
+literal substring of that description — search for `"package"` and a sighting that says `"box"`
+instead simply won't show up, even though a human would obviously call that the same thing.
+
+**Semantic search fixes that** by comparing *meaning* instead of *spelling*. Every sighting's
+description text is run through an embedding model, which turns the sentence into a list of ~1000
+numbers (a "vector") that represents its meaning — sentences with similar meaning end up as nearby
+points in that number-space, regardless of which exact words were used. A search query gets turned
+into a vector the same way, and the database just finds whichever stored sightings' vectors are
+closest to it.
+
+**Example:**
+
+| You search for | It finds sightings whose description actually said |
+|---|---|
+| `"someone dropping off a delivery"` | `"person carrying a small brown box walks to the front door"` |
+| `"a beat-up old pickup"` | `"faded red pickup truck, visible rust on the rear panel"` |
+| `"kids playing outside"` | `"two children running across the driveway"` |
+
+None of those share a single matching word with the search text — a plain text search would find
+nothing, but semantic search finds them because the *meaning* lines up.
+
+This is exposed as `POST /search/semantic` (send a query, get back the closest-matching sightings
+ranked by similarity), and it's also one of the tools the natural-language **Q&A workflow** (n8n)
+can reach for on its own — ask it something vague like *"anything unusual in the yard today?"* and
+it can fall back to meaning-based search instead of requiring an exact keyword, while something
+like *"cars seen last week"* still goes through the normal structured filters (time range,
+object type) since that maps cleanly to real fields.
+
+Under the hood this uses **pgvector** (a Postgres extension), not a separate vector database — the
+embeddings live as one more column right alongside everything else in the same `vehicle_sightings`/
+`person_sightings` tables, so there's no extra service to run or keep in sync. The actual embedding
+model is one more slot on your locally-hosted VLM setup (e.g.
+[`llama-slot-proxy`](https://github.com/shuricksumy/llama-slot-proxy)) — see
+[`docs/configuration.md`](docs/configuration.md) for `LLAMA_PROXY_EMBED_PATH`/
+`EMBEDDING_DIMENSIONS`, and `POST /embeddings/backfill` to fill this in for sightings that already
+existed before semantic search was turned on.
+
 ## Repository layout
 
 ```

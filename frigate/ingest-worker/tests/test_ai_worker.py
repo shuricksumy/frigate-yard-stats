@@ -290,7 +290,7 @@ def test_process_claimed_event_end_to_end_marks_ai_status_done(conn_ok, monkeypa
     def fake_post(url, **kwargs):
         if "chat/completions" in url:
             return _Resp(_chat_response('{"color": "silver", "body_type": "hatchback"}'))
-        return _Resp(_embed_response([0.1] + [0.0] * 767))
+        return _Resp(_embed_response([0.1] + [0.0] * (config.EMBEDDING_DIMENSIONS - 1)))
 
     monkeypatch.setattr(ai_worker.requests, "post", fake_post)
 
@@ -315,7 +315,10 @@ def test_process_claimed_event_end_to_end_marks_ai_status_done(conn_ok, monkeypa
 
 def test_run_embedding_backfill_updates_rows_missing_embedding(conn_ok, monkeypatch):
     monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
-    monkeypatch.setattr(ai_worker.requests, "post", lambda *a, **k: _Resp(_embed_response([0.1] + [0.0] * 767)))
+    monkeypatch.setattr(
+        ai_worker.requests, "post",
+        lambda *a, **k: _Resp(_embed_response([0.1] + [0.0] * (config.EMBEDDING_DIMENSIONS - 1))),
+    )
 
     vehicle_event_id = _insert_event(camera="pytest-backfill")
     person_event_id = _insert_event(camera="pytest-backfill", objects="person")
