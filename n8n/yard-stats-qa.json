@@ -129,7 +129,7 @@
       "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
       "typeVersion": 2.2,
       "position": [1250, 550],
-      "notes": "Calls the Yard Stats: Semantic Search Tool sub-workflow (n8n/yard-stats-semantic-search-tool.json) -- import that workflow first, then set workflowId below to its id. Packaged as a sub-workflow rather than a single HTTP tool specifically so the 768-float embedding vector never has to round-trip through this Agent's own context.",
+      "notes": "Calls the Yard Stats: Semantic Search Tool sub-workflow (n8n/yard-stats-semantic-search-tool.json) -- import that workflow first, then set workflowId below to its id. Packaged as a sub-workflow rather than a single HTTP tool specifically so the 1024-float embedding vector never has to round-trip through this Agent's own context.",
       "notesInFlow": true,
       "parameters": {
         "description": "Semantic/fuzzy search over AI-written sighting descriptions (color, body type, notable features, plate text, person description) within a time range. Use this for asks that don't map to a specific structured filter -- 'anything unusual', 'a suspicious-looking person', 'a red truck with a ladder rack' -- rather than search_events, which only does exact substring matches.",

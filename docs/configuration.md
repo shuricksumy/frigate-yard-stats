@@ -192,11 +192,18 @@ CLAUDE.md's "Internal AI stage" section for why that's wasteful, though not unsa
 - `AI_STAGE_PARALLEL_LIMIT`/`AI_STAGE_STALE_MINUTES`/`AI_STAGE_MAX_ATTEMPTS`/
   `AI_STAGE_MAX_AGE_HOURS`/`AI_STAGE_POLL_INTERVAL_SECONDS` — same queue-tuning shape as the crop
   stage above, just for this stage's own `ai_status` claims.
-- `LLAMA_PROXY_BASE_URL` (required once `AI_STAGE_ENABLED=true`) — your `llama_slot_proxy`'s own
-  base URL, called directly instead of going through n8n. `LLAMA_PROXY_TOKEN` is optional (blank =
-  no `Authorization` header — `llama_slot_proxy` is unauthenticated on the LAN in most setups
-  today). `LLAMA_PROXY_EMBED_PATH` is the embedding model's own URL path segment (same one-
-  path-per-slot convention `profiles.yaml`'s `chat_path` uses).
+- `LLAMA_PROXY_BASE_URL` (required once `AI_STAGE_ENABLED=true`) — your
+  [`llama_slot_proxy`](https://github.com/shuricksumy/llama-slot-proxy)'s own base URL, called
+  directly instead of going through n8n. `LLAMA_PROXY_TOKEN` is optional (blank = no
+  `Authorization` header — `llama_slot_proxy` is unauthenticated on the LAN in most setups today).
+  `LLAMA_PROXY_EMBED_PATH` is the embedding model's own URL path segment (same one-path-per-slot
+  convention `profiles.yaml`'s `chat_path` uses).
+- `EMBEDDING_DIMENSIONS` (default `1024`) — must match the output size of whatever model is loaded
+  behind `LLAMA_PROXY_EMBED_PATH` (e.g. `1024` for Qwen3-Embedding-0.6B-GGUF, `768` for
+  nomic-embed-text-v1.5). Sizes the pgvector `embedding` columns on `vehicle_sightings`/
+  `person_sightings`. Changing this after sightings already have embeddings stored clears them (a
+  different model's vectors are an incomparable vector space regardless of dimension) — re-run
+  `POST /embeddings/backfill?confirm=true` afterwards.
 - `AI_STAGE_DEFAULT_TIMEOUT_SECONDS` (default `180`)/`AI_STAGE_EMBED_TIMEOUT_SECONDS` (default
   `60`) — fallback timeouts; the real per-type chat timeout belongs in `profiles.yaml` itself
   (`timeout_seconds`), since a local model's response time genuinely depends on which model/prompt

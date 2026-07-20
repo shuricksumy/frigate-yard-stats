@@ -107,7 +107,9 @@ Mosquitto broker) for a from-scratch dev stack with no external broker dependenc
 
 - Frigate **0.16+**, with `lpr.enabled: true` and a full-resolution record stream (separate from
   the low-res detect stream) — clips and crops come from the record stream.
-- A locally-hosted OpenAI-compatible VLM endpoint (e.g. a `llama.cpp` server) reachable over HTTP.
+- A locally-hosted OpenAI-compatible VLM endpoint (e.g. a `llama.cpp` server, or
+  [`llama-slot-proxy`](https://github.com/shuricksumy/llama-slot-proxy) — see Related projects
+  below) reachable over HTTP.
 - An n8n instance to import the workflow JSON into.
 - Docker + Docker Compose.
 
@@ -140,6 +142,19 @@ video files, rather than accumulating data indefinitely. `POST /retention/purge`
 counterpart for purging on a caller-chosen cutoff (dry-run by default). See
 [`frigate/sql/queue-debug.sql`](frigate/sql/queue-debug.sql) for manual checks/fixes/resets if you
 need to inspect or intervene by hand.
+
+## Related projects
+
+This is one project among several in the author's homelab, kept deliberately decoupled from each
+other (own containers, own Postgres schema — see `CLAUDE.md`), but designed to plug together:
+
+- [**llama-slot-proxy**](https://github.com/shuricksumy/llama-slot-proxy) — a multi-model
+  `llama.cpp` slot proxy, one URL path segment per model (chat/VLM/embedding). This is the
+  `LLAMA_PROXY_BASE_URL` this project's AI stage and n8n workflows call for VLM/OCR/embedding
+  inference — see [`docs/configuration.md`](docs/configuration.md#internal-ai-stage-alternative-to-n8ns-metadata-processorjson)
+  and `frigate/profiles.yaml`.
+- [**llama-service**](https://github.com/shuricksumy/llama-service) — the underlying local LLM
+  serving setup this pipeline's VLM/embedding calls ultimately run on.
 
 ## License
 

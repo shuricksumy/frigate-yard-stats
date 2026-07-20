@@ -158,7 +158,7 @@
       "typeVersion": 4.2,
       "position": [1850, 100],
       "onError": "continueErrorOutput",
-      "notes": "nomic-embed-text-v1.5 (768 dims) via its own llama_slot_proxy slot -- same unauthenticated-on-the-LAN convention as the VLM calls above, just a different slot/path. continueErrorOutput on purpose: an embedding failure shouldn't lose an already-computed sighting -- both outputs feed Insert Person Sighting (API), which falls back to embedding=null via optional chaining if this errored.",
+      "notes": "Qwen3-Embedding-0.6B-GGUF (1024 dims) via its own llama_slot_proxy slot -- same unauthenticated-on-the-LAN convention as the VLM calls above, just a different slot/path. continueErrorOutput on purpose: an embedding failure shouldn't lose an already-computed sighting -- both outputs feed Insert Person Sighting (API), which falls back to embedding=null via optional chaining if this errored.",
       "notesInFlow": true,
       "parameters": {
         "method": "POST",

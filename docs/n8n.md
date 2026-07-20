@@ -39,8 +39,8 @@ find every one that needs attention in a given workflow. What each one means:
   `8080`).
 - **`REPLACE_WITH_VLM_HOST` / `REPLACE_WITH_VLM_PORT`** (`metadata-processor.json`,
   `yard-stats-qa.json`) — your own locally-hosted OpenAI-compatible VLM endpoint (e.g. a
-  `llama.cpp` server, `llama_slot_proxy`, or similar). Not something this repo provides — bring
-  your own.
+  `llama.cpp` server, [`llama_slot_proxy`](https://github.com/shuricksumy/llama-slot-proxy), or
+  similar). Not something this repo provides — bring your own.
 - **`REPLACE_WITH_CHAT_ID`** (report workflows) — your Telegram chat ID, if you want the report
   sent there too (see [Telegram setup](configuration.md#telegram-notifications)).
 - **`REPLACE_WITH_FROM_ADDRESS` / `REPLACE_WITH_TO_ADDRESS`** (report workflows) — if you also want

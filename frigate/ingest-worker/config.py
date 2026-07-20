@@ -245,3 +245,10 @@ AI_STAGE_DEFAULT_TIMEOUT_SECONDS = float(_env("AI_STAGE_DEFAULT_TIMEOUT_SECONDS"
 # Separate, shorter default -- a single small forward pass, not autoregressive generation like a
 # chat completion, so it's normally much faster regardless of which chat model/prompt was used.
 AI_STAGE_EMBED_TIMEOUT_SECONDS = float(_env("AI_STAGE_EMBED_TIMEOUT_SECONDS", "60"))
+# Must match the output size of whatever model is loaded behind LLAMA_PROXY_EMBED_PATH (e.g. 1024
+# for Qwen3-Embedding-0.6B-GGUF, 768 for nomic-embed-text-v1.5) -- db.ensure_schema() sizes the
+# pgvector embedding columns off this value, and db._vector_literal validates against it before
+# every insert. Switching embedding models means changing this AND re-running
+# POST /embeddings/backfill?confirm=true for every sighting -- a different model's vectors live in
+# an incomparable vector space, so old embeddings can't just be kept around at the new dimension.
+EMBEDDING_DIMENSIONS = int(_env("EMBEDDING_DIMENSIONS", "1024"))

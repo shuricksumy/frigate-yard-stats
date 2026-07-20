@@ -438,13 +438,13 @@ def create_person_sighting(sighting: schemas.PersonSightingCreate):
 @app.post("/search/semantic", response_model=list[schemas.SemanticSearchResult], tags=["sightings"], dependencies=[Depends(require_api_key)])
 def semantic_search(search: schemas.SemanticSearchRequest):
     """Cosine-similarity search over already-analyzed sightings' embeddings, filtered by the
-    caller-resolved time range -- a POST (not GET) since a 768-float vector doesn't belong in a
+    caller-resolved time range -- a POST (not GET) since the embedding vector doesn't belong in a
     query string. Built for the Q&A agent's fuzzy-content asks ("anything unusual"), as opposed to
     /events'/'/sightings/*'s structured filters."""
-    if len(search.embedding) != db.EMBEDDING_DIMENSIONS:
+    if len(search.embedding) != config.EMBEDDING_DIMENSIONS:
         raise HTTPException(
             status_code=422,
-            detail=f"embedding must have {db.EMBEDDING_DIMENSIONS} dimensions, got {len(search.embedding)}",
+            detail=f"embedding must have {config.EMBEDDING_DIMENSIONS} dimensions, got {len(search.embedding)}",
         )
     return db.semantic_search_sightings(
         search.embedding, search.start, search.end, search.object_types, search.limit,

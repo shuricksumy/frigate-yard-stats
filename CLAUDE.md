@@ -7,9 +7,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 "Yard Stats + Vehicle Metadata" extends an existing Frigate NVR setup (Coral TPU detection + LPR)
 with a pipeline that logs yard activity and extracts vehicle/person metadata (color, body type,
 plate text, clothing description) from Frigate events using local VLMs. It is one project among
-several in the user's homelab (alongside n8n, Flowise, WAHA, mcp-proxy, and a `llama_slot_proxy`
-multi-model llama.cpp setup), and is deliberately kept decoupled from those via its own Postgres
-instance/schema and its own containers.
+several in the user's homelab (alongside n8n, Flowise, WAHA, mcp-proxy, and a
+[`llama_slot_proxy`](https://github.com/shuricksumy/llama-slot-proxy) multi-model llama.cpp setup,
+itself running on the user's [`llama-service`](https://github.com/shuricksumy/llama-service)
+serving setup), and is deliberately kept decoupled from those via its own Postgres instance/schema
+and its own containers.
 
 Everything is **MQTT-in, API-in, Postgres-out** — nothing here touches Frigate's own database.
 
@@ -1090,10 +1092,10 @@ capability) instead of plain `postgres:16`; the CI workflow's Postgres service c
 switched the same way, for the same reason the ffmpeg CI gap got fixed -- a capability the code now
 depends on has to actually be present in the CI service container, not just assumed. `schema.sql`
 adds `CREATE EXTENSION IF NOT EXISTS vector;` near the top (idempotent, applied by `ensure_schema()`
-on every startup like everything else in that file) plus a nullable `embedding vector(768)` column
-on both sighting tables (768 = `nomic-embed-text-v1.5`'s output size, the embedding model chosen for
-this -- one more slot in the user's existing `llama_slot_proxy` multi-model setup, no `mmproj`
-needed since it's text-only) with an HNSW cosine-distance index on each (`vector_cosine_ops` --
+on every startup like everything else in that file) plus a nullable `embedding vector(1024)` column
+on both sighting tables (1024 = `Qwen3-Embedding-0.6B-GGUF`'s output size, the embedding model
+chosen for this -- one more slot in the user's existing `llama_slot_proxy` multi-model setup, no
+`mmproj` needed since it's text-only) with an HNSW cosine-distance index on each (`vector_cosine_ops` --
 HNSW rather than ivfflat since it needs no existing rows to "train" on, safe to create immediately
 against a column that starts empty).
 
@@ -1112,7 +1114,7 @@ before this feature existed) behaves until/unless backfilled.
 **`POST /search/semantic`** (`X-API-Key` protected, `db.semantic_search_sightings`): cosine-distance
 (`<=>`) ordered search across whichever of `vehicle_sightings`/`person_sightings` `object_types`
 selects (default both), filtered by the caller-resolved `start`/`end` window -- a POST, not GET,
-since a 768-float array doesn't belong in a query string. `embedding IS NOT NULL` naturally excludes
+since a 1024-float array doesn't belong in a query string. `embedding IS NOT NULL` naturally excludes
 sightings that predate this feature or came from an n8n run that didn't attach one; that's a
 narrower result set, not an error. Rows without their own embedding just aren't candidates, same as
 `GET /events`' `q` only ever matching rows that already have a sighting.
@@ -1172,7 +1174,7 @@ in this project:
   (`@n8n/n8n-nodes-langchain.toolWorkflow`, called via `workflowId`, filled in after both workflows
   are imported), rather than a single HTTP Request Tool node -- a tool node can only make one HTTP
   call, but this needs two (embed the query text, then `POST /search/semantic`), and packaging it as
-  its own callable sub-workflow means the 768-float embedding vector is computed and consumed
+  its own callable sub-workflow means the 1024-float embedding vector is computed and consumed
   entirely server-side, never round-tripping through the Agent's own context/tokens the way passing
   it between two separate tool calls would require.
 - **`get_event_detail`** / **`get_visit_sightings`** -> `GET /events/{id}` /
@@ -1203,9 +1205,9 @@ do; the API Key field can be any placeholder value since `llama_slot_proxy` does
   (see "Visit preview" above).
 - `vehicle_sightings` / `person_sightings` — one row per AI-analyzed event. `vehicle_sightings`
   keeps `plate_text_frigate` (from `raw_events.sub_label`) next to `plate_text_llm` (the OCR
-  model's read) as a cross-check. Both also carry a nullable `embedding vector(768)` (pgvector,
-  `nomic-embed-text-v1.5`) for `POST /search/semantic` -- see "Semantic search and the Q&A agent"
-  above.
+  model's read) as a cross-check. Both also carry a nullable `embedding vector(1024)` (pgvector,
+  `Qwen3-Embedding-0.6B-GGUF`) for `POST /search/semantic` -- see "Semantic search and the Q&A
+  agent" above.
 
 ### Prerequisites this plan assumes
 

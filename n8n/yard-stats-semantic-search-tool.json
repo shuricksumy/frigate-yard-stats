@@ -7,7 +7,7 @@
       "type": "n8n-nodes-base.executeWorkflowTrigger",
       "typeVersion": 1.1,
       "position": [200, 300],
-      "notes": "Called by the 'Semantic Search' tool node inside Yard Stats: Q&A (Call n8n Workflow Tool) -- not meant to be run standalone or scheduled. Expects {query_text, start?, end?, object_types?, limit?} as input -- start/end should be resolved ISO timestamps (the calling Agent already resolved 'last week'/'today' into concrete bounds before calling this tool, same as every other tool in that workflow). Packaged as its own sub-workflow (rather than one HTTP Request Tool node) specifically so the 768-float embedding vector never has to round-trip through the Agent's own context/tokens -- it's computed and consumed entirely server-side, between these two HTTP calls.",
+      "notes": "Called by the 'Semantic Search' tool node inside Yard Stats: Q&A (Call n8n Workflow Tool) -- not meant to be run standalone or scheduled. Expects {query_text, start?, end?, object_types?, limit?} as input -- start/end should be resolved ISO timestamps (the calling Agent already resolved 'last week'/'today' into concrete bounds before calling this tool, same as every other tool in that workflow). Packaged as its own sub-workflow (rather than one HTTP Request Tool node) specifically so the 1024-float embedding vector never has to round-trip through the Agent's own context/tokens -- it's computed and consumed entirely server-side, between these two HTTP calls.",
       "notesInFlow": true,
       "parameters": {
         "workflowInputs": {
@@ -27,7 +27,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [450, 300],
-      "notes": "Same embedding slot/model (nomic-embed-text-v1.5, 768 dims) metadata-processor.json's Call Embedding Model (Vehicle)/(Person) nodes use -- the query text has to be embedded with the same model that wrote the stored sightings' vectors, or cosine distance between them is meaningless.",
+      "notes": "Same embedding slot/model (Qwen3-Embedding-0.6B-GGUF, 1024 dims) metadata-processor.json's Call Embedding Model (Vehicle)/(Person) nodes use -- the query text has to be embedded with the same model that wrote the stored sightings' vectors, or cosine distance between them is meaningless.",
       "notesInFlow": true,
       "parameters": {
         "method": "POST",

@@ -107,7 +107,16 @@ def _embed_text(text: str | None) -> list[float] | None:
             timeout=config.AI_STAGE_EMBED_TIMEOUT_SECONDS,
         )
         resp.raise_for_status()
-        return resp.json()["data"][0]["embedding"]
+        embedding = resp.json()["data"][0]["embedding"]
+        if len(embedding) != config.EMBEDDING_DIMENSIONS:
+            logger.warning(
+                "Embedding call returned %d dims, expected %d (wrong model loaded at "
+                "LLAMA_PROXY_EMBED_PATH?), storing sighting without one",
+                len(embedding),
+                config.EMBEDDING_DIMENSIONS,
+            )
+            return None
+        return embedding
     except Exception:
         logger.warning("Embedding call failed, storing sighting without one", exc_info=True)
         return None

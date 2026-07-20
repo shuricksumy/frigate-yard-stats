@@ -134,9 +134,10 @@ class VehicleSightingCreate(BaseModel):
     plate_text_frigate: str | None = None
     plate_confidence: str | None = None
     notes: str | None = None
-    # Optional: n8n computes this (nomic-embed-text-v1.5, 768 dims) before calling this endpoint --
-    # ingest-worker only ever stores/queries it, never calls an embedding model itself. Omitted or
-    # null means this sighting just isn't semantically searchable, not an error.
+    # Optional: n8n (or the internal AI stage's own _embed_text) computes this (currently
+    # Qwen3-Embedding-0.6B-GGUF, 1024 dims -- must match config.EMBEDDING_DIMENSIONS/schema.sql's
+    # embedding columns) before calling this endpoint. Omitted or null means this sighting just
+    # isn't semantically searchable, not an error.
     embedding: list[float] | None = None
 
 

@@ -9,11 +9,6 @@ import config
 
 logger = logging.getLogger(__name__)
 
-# Must match schema.sql's vector(768) columns (nomic-embed-text-v1.5's output size) -- n8n computes
-# and sends these, ingest-worker only ever stores/queries them, never calls an embedding model
-# itself.
-EMBEDDING_DIMENSIONS = 768
-
 _conn = None
 
 
@@ -25,8 +20,10 @@ def _vector_literal(embedding: list[float] | None) -> str | None:
     # read-never-as-a-list column).
     if embedding is None:
         return None
-    if len(embedding) != EMBEDDING_DIMENSIONS:
-        raise ValueError(f"embedding must have {EMBEDDING_DIMENSIONS} dimensions, got {len(embedding)}")
+    if len(embedding) != config.EMBEDDING_DIMENSIONS:
+        raise ValueError(
+            f"embedding must have {config.EMBEDDING_DIMENSIONS} dimensions, got {len(embedding)}"
+        )
     return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
 
 
@@ -53,6 +50,49 @@ def _execute(query, params=None, fetch=False):
     return []
 
 
+def _current_embedding_dimension(table: str) -> int | None:
+    # pgvector stores a vector(N) column's dimension directly as the column's typmod (unlike e.g.
+    # varchar, which offsets it) -- -1 means an unconstrained `vector` with no declared dimension,
+    # which schema.sql never creates, but is treated as "needs fixing" below rather than assumed.
+    rows = _execute(
+        f"""
+        SELECT atttypmod FROM pg_attribute
+        WHERE attrelid = 'yard_stats.{table}'::regclass
+          AND attname = 'embedding' AND NOT attisdropped
+        """,
+        fetch=True,
+    )
+    if not rows or rows[0]["atttypmod"] <= 0:
+        return None
+    return rows[0]["atttypmod"]
+
+
+def _ensure_embedding_dimension() -> None:
+    # schema.sql's ADD COLUMN IF NOT EXISTS only sizes a brand-new column correctly -- it's a
+    # no-op against a column that already exists at a different dimension (e.g. after switching
+    # EMBEDDING_DIMENSIONS to a new embedding model). Widening is deliberately NOT folded into
+    # schema.sql as an unconditional ALTER COLUMN TYPE: that statement must clear the column's data
+    # (a different model's vectors are an incomparable vector space, so old values can't be kept
+    # regardless), which is only safe to run when the dimension is actually changing -- running it
+    # unconditionally on every startup would silently wipe every embedding on every restart, even
+    # when nothing changed.
+    for table in ("vehicle_sightings", "person_sightings"):
+        current = _current_embedding_dimension(table)
+        if current is not None and current != config.EMBEDDING_DIMENSIONS:
+            logger.warning(
+                "yard_stats.%s.embedding is vector(%d), EMBEDDING_DIMENSIONS is now %d -- "
+                "widening the column and clearing existing embeddings (re-run "
+                "POST /embeddings/backfill?confirm=true afterwards)",
+                table,
+                current,
+                config.EMBEDDING_DIMENSIONS,
+            )
+            _execute(
+                f"ALTER TABLE yard_stats.{table} ALTER COLUMN embedding "
+                f"TYPE vector({config.EMBEDDING_DIMENSIONS}) USING NULL"
+            )
+
+
 def ensure_schema() -> None:
     # schema.sql lives alongside this file and is baked into the image by the Dockerfile's
     # `COPY . .` -- runs on every startup. Every statement in it is CREATE ... IF NOT EXISTS, so
@@ -60,9 +100,15 @@ def ensure_schema() -> None:
     # needs `docker compose up`, no manual `psql -f schema.sql` step.
     with open(config.SCHEMA_SQL_PATH) as f:
         schema_sql = f.read()
+    # The embedding columns' dimension is a single template placeholder rather than a literal, so
+    # switching EMBEDDING_DIMENSIONS (config.py) is a one-line .env change instead of also editing
+    # this file -- only affects a brand-new column, see _ensure_embedding_dimension() for widening
+    # an existing one.
+    schema_sql = schema_sql.replace("__EMBEDDING_DIMENSIONS__", str(config.EMBEDDING_DIMENSIONS))
     conn = get_conn()
     with conn.cursor() as cur:
         cur.execute(schema_sql)
+    _ensure_embedding_dimension()
     logger.info("Schema ensured from %s", config.SCHEMA_SQL_PATH)
 
 

@@ -148,15 +148,21 @@ CREATE TABLE IF NOT EXISTS yard_stats.person_sightings (
 );
 CREATE INDEX IF NOT EXISTS idx_person_sightings_raw_event ON yard_stats.person_sightings (raw_event_id);
 
--- Semantic search over AI-written sighting text (n8n computes these via nomic-embed-text-v1.5,
--- 768 dims -- ingest-worker never calls an LLM/embedding model itself, it only stores/queries the
--- vector n8n already computed, same division as every other AI-shaped call in this project).
--- Nullable: only newly-analyzed sightings get one; existing rows stay searchable by every other
--- filter, just not semantically, until/unless backfilled. HNSW (not ivfflat) since it needs no
--- existing rows to "train" on, so it's safe to create immediately against a column that starts
--- empty.
-ALTER TABLE yard_stats.vehicle_sightings ADD COLUMN IF NOT EXISTS embedding vector(768);
-ALTER TABLE yard_stats.person_sightings ADD COLUMN IF NOT EXISTS embedding vector(768);
+-- Semantic search over AI-written sighting text, embedded via whatever model is loaded behind
+-- LLAMA_PROXY_EMBED_PATH (Qwen3-Embedding-0.6B-GGUF, 1024 dims, in this deployment). Nullable:
+-- only newly-analyzed sightings get one; existing rows stay searchable by every other filter, just
+-- not semantically, until/unless backfilled. HNSW (not ivfflat) since it needs no existing rows to
+-- "train" on, so it's safe to create immediately against a column that starts empty.
+--
+-- __EMBEDDING_DIMENSIONS__ is a template placeholder, substituted by db.ensure_schema() from
+-- config.EMBEDDING_DIMENSIONS (env var, default 1024) before this file is executed -- this file is
+-- never run directly against psql with the placeholder still in it. This ADD COLUMN only sizes a
+-- brand new column correctly; widening an *existing* column to a new dimension after a model swap
+-- is handled separately by db._ensure_embedding_dimension() (conditional on the current dimension
+-- actually differing -- unlike this file's other statements, that ALTER can't safely be
+-- unconditional/idempotent, since it clears the column's data).
+ALTER TABLE yard_stats.vehicle_sightings ADD COLUMN IF NOT EXISTS embedding vector(__EMBEDDING_DIMENSIONS__);
+ALTER TABLE yard_stats.person_sightings ADD COLUMN IF NOT EXISTS embedding vector(__EMBEDDING_DIMENSIONS__);
 CREATE INDEX IF NOT EXISTS idx_vehicle_sightings_embedding ON yard_stats.vehicle_sightings
   USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_person_sightings_embedding ON yard_stats.person_sightings

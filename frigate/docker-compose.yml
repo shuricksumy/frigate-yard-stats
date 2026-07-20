@@ -175,6 +175,9 @@ services:
       # in profiles.yaml, this is only the fallback. Embeddings get their own, shorter default.
       AI_STAGE_DEFAULT_TIMEOUT_SECONDS: ${AI_STAGE_DEFAULT_TIMEOUT_SECONDS:-180}
       AI_STAGE_EMBED_TIMEOUT_SECONDS: ${AI_STAGE_EMBED_TIMEOUT_SECONDS:-60}
+      # Must match the output size of whatever model is loaded behind LLAMA_PROXY_EMBED_PATH --
+      # sizes the pgvector embedding columns; see .env.example for the full explanation.
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1024}
     ports:
       # Admin/debug endpoints (unauthenticated) plus the read/query/report API (X-API-Key
       # required) plus the static web report UI at /ui -- Swagger UI at /docs, ReDoc at /redoc.
