@@ -1,7 +1,7 @@
 // Yard Stats admin dashboard -- talks to this same origin's /admin/*, /retention/purge,
-// /embeddings/backfill. No external requests, no build step -- vanilla JS + Alpine.js (vendored
-// locally in vendor/alpine.min.js). Shares the api_key cookie with the main report UI (app.js) --
-// logging in on either page logs you in on both.
+// /embeddings/backfill, /reports/generate, /object-types. No external requests, no build step --
+// vanilla JS + Alpine.js (vendored locally in vendor/alpine.min.js). Shares the api_key cookie
+// with the main report UI (app.js) -- logging in on either page logs you in on both.
 
 const API_KEY_COOKIE = "api_key";
 const COOKIE_MAX_AGE_SECONDS = 10 * 365 * 24 * 60 * 60; // ~10 years -- "never" isn't representable
@@ -43,6 +43,7 @@ function adminApp() {
 
     overview: null,
     diskUsage: null,
+    objectTypes: [],
 
     checkingEmbed: false,
     embedCheck: null,
@@ -57,9 +58,17 @@ function adminApp() {
 
     purgeDays: 60,
     purgeOnlyMedia: true,
+    purgeObjectLabel: "",
     purging: false,
     purgePreview: null,
     purgeResult: "",
+
+    reportSource: "events",
+    reportObjectLabel: "",
+    reportHours: 24,
+    reportIncludePreview: "gif",
+    generatingReport: false,
+    reportError: "",
 
     fmtBytes,
     fmtNum,
@@ -144,6 +153,9 @@ function adminApp() {
       this._get("/admin/disk-usage").then((d) => { this.diskUsage = d; }).catch((e) => {
         this.loadError = "Failed to load disk usage: " + e.message;
       });
+      if (this.objectTypes.length === 0) {
+        this._get("/object-types").then((d) => { this.objectTypes = d.object_types || []; }).catch(() => {});
+      }
     },
 
     flagEntries() {
@@ -164,6 +176,12 @@ function adminApp() {
       ];
     },
 
+    // Note: these are global .env defaults -- any of them can be overridden per object type in
+    // profiles.yaml (telegram_events_mode/telegram_alerts_mode/ai_events_stage_enabled/
+    // ai_alerts_enabled), which this overview call has no visibility into (profiles.yaml isn't
+    // reloaded/parsed here). The "By object type" section below shows what actually happened
+    // (row counts), which reflects any per-type override already in effect.
+
     stageList() {
       if (!this.overview) return [];
       const sc = this.overview.stage_counts;
@@ -175,6 +193,42 @@ function adminApp() {
         { table: "visits", stage: "thumb_crop", counts: sc.visits.thumb_crop_status },
         { table: "visits", stage: "alert_ai", counts: sc.visits.alert_ai_status },
       ];
+    },
+
+    // Combines row_counts_by_object_type/db_size_by_object_type (from /admin/overview) and
+    // video_storage[_alerts]_by_object_type (from /admin/disk-usage) into one row per object
+    // type -- three otherwise-separate breakdowns (Postgres row counts, approximate Postgres
+    // bytes, on-disk video bytes) sharing the same "object_type" key, so a reader can see
+    // everything about one type (e.g. "car") in a single row instead of cross-referencing three
+    // tables by hand.
+    objectTypeRows() {
+      if (!this.overview) return [];
+      const rc = this.overview.row_counts_by_object_type || {};
+      const dbSize = this.overview.db_size_by_object_type || {};
+      const diskEvents = (this.diskUsage && this.diskUsage.video_storage_by_object_type) || {};
+      const diskAlerts = (this.diskUsage && this.diskUsage.video_storage_alerts_by_object_type) || {};
+
+      const types = new Set();
+      const addKeys = (list) => (list || []).forEach((r) => types.add(r.object_type));
+      addKeys(rc.raw_events);
+      addKeys(rc.sightings);
+      addKeys(rc.visit_sightings);
+      Object.keys(diskEvents).forEach((t) => types.add(t));
+      Object.keys(diskAlerts).forEach((t) => types.add(t));
+
+      const lookup = (list, type) => {
+        const row = (list || []).find((r) => r.object_type === type);
+        return row ? (row.count !== undefined ? row.count : row.bytes) : 0;
+      };
+
+      return Array.from(types).sort().map((type) => ({
+        type,
+        events: lookup(rc.raw_events, type),
+        sightings: lookup(rc.sightings, type),
+        visitSightings: lookup(rc.visit_sightings, type),
+        dbBytes: lookup(dbSize.raw_events, type) + lookup(dbSize.sightings, type) + lookup(dbSize.visit_sightings, type),
+        videoBytes: (diskEvents[type] ? diskEvents[type].bytes : 0) + (diskAlerts[type] ? diskAlerts[type].bytes : 0),
+      }));
     },
 
     async checkEmbeddingBackend() {
@@ -197,8 +251,8 @@ function adminApp() {
           method: "POST", headers: this._headers(),
         });
         const d = await r.json();
-        this.backfillResult = `Processed ${d.vehicles_processed + d.persons_processed} rows ` +
-          `(${d.vehicles_updated} vehicle, ${d.persons_updated} person updated). Run again if counts above are still nonzero.`;
+        this.backfillResult = `Processed ${d.sightings_processed + d.visit_sightings_processed} rows ` +
+          `(${d.sightings_updated} event, ${d.visit_sightings_updated} visit sighting(s) updated). Run again if counts above are still nonzero.`;
         await this.refreshAll();
       } catch (e) {
         this.backfillResult = "Failed: " + e.message;
@@ -237,13 +291,17 @@ function adminApp() {
       }
     },
 
+    _purgeUrl(confirm) {
+      let url = `/retention/purge?older_than_days=${this.purgeDays}&confirm=${confirm}&only_media=${this.purgeOnlyMedia}`;
+      if (this.purgeObjectLabel) url += `&object_label=${encodeURIComponent(this.purgeObjectLabel)}`;
+      return url;
+    },
+
     async previewPurge() {
       this.purging = true;
       this.purgeResult = "";
       try {
-        const r = await fetch(`/retention/purge?older_than_days=${this.purgeDays}&confirm=false&only_media=${this.purgeOnlyMedia}`, {
-          method: "POST", headers: this._headers(),
-        });
+        const r = await fetch(this._purgeUrl(false), { method: "POST", headers: this._headers() });
         this.purgePreview = await r.json();
       } catch (e) {
         this.purgeResult = "Preview failed: " + e.message;
@@ -255,24 +313,22 @@ function adminApp() {
     async confirmPurge() {
       if (!this.purgePreview) return;
       const c = this.purgePreview.counts;
+      const scope = this.purgeObjectLabel ? ` (object type: ${this.purgeObjectLabel})` : " (all object types)";
       const ok = this.purgeOnlyMedia
         ? confirm(
             `This will clear ${c.raw_events_video_files + c.visits_video_files} stored video files and ` +
-            `${c.raw_events_images + c.visits_images_or_gifs} stored images/GIFs older than ${this.purgeDays} days. ` +
+            `${c.raw_events_images + c.visits_images_or_gifs} stored images/GIFs older than ${this.purgeDays} days${scope}. ` +
             `Rows and all AI analysis text are kept. This cannot be undone. Continue?`
           )
         : confirm(
             `This will PERMANENTLY delete ${c.raw_events} events, ${c.visits} visits, ` +
-            `${c.vehicle_sightings} vehicle sightings, ${c.person_sightings} person sightings, ` +
-            `${c.visit_vehicle_sightings} alert vehicle sightings, and ${c.visit_person_sightings} alert person ` +
-            `sightings older than ${this.purgeDays} days, then rebuild the vector search index. This cannot be undone. Continue?`
+            `${c.sightings} sightings, and ${c.visit_sightings} alert sightings ` +
+            `older than ${this.purgeDays} days${scope}, then rebuild the vector search index. This cannot be undone. Continue?`
           );
       if (!ok) return;
       this.purging = true;
       try {
-        const r = await fetch(`/retention/purge?older_than_days=${this.purgeDays}&confirm=true&only_media=${this.purgeOnlyMedia}`, {
-          method: "POST", headers: this._headers(),
-        });
+        const r = await fetch(this._purgeUrl(true), { method: "POST", headers: this._headers() });
         const d = await r.json();
         this.purgeResult = this.purgeOnlyMedia
           ? `Cleared: ${JSON.stringify(d.counts)}`
@@ -283,6 +339,32 @@ function adminApp() {
         this.purgeResult = "Delete failed: " + e.message;
       } finally {
         this.purging = false;
+      }
+    },
+
+    async generateReport() {
+      this.generatingReport = true;
+      this.reportError = "";
+      try {
+        let url = `/reports/generate?source=${this.reportSource}&hours=${this.reportHours}&include_preview=${this.reportIncludePreview}`;
+        if (this.reportObjectLabel) url += `&object_label=${encodeURIComponent(this.reportObjectLabel)}`;
+        const r = await fetch(url, { headers: this._headers() });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const d = await r.json();
+        // The endpoint returns JSON with the rendered HTML report as one field -- opening it
+        // directly in the browser would just show that raw JSON, so write it into a fresh tab
+        // instead so it renders as a real page (same content n8n would email/Telegram).
+        const win = window.open("", "_blank");
+        if (win) {
+          win.document.write(d.html);
+          win.document.close();
+        } else {
+          this.reportError = "Report generated, but the browser blocked the popup -- allow popups for this site and try again.";
+        }
+      } catch (e) {
+        this.reportError = "Failed: " + e.message;
+      } finally {
+        this.generatingReport = false;
       }
     },
   };

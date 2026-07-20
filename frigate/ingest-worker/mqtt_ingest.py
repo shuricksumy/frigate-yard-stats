@@ -5,9 +5,16 @@ import paho.mqtt.client as mqtt
 
 import config
 import db
+import profile_config
 import telegram
 
 logger = logging.getLogger(__name__)
+
+# Set once by start(profile) -- read by _handle_review_message to resolve the effective
+# telegram_alerts_mode for a visit's representative event's object type. Module-level rather than
+# threaded through every MQTT callback argument, since paho-mqtt's on_message signature is fixed
+# and doesn't leave room for an extra parameter.
+_profile: dict | None = None
 
 
 def parse_payload(raw_payload: bytes) -> dict:
@@ -116,30 +123,34 @@ def _handle_review_message(msg):
     # high-res image, or failed -> falls back to the representative event's own crop), rather than
     # immediately here with whatever the representative event's crop looks like right now. Only
     # skips the immediate send when a deferred one is actually guaranteed to happen later.
-    if (
-        config.TELEGRAM_ALERTS_MODE in ("image", "all")
-        and visit_id is not None
-        and not db.visit_thumb_crop_will_be_attempted(review)
-    ):
+    if visit_id is not None and not db.visit_thumb_crop_will_be_attempted(review):
         try:
             representative = db.get_representative_event_for_visit(visit_id)
-            image_base64 = representative.get("crop_image_base64") if representative else None
-            message_id = telegram.send_visit_summary(
-                review["camera"], review["objects"], len(review["det_ids"]) or 1,
-                image_base64=image_base64,
-            )
-            if message_id is not None:
-                # Durable reply-threading target, same idea as raw_events.telegram_photo_message_id
-                # -- lets alert_video_worker's later video send reply onto this message once the
-                # visit's clip (STORE_VIDEO_ALERTS) finishes downloading.
-                db.set_visit_telegram_photo_message_id(visit_id, message_id)
+            # Resolved against the representative event's own single object label (not
+            # review["objects"], which can be a comma-joined multi-type list) -- same
+            # single-type-per-visit convention claim_alert_ai_batch already uses.
+            object_label = representative.get("objects") if representative else None
+            mode = profile_config.telegram_alerts_mode(_profile, object_label)
+            if mode in ("image", "all"):
+                image_base64 = representative.get("crop_image_base64") if representative else None
+                message_id = telegram.send_visit_summary(
+                    review["camera"], review["objects"], len(review["det_ids"]) or 1,
+                    image_base64=image_base64, mode=mode,
+                )
+                if message_id is not None:
+                    # Durable reply-threading target, same idea as raw_events.telegram_photo_message_id
+                    # -- lets alert_video_worker's later video send reply onto this message once the
+                    # visit's clip (STORE_VIDEO_ALERTS) finishes downloading.
+                    db.set_visit_telegram_photo_message_id(visit_id, message_id)
         except Exception:
             # Never let a Telegram hiccup take down the MQTT message handler -- same belt-and-
             # suspenders wrapping as video_worker's send_video call.
             logger.warning("Telegram visit summary send raised unexpectedly for visit id=%s", visit_id, exc_info=True)
 
 
-def start() -> mqtt.Client:
+def start(profile: dict | None = None) -> mqtt.Client:
+    global _profile
+    _profile = profile
     client = mqtt.Client()
     if config.MQTT_USERNAME:
         client.username_pw_set(config.MQTT_USERNAME, config.MQTT_PASSWORD)

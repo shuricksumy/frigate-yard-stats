@@ -78,6 +78,46 @@ def _cleanup_visit(visit_id, *event_ids):
     db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
 
 
+# ---- run_once (per-type ai_alerts_enabled filtering, see profile_config.py) ----
+
+def test_run_once_excludes_type_that_opts_out_despite_global_default_on(monkeypatch):
+    monkeypatch.setattr(config, "AI_ALERTS_ENABLED", True)
+    profile = {
+        "object_types": {
+            "car": {**PROFILE["object_types"]["car"], "ai_alerts_enabled": False},
+            "person": PROFILE["object_types"]["person"],
+        },
+    }
+    captured = {}
+
+    def fake_claim(object_types, *a, **k):
+        captured["object_types"] = object_types
+        return []
+
+    monkeypatch.setattr(db, "claim_alert_ai_batch", fake_claim)
+    alert_ai_worker.run_once(profile)
+    assert captured["object_types"] == ["person"]
+
+
+def test_run_once_includes_type_that_opts_in_despite_global_default_off(monkeypatch):
+    monkeypatch.setattr(config, "AI_ALERTS_ENABLED", False)
+    profile = {
+        "object_types": {
+            "car": {**PROFILE["object_types"]["car"], "ai_alerts_enabled": True},
+            "person": PROFILE["object_types"]["person"],
+        },
+    }
+    captured = {}
+
+    def fake_claim(object_types, *a, **k):
+        captured["object_types"] = object_types
+        return []
+
+    monkeypatch.setattr(db, "claim_alert_ai_batch", fake_claim)
+    alert_ai_worker.run_once(profile)
+    assert captured["object_types"] == ["car"]
+
+
 # ---- db.claim_alert_ai_batch ----
 
 def test_claim_alert_ai_batch_claims_visit_with_ready_grid(conn_ok):

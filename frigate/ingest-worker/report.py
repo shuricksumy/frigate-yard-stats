@@ -106,12 +106,15 @@ def _build_alert_rows(sightings: list, lightboxes: list, counter: list) -> str:
 
 def generate_report(
     start: datetime, end: datetime, source: str = "events", include_preview: str = "gif",
+    object_label: str | None = None,
 ) -> dict:
     # include_preview is "gif" (default, today's original behavior)/"image"/"none" -- see
     # db.get_report_data. Both narrower modes already come back with the corresponding field(s)
     # NULL at the SQL level, so _img_cell's existing fallbacks (grid/crop when there's no GIF,
     # "(no image)" when there's no image at all) apply with no separate rendering path needed.
-    data = db.get_report_data(start, end, source, include_preview)
+    # object_label (optional) restricts the report to a single Frigate object type, e.g. a
+    # "cars only" report alongside the default "every type" one -- see db.get_report_data.
+    data = db.get_report_data(start, end, source, include_preview, object_label)
     sightings = data["sightings"]
 
     lightboxes: list[str] = []
@@ -146,19 +149,24 @@ tr:nth-child(even){background:#f7f7f7;}
         "}</script>"
     )
 
+    # Title/caption note when scoped to one object type -- the table itself needs no separate
+    # rendering path (a filtered query just returns fewer rows), only the heading/caption gain a
+    # short suffix so a "cars only" report doesn't read identically to the unfiltered one.
+    type_suffix = f" ({object_label} only)" if object_label else ""
+
     if source == "visits":
         # One combined row per alert (visit) instead of one row per sighting -- a visit's several
         # sightings (e.g. a car and a person) belong to the same real-world activity, so the
         # thumbnail and every AI result show up together in one row rather than separate ones.
         alert_count = len(_group_by_visit(sightings))
         alert_rows = _build_alert_rows(sightings, lightboxes, counter)
-        body = f"""<h1>Yard Stats Alerts Report</h1>
+        body = f"""<h1>Yard Stats Alerts Report{type_suffix}</h1>
 <div class="summary"><b>{alert_count}</b> alert(s) ({len(sightings)} sighting(s)) from {_fmt_time(start)} to {_fmt_time(end)}.</div>
 <table><tr><th>Image</th><th>Time</th><th>Camera</th><th>Sightings</th></tr>
 {alert_rows or '<tr><td colspan="4">No alerts.</td></tr>'}
 </table>"""
         caption = (
-            f"Yard Stats Alerts Report -- {alert_count} alert(s) ({len(sightings)} sighting(s)) "
+            f"Yard Stats Alerts Report{type_suffix} -- {alert_count} alert(s) ({len(sightings)} sighting(s)) "
             f"from {_fmt_time(start)} to {_fmt_time(end)}."
         )
     else:
@@ -168,13 +176,13 @@ tr:nth-child(even){background:#f7f7f7;}
             f"<td>{_esc(s['object_label'])}</td><td>{_esc(s['description'])}</td></tr>"
             for s in sightings
         )
-        body = f"""<h1>Yard Stats Report</h1>
+        body = f"""<h1>Yard Stats Report{type_suffix}</h1>
 <div class="summary"><b>{len(sightings)}</b> sighting(s) from {_fmt_time(start)} to {_fmt_time(end)}.</div>
 <table><tr><th>Image</th><th>Time</th><th>Camera</th><th>Type</th><th>Description</th></tr>
 {sighting_rows or '<tr><td colspan="5">No sightings.</td></tr>'}
 </table>"""
         caption = (
-            f"Yard Stats Report -- {len(sightings)} sighting(s) from {_fmt_time(start)} to {_fmt_time(end)}."
+            f"Yard Stats Report{type_suffix} -- {len(sightings)} sighting(s) from {_fmt_time(start)} to {_fmt_time(end)}."
         )
 
     html_doc = (

@@ -6,6 +6,7 @@ import yaml
 
 import config
 import db
+import profile_config
 
 logger = logging.getLogger(__name__)
 
@@ -137,8 +138,14 @@ def process_claimed_event(row: dict, profile: dict) -> None:
 def run_once(profile: dict) -> None:
     # object_types keys are exactly the mapped labels (see profiles.yaml's own comment) -- a label
     # with no entry is never included here, so claim_ai_batch is simply never asked for it, and
-    # ai_status stays 'new' for those rows indefinitely rather than erroring.
-    object_types = list(profile.get("object_types", {}).keys())
+    # ai_status stays 'new' for those rows indefinitely rather than erroring. Further filtered by
+    # each type's own effective ai_events_stage_enabled (profiles.yaml override, falling back to
+    # the global AI_EVENTS_STAGE_ENABLED) -- a type can opt out of this stage (or opt in despite
+    # the global default being off) without affecting any other type's participation.
+    object_types = [
+        label for label in profile.get("object_types", {})
+        if profile_config.ai_events_stage_enabled(profile, label)
+    ]
     events = db.claim_ai_batch(
         object_types, config.AI_STAGE_PARALLEL_LIMIT, config.AI_STAGE_STALE_MINUTES,
         max_age_hours=config.AI_STAGE_MAX_AGE_HOURS,
@@ -147,8 +154,9 @@ def run_once(profile: dict) -> None:
         process_claimed_event(row, profile)
 
 
-def run_forever() -> None:
-    profile = load_profile(config.AI_STAGE_PROFILE_PATH)
+def run_forever(profile: dict | None = None) -> None:
+    if profile is None:
+        profile = load_profile(config.AI_STAGE_PROFILE_PATH)
     logger.info(
         "ai_worker starting: object_types=%s parallel_limit=%s stale_minutes=%s max_attempts=%s "
         "poll_interval=%ss llama_proxy_base_url=%s",

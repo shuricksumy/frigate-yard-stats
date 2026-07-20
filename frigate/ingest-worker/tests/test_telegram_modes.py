@@ -66,6 +66,47 @@ def test_send_visit_video_gated_by_alerts_mode(monkeypatch, mode, expect_sent, t
     assert (len(calls) == 1) == expect_sent
 
 
+# ---- mode= override (per-object-type resolution, see profile_config.py) ----
+
+def test_send_photo_mode_override_wins_over_global_config(monkeypatch, fake_post):
+    monkeypatch.setattr(config, "TELEGRAM_EVENTS_MODE", "none")
+    result = telegram.send_photo("aGVsbG8=", "caption", mode="image")
+    assert result is not None
+    assert len(fake_post) == 1
+
+
+def test_send_photo_mode_override_can_suppress_despite_global_config(monkeypatch, fake_post):
+    monkeypatch.setattr(config, "TELEGRAM_EVENTS_MODE", "all")
+    result = telegram.send_photo("aGVsbG8=", "caption", mode="none")
+    assert result is None
+    assert len(fake_post) == 0
+
+
+def test_send_video_mode_none_falls_back_to_global_config(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "TELEGRAM_EVENTS_MODE", "video")
+    calls = []
+    monkeypatch.setattr(telegram, "_post_video", lambda *a, **k: calls.append((a, k)) or True)
+    result = telegram.send_video(str(tmp_path / "clip.mp4"), "caption", reply_to_message_id=None, mode=None)
+    assert result is True
+    assert len(calls) == 1
+
+
+def test_send_visit_summary_mode_override_wins_over_global_config(monkeypatch, fake_post):
+    monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "none")
+    result = telegram.send_visit_summary("outside", "car", 1, image_base64="aGVsbG8=", mode="image")
+    assert result is not None
+    assert len(fake_post) == 1
+
+
+def test_send_visit_video_mode_override_wins_over_global_config(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "none")
+    calls = []
+    monkeypatch.setattr(telegram, "_post_video", lambda *a, **k: calls.append((a, k)) or True)
+    result = telegram.send_visit_video(str(tmp_path / "clip.mp4"), "caption", reply_to_message_id=None, mode="video")
+    assert result is True
+    assert len(calls) == 1
+
+
 def test_send_photo_uses_configured_api_base_url(monkeypatch, fake_post):
     # TELEGRAM_API_BASE_URL lets a self-hosted Local Bot API server (telegram-bot-api Compose
     # profile) stand in for api.telegram.org -- every request must go through it, not a

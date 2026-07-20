@@ -35,12 +35,31 @@
 # schema is exactly the kind of per-type structure this redesign removed. If you want a detail
 # captured (plate text, breed, collar color, whatever), ask for it directly in the prompt's own
 # wording -- the model's own sentence is the record, not a set of columns.
+#
+# Four more settings, ALL OPTIONAL, can be overridden per type here -- see profile_config.py.
+# Omit any of them and that type just inherits the matching global .env default; only set one when
+# a specific type genuinely needs to behave differently from everything else:
+#   telegram_events_mode / telegram_alerts_mode -- same none/image/video/all values as the global
+#     TELEGRAM_EVENTS_MODE/TELEGRAM_ALERTS_MODE env vars, just scoped to this one type. e.g. a
+#     `dog` entry could set telegram_events_mode: none to silence noisy dog-only notifications
+#     while cars/people still notify normally.
+#   ai_events_stage_enabled / ai_alerts_enabled -- same true/false as the global
+#     AI_EVENTS_STAGE_ENABLED/AI_ALERTS_ENABLED env vars, scoped to this one type. Setting either
+#     true for at least one type is enough to start that stage's poll thread even if the matching
+#     global env var is false -- see profile_config.any_ai_events_stage_enabled/
+#     any_ai_alerts_enabled, used by main.py's thread-startup check.
 object_types:
   car: &vehicle_profile
     chat_path: /REPLACE_WITH_VEHICLE_SLOT/v1/chat/completions
     # How long to wait for this type's chat completion, in seconds -- a local model on CPU/modest
     # GPU can genuinely take minutes. Falls back to AI_STAGE_DEFAULT_TIMEOUT_SECONDS if omitted.
     timeout_seconds: 180
+    # Example overrides (commented out -- uncomment/edit to actually use). Left here as a
+    # discoverable template rather than only described in prose above.
+    # telegram_events_mode: image
+    # telegram_alerts_mode: all
+    # ai_events_stage_enabled: true
+    # ai_alerts_enabled: true
     event_prompt: >-
       This image shows a single moment from one vehicle sighting. In one or two short sentences,
       describe the vehicle's color, body type (sedan/suv/truck/van/pickup/minivan/etc.), make and

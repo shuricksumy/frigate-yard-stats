@@ -3,13 +3,14 @@ import time
 
 import config
 import db
+import profile_config
 import telegram
 import video
 
 logger = logging.getLogger(__name__)
 
 
-def process_claimed_visit(visit: dict) -> None:
+def process_claimed_visit(visit: dict, profile: dict | None = None) -> None:
     visit_id = visit["id"]
     # Same head-start reasoning as video_worker.process_claimed_event -- Frigate may still be
     # finalizing the recording segment right after the review closes.
@@ -33,7 +34,12 @@ def process_claimed_visit(visit: dict) -> None:
             reply_to = visit.get("telegram_photo_message_id")
             event_count = db.count_events_for_visit(visit_id)
             caption = telegram.build_visit_caption(visit.get("cameras"), visit.get("objects"), event_count)
-            telegram.send_visit_video(path, caption, reply_to_message_id=reply_to)
+            # Resolved against the representative event's own single object label, same
+            # convention as mqtt_ingest.py/visit_thumb_worker.py.
+            representative = db.get_representative_event_for_visit(visit_id)
+            object_label = representative.get("objects") if representative else None
+            mode = profile_config.telegram_alerts_mode(profile, object_label)
+            telegram.send_visit_video(path, caption, reply_to_message_id=reply_to, mode=mode)
         except Exception:
             # telegram.py itself shouldn't raise, but never let a Telegram hiccup take down the
             # alert-video poll loop -- same belt-and-suspenders as video_worker's send_video call.
@@ -49,7 +55,7 @@ def process_claimed_visit(visit: dict) -> None:
             time.sleep(config.VIDEO_RETRY_WAIT_SECONDS)
 
 
-def run_once() -> None:
+def run_once(profile: dict | None = None) -> None:
     db.reap_stale_visit_video_processing()
     in_progress = db.count_visit_video_in_progress()
     available_capacity = max(0, config.VIDEO_PARALLEL_LIMIT - in_progress)
@@ -57,10 +63,10 @@ def run_once() -> None:
         return
 
     for visit in db.claim_visit_video_batch(available_capacity, config.VIDEO_MAX_AGE_HOURS):
-        process_claimed_visit(visit)
+        process_claimed_visit(visit, profile)
 
 
-def run_forever() -> None:
+def run_forever(profile: dict | None = None) -> None:
     logger.info(
         "alert_video_worker starting: parallel_limit=%s initial_wait=%ss min_valid_bytes=%s "
         "max_attempts=%s retry_wait=%ss max_age_hours=%s poll_interval=%ss",
@@ -70,7 +76,7 @@ def run_forever() -> None:
     )
     while True:
         try:
-            run_once()
+            run_once(profile)
         except Exception:
             logger.exception("alert_video_worker poll iteration failed")
         time.sleep(config.POLL_INTERVAL_SECONDS)

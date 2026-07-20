@@ -81,6 +81,71 @@ def test_get_stage_counts_counts_a_failed_ai_row(conn_ok):
         _cleanup_event(event_id)
 
 
+# ---- db.get_row_counts_by_object_type / get_db_size_by_object_type ----
+
+def test_get_row_counts_by_object_type_reflects_inserted_rows(conn_ok):
+    camera = f"pytest-admin-bytype-{uuid.uuid4()}"
+    car_id = _insert_event(camera=camera, objects="car")
+    dog_id = _insert_event(camera=camera, objects="dog")
+    try:
+        result = db.get_row_counts_by_object_type()
+        raw_events_by_type = {r["object_type"]: r["count"] for r in result["raw_events"]}
+        assert raw_events_by_type.get("car", 0) >= 1
+        assert raw_events_by_type.get("dog", 0) >= 1
+        assert set(result.keys()) == {"raw_events", "sightings", "visit_sightings"}
+    finally:
+        _cleanup_event(car_id)
+        _cleanup_event(dog_id)
+
+
+def test_get_row_counts_by_object_type_includes_sightings(conn_ok):
+    camera = f"pytest-admin-bytype-{uuid.uuid4()}"
+    event_id = _insert_event(camera=camera, objects="car")
+    db._execute(
+        "INSERT INTO yard_stats.sightings (raw_event_id, object_label, description) VALUES (%s, 'car', 'red suv')",
+        (event_id,),
+    )
+    try:
+        result = db.get_row_counts_by_object_type()
+        sightings_by_type = {r["object_type"]: r["count"] for r in result["sightings"]}
+        assert sightings_by_type.get("car", 0) >= 1
+    finally:
+        db._execute("DELETE FROM yard_stats.sightings WHERE raw_event_id = %s", (event_id,))
+        _cleanup_event(event_id)
+
+
+def test_get_db_size_by_object_type_reports_positive_bytes_for_a_type_with_rows(conn_ok):
+    camera = f"pytest-admin-bytype-{uuid.uuid4()}"
+    event_id = _insert_event(camera=camera, objects="car")
+    try:
+        result = db.get_db_size_by_object_type()
+        raw_events_bytes = {r["object_type"]: r["bytes"] for r in result["raw_events"]}
+        assert raw_events_bytes.get("car", 0) > 0
+        assert set(result.keys()) == {"raw_events", "sightings", "visit_sightings"}
+    finally:
+        _cleanup_event(event_id)
+
+
+# ---- admin.dir_size_by_object_type ----
+
+def test_dir_size_by_object_type_missing_path_reports_empty():
+    assert admin.dir_size_by_object_type("/no/such/path/on/this/machine") == {}
+
+
+def test_dir_size_by_object_type_buckets_event_and_visit_filenames(tmp_path):
+    (tmp_path / "car-1-1700000000-20231114T220000Z.mp4").write_bytes(b"x" * 100)
+    (tmp_path / "car-2-1700000100-20231114T220140Z.mp4").write_bytes(b"y" * 50)
+    (tmp_path / "person-3-1700000200-20231114T220320Z.mp4").write_bytes(b"z" * 25)
+    (tmp_path / "visit-car-9-1700000300-20231114T220500Z.mp4").write_bytes(b"w" * 10)
+    (tmp_path / "some-unrelated-file.txt").write_bytes(b"q" * 5)
+
+    result = admin.dir_size_by_object_type(str(tmp_path))
+
+    assert result["car"] == {"bytes": 160, "file_count": 3}  # 100 + 50 + 10 (event x2 + visit x1)
+    assert result["person"] == {"bytes": 25, "file_count": 1}
+    assert result["some"] == {"bytes": 5, "file_count": 1}  # unrelated file -- first hyphen token
+
+
 # ---- db.requeue_failed ----
 
 def test_requeue_failed_rejects_unknown_combination():

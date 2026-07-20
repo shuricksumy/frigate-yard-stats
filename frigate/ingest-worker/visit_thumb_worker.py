@@ -4,27 +4,30 @@ import time
 import config
 import crop
 import db
+import profile_config
 import telegram
 
 logger = logging.getLogger(__name__)
 
 
 def _send_deferred_visit_summary(
-    visit: dict, gif_base64: str | None = None, image_base64: str | None = None,
+    visit: dict, object_label: str | None = None,
+    gif_base64: str | None = None, image_base64: str | None = None, profile: dict | None = None,
 ) -> None:
     # Fires the visit-summary Telegram message mqtt_ingest.py deliberately skipped sending
     # immediately (see visit_thumb_crop_will_be_attempted) -- this worker is the only place that
     # ever settles a visit's thumb_crop_status to a terminal state (done or failed), so it's the
     # only place that can know when it's finally time to send. Never raises, same
     # belt-and-suspenders reasoning as every other Telegram call site in this project.
-    if config.TELEGRAM_ALERTS_MODE not in ("image", "all"):
+    mode = profile_config.telegram_alerts_mode(profile, object_label)
+    if mode not in ("image", "all"):
         return
     visit_id = visit["id"]
     try:
         event_count = db.count_events_for_visit(visit_id)
         message_id = telegram.send_visit_summary(
             visit.get("cameras"), visit.get("objects"), event_count,
-            gif_base64=gif_base64, image_base64=image_base64,
+            gif_base64=gif_base64, image_base64=image_base64, mode=mode,
         )
         if message_id is not None:
             db.set_visit_telegram_photo_message_id(visit_id, message_id)
@@ -32,7 +35,7 @@ def _send_deferred_visit_summary(
         logger.warning("Deferred Telegram visit summary send failed for visit id=%s", visit_id, exc_info=True)
 
 
-def process_claimed_visit(visit: dict) -> None:
+def process_claimed_visit(visit: dict, profile: dict | None = None) -> None:
     visit_id = visit["id"]
     # Same head-start reasoning as video_worker.process_claimed_event / alert_video_worker's own
     # wait -- Frigate may still be finalizing the continuous-recording segment right after the
@@ -41,6 +44,9 @@ def process_claimed_visit(visit: dict) -> None:
         time.sleep(config.VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS)
 
     representative = db.get_representative_event_for_visit(visit_id)
+    # Resolved against the representative event's own single object label, same convention as
+    # mqtt_ingest.py's immediate-send path and claim_alert_ai_batch.
+    object_label = representative.get("objects") if representative else None
     try:
         if representative is None or not representative.get("det_id"):
             raise ValueError(f"No representative raw_event with det_id for visit id={visit_id}")
@@ -51,7 +57,7 @@ def process_claimed_visit(visit: dict) -> None:
             "Cropped visit thumbnail for visit id=%s camera=%s thumb_time=%s",
             visit_id, visit.get("cameras"), visit.get("thumb_time"),
         )
-        _send_deferred_visit_summary(visit, gif_base64=preview_gif_base64)
+        _send_deferred_visit_summary(visit, object_label, gif_base64=preview_gif_base64, profile=profile)
     except Exception:
         logger.warning(
             "Visit thumbnail crop failed for visit id=%s (attempt %s/%s)",
@@ -64,12 +70,12 @@ def process_claimed_visit(visit: dict) -> None:
             # summary anyway, falling back to the representative event's own crop (or text-only
             # if that's not ready either), rather than never notifying about this visit at all.
             fallback_image = representative.get("crop_image_base64") if representative else None
-            _send_deferred_visit_summary(visit, image_base64=fallback_image)
+            _send_deferred_visit_summary(visit, object_label, image_base64=fallback_image, profile=profile)
         else:
             time.sleep(config.VISIT_THUMB_CROP_RETRY_WAIT_SECONDS)
 
 
-def run_once() -> None:
+def run_once(profile: dict | None = None) -> None:
     db.reap_stale_visit_thumb_crop_processing()
     in_progress = db.count_visit_thumb_crop_in_progress()
     available_capacity = max(0, config.VISIT_THUMB_CROP_PARALLEL_LIMIT - in_progress)
@@ -77,10 +83,10 @@ def run_once() -> None:
         return
 
     for visit in db.claim_visit_thumb_crop_batch(available_capacity):
-        process_claimed_visit(visit)
+        process_claimed_visit(visit, profile)
 
 
-def run_forever() -> None:
+def run_forever(profile: dict | None = None) -> None:
     logger.info(
         "visit_thumb_worker starting: parallel_limit=%s initial_wait=%ss max_attempts=%s "
         "retry_wait=%ss poll_interval=%ss",
@@ -90,7 +96,7 @@ def run_forever() -> None:
     )
     while True:
         try:
-            run_once()
+            run_once(profile)
         except Exception:
             logger.exception("visit_thumb_worker poll iteration failed")
         time.sleep(config.POLL_INTERVAL_SECONDS)

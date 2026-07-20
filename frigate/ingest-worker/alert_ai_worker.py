@@ -4,6 +4,7 @@ import time
 import ai_worker
 import config
 import db
+import profile_config
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +46,12 @@ def process_claimed_visit(row: dict, profile: dict) -> None:
 
 
 def run_once(profile: dict) -> None:
-    object_types = list(profile.get("object_types", {}).keys())
+    # Same per-type opt-out/opt-in filtering ai_worker.run_once applies, against
+    # ai_alerts_enabled/AI_ALERTS_ENABLED instead of ai_events_stage_enabled/AI_EVENTS_STAGE_ENABLED.
+    object_types = [
+        label for label in profile.get("object_types", {})
+        if profile_config.ai_alerts_enabled(profile, label)
+    ]
     visits = db.claim_alert_ai_batch(
         object_types, config.AI_STAGE_PARALLEL_LIMIT, config.AI_STAGE_STALE_MINUTES,
         max_age_hours=config.AI_STAGE_MAX_AGE_HOURS,
@@ -54,8 +60,9 @@ def run_once(profile: dict) -> None:
         process_claimed_visit(row, profile)
 
 
-def run_forever() -> None:
-    profile = ai_worker.load_profile(config.AI_STAGE_PROFILE_PATH)
+def run_forever(profile: dict | None = None) -> None:
+    if profile is None:
+        profile = ai_worker.load_profile(config.AI_STAGE_PROFILE_PATH)
     logger.info(
         "alert_ai_worker starting: object_types=%s parallel_limit=%s stale_minutes=%s "
         "max_attempts=%s poll_interval=%ss llama_proxy_base_url=%s",

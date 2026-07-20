@@ -151,6 +151,12 @@ To use either, you need a Telegram bot and your own chat ID:
 this is deliberately a place to A/B which granularity (and which of photo vs. video) is actually
 useful for your traffic rather than a choice you're expected to get right upfront.
 
+Both are global defaults only — `profiles.yaml` can override either **per object type**
+(`telegram_events_mode`/`telegram_alerts_mode` keys under that type's `object_types` entry), e.g.
+to silence a noisy low-priority type's notifications without changing the mode for everything
+else. Omit the override and that type just inherits the global default above. See
+`profile_config.py` and `profiles.yaml`'s own comments for the full list of per-type overrides.
+
 ## Retention
 
 - `RETENTION_MONTHS` (default `12`) — how long data (DB rows, and any stored video files) is kept
@@ -163,6 +169,12 @@ waiting for or reconfiguring the scheduled sweep — defaults to a dry run (just
 until you pass `confirm=true`. `only_media` (default `true`) keeps every row and its AI analysis
 text/plate reads searchable forever, only clearing stored video/images/GIFs; set it to `false` for
 the original full-row delete (rebuilds the semantic search index afterward).
+
+An optional `object_label` param (also a dropdown on `/ui/admin`) restricts either mode to a
+single Frigate object type, e.g. clean up just `dog` events without touching everything else's
+retention. Only ever affects events/sightings of that type — visits (which can span multiple
+distinct object types in one row) are never touched by a type-scoped purge; omit `object_label`
+(the default) to keep covering visits too, same as before this param existed.
 
 ## Web UI
 
@@ -205,6 +217,14 @@ until you deliberately opt into one or both instead:
   `visit_sightings`. Requires `VISIT_THUMB_CROP_ENABLED=true` —
   without it, no visit ever has a grid ready to analyze, so this stage just stays idle. Can run
   alongside or instead of `AI_EVENTS_STAGE_ENABLED` — the two are fully independent queues.
+
+Both are global defaults only — `profiles.yaml` can override either **per object type**
+(`ai_events_stage_enabled`/`ai_alerts_enabled` keys), e.g. to run the events stage for `car`/
+`person` only while `dog` sits out, or to enable a stage for just one type even while the global
+flag stays `false`. Setting either override `true` for at least one type is enough to start that
+stage's poll thread even if its global env var is `false` — the thread then only claims the
+type(s) that resolve to enabled (their own override, or the global default when they don't set
+one), never every mapped type unconditionally.
 
 - Object types + prompts + per-type model slot/timeout live in **`frigate/profiles.yaml`** (repo
   root, alongside `docker-compose.yml`), not env vars — that's genuinely a lot of config to cram

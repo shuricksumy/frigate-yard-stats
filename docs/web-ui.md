@@ -105,6 +105,10 @@ both pages). It shows:
   vector size.
 - **Counts** — total events, visits, sightings (any object type), and retention info (how many months
   you're keeping, and the oldest event still in the database).
+- **By object type** — one row per Frigate object label (car/truck/person/dog/...) showing its own
+  event/sighting row counts, an approximate Postgres byte footprint, and real on-disk video bytes
+  (parsed from stored clip filenames, which always start with the object type). Lets you see at a
+  glance which type is actually driving disk/DB growth instead of only a pipeline-wide total.
 - **Semantic search coverage** — how many sightings have an embedding vs. don't, with buttons to
   backfill missing ones or reindex the vector database.
 - **Queue health** — a status breakdown (new/processing/retry/failed/done) for every queue stage
@@ -123,3 +127,13 @@ both pages). It shows:
     full history searchable.
   - **Unchecked** — deletes the matching events/visits (and their sightings) entirely, the
     original full purge, then rebuilds the semantic search index against whatever remains.
+
+  An "Object type" dropdown (defaults to "All types") restricts either mode to one Frigate label
+  at a time -- e.g. clean up just `dog` events without touching everything else's retention. Only
+  ever affects events/sightings of that type: visits (which can span multiple distinct object
+  types in one row) are never touched by a type-scoped purge, so leave "All types" selected to
+  also cover those.
+- **Reports** — generate a report on demand (Events or Visits/alerts, any object type or all,
+  a time window, and the same GIF/image/none preview modes `/reports/generate` accepts) and open
+  it in a new tab -- the exact same HTML n8n's scheduled report workflows email/Telegram, without
+  waiting for the next scheduled run.

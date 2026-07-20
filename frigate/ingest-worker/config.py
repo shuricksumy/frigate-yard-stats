@@ -200,6 +200,11 @@ if len(VISIT_PREVIEW_FRAME_PERCENTAGES) != 4:
 # "all" (both). Splitting photo from video lets you skip uploading large video clips to Telegram
 # while still getting the lightweight photo/GIF notification, or the other way around, instead of
 # an all-or-nothing switch.
+#
+# Both TELEGRAM_EVENTS_MODE and TELEGRAM_ALERTS_MODE below are global defaults only -- profiles.yaml
+# can override either per object type (telegram_events_mode/telegram_alerts_mode keys, see
+# profile_config.py), e.g. to silence a noisy low-priority type's notifications without changing
+# the global mode for everything else.
 # -------------------------------------------------
 TELEGRAM_EVENTS_MODE = _telegram_mode("TELEGRAM_EVENTS_MODE")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
@@ -246,11 +251,16 @@ OBJECT_TYPES = [t.strip() for t in _env("OBJECT_TYPES", "car,truck,person,dog").
 #     or analyzed by this stage).
 #   AI_ALERTS_ENABLED -- alert_ai_worker.py, analyzes a visit's own composite grid
 #     (visits.crop_image_base64, built once thumb_crop_status='done') with alert_prompt, storing
-#     the result in visit_vehicle_sightings/visit_person_sightings -- a separate table from (and
-#     independent of) the events stage's own vehicle_sightings/person_sightings. Requires
-#     VISIT_THUMB_CROP_ENABLED to actually have anything to claim; if that's off, this stage just
-#     has nothing ready and stays idle, the same graceful no-op every other stage/object-type
-#     mismatch in this project already gets.
+#     the result in visit_sightings -- a separate table from (and independent of) the events
+#     stage's own sightings table. Requires VISIT_THUMB_CROP_ENABLED to actually have anything to
+#     claim; if that's off, this stage just has nothing ready and stays idle, the same graceful
+#     no-op every other stage/object-type mismatch in this project already gets.
+#
+# Both flags are global defaults only -- profiles.yaml can override either one per object type
+# (ai_events_stage_enabled/ai_alerts_enabled keys, see profile_config.py) for a type that needs to
+# behave differently from the rest (e.g. opt out of the events stage while everything else stays
+# on it, or opt in despite the global flag being off). These two env vars just decide the default
+# every type gets when it doesn't set its own override.
 # -------------------------------------------------
 AI_EVENTS_STAGE_ENABLED = _env("AI_EVENTS_STAGE_ENABLED", "false").lower() == "true"
 AI_ALERTS_ENABLED = _env("AI_ALERTS_ENABLED", "false").lower() == "true"

@@ -3,13 +3,14 @@ import time
 
 import config
 import db
+import profile_config
 import telegram
 import video
 
 logger = logging.getLogger(__name__)
 
 
-def process_claimed_event(row: dict) -> None:
+def process_claimed_event(row: dict, profile: dict | None = None) -> None:
     event_id = row["id"]
     # Frigate is still finalizing the recording segment right after the "end" event fires --
     # give it a head start before the first attempt (mirrors the n8n workflow's "Wait 10s" ahead
@@ -26,7 +27,8 @@ def process_claimed_event(row: dict) -> None:
 
         try:
             reply_to = row.get("telegram_photo_message_id")
-            telegram.send_video(path, telegram.build_caption(row), reply_to_message_id=reply_to)
+            mode = profile_config.telegram_events_mode(profile, row.get("objects"))
+            telegram.send_video(path, telegram.build_caption(row), reply_to_message_id=reply_to, mode=mode)
         except Exception:
             # telegram.py itself shouldn't raise, but never let a Telegram hiccup take down the
             # video poll loop -- belt and suspenders.
@@ -42,7 +44,7 @@ def process_claimed_event(row: dict) -> None:
             time.sleep(config.VIDEO_RETRY_WAIT_SECONDS)
 
 
-def run_once() -> None:
+def run_once(profile: dict | None = None) -> None:
     db.reap_stale_video_processing()
     in_progress = db.count_video_in_progress()
     available_capacity = max(0, config.VIDEO_PARALLEL_LIMIT - in_progress)
@@ -50,10 +52,10 @@ def run_once() -> None:
         return
 
     for row in db.claim_video_batch(available_capacity, config.VIDEO_MAX_AGE_HOURS):
-        process_claimed_event(row)
+        process_claimed_event(row, profile)
 
 
-def run_forever() -> None:
+def run_forever(profile: dict | None = None) -> None:
     logger.info(
         "video_worker starting: parallel_limit=%s initial_wait=%ss min_valid_bytes=%s "
         "max_attempts=%s retry_wait=%ss max_age_hours=%s poll_interval=%ss",
@@ -63,7 +65,7 @@ def run_forever() -> None:
     )
     while True:
         try:
-            run_once()
+            run_once(profile)
         except Exception:
             logger.exception("video_worker poll iteration failed")
         time.sleep(config.POLL_INTERVAL_SECONDS)

@@ -91,6 +91,11 @@ def test_load_profile_parses_real_file():
 # ---- run_once ----
 
 def test_run_once_only_claims_mapped_object_types(monkeypatch):
+    # Both mapped types are claimed when the global stage default is on and neither overrides it --
+    # this is the state the thread would only be running in anyway (see main.py's
+    # profile_config.any_ai_events_stage_enabled gate), so run_once's own per-type filtering (see
+    # below) has nothing to narrow here.
+    monkeypatch.setattr(config, "AI_EVENTS_STAGE_ENABLED", True)
     captured = {}
 
     def fake_claim(object_types, parallel_limit, stale_minutes, max_age_hours=None, **kwargs):
@@ -100,6 +105,44 @@ def test_run_once_only_claims_mapped_object_types(monkeypatch):
     monkeypatch.setattr(db, "claim_ai_batch", fake_claim)
     ai_worker.run_once(PROFILE)
     assert set(captured["object_types"]) == {"car", "person"}
+
+
+def test_run_once_excludes_type_that_opts_out_despite_global_default_on(monkeypatch):
+    monkeypatch.setattr(config, "AI_EVENTS_STAGE_ENABLED", True)
+    profile = {
+        "object_types": {
+            "car": {**PROFILE["object_types"]["car"], "ai_events_stage_enabled": False},
+            "person": PROFILE["object_types"]["person"],
+        },
+    }
+    captured = {}
+
+    def fake_claim(object_types, *a, **k):
+        captured["object_types"] = object_types
+        return []
+
+    monkeypatch.setattr(db, "claim_ai_batch", fake_claim)
+    ai_worker.run_once(profile)
+    assert captured["object_types"] == ["person"]
+
+
+def test_run_once_includes_type_that_opts_in_despite_global_default_off(monkeypatch):
+    monkeypatch.setattr(config, "AI_EVENTS_STAGE_ENABLED", False)
+    profile = {
+        "object_types": {
+            "car": {**PROFILE["object_types"]["car"], "ai_events_stage_enabled": True},
+            "person": PROFILE["object_types"]["person"],
+        },
+    }
+    captured = {}
+
+    def fake_claim(object_types, *a, **k):
+        captured["object_types"] = object_types
+        return []
+
+    monkeypatch.setattr(db, "claim_ai_batch", fake_claim)
+    ai_worker.run_once(profile)
+    assert captured["object_types"] == ["car"]
 
 
 # ---- process_claimed_event ----

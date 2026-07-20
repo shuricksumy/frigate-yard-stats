@@ -14,11 +14,16 @@ def build_caption(row: dict) -> str:
     return f"\U0001F6A8 <b>{objects.upper()} DETECTED</b> | {camera}"
 
 
-def send_photo(image_base64: str, caption: str) -> int | None:
+def send_photo(image_base64: str, caption: str, mode: str | None = None) -> int | None:
     """POSTs the crop as a photo. Returns the Telegram message_id on success (needed later so a
     matching video send can reply to it), or None on any failure. Never raises -- mirrors the
-    n8n workflow's onError: continueErrorOutput on 'Send Photo (Telegram)'."""
-    if config.TELEGRAM_EVENTS_MODE not in ("image", "all"):
+    n8n workflow's onError: continueErrorOutput on 'Send Photo (Telegram)'.
+
+    `mode` lets a caller pass an already-resolved per-object-type override (see
+    profile_config.telegram_events_mode) instead of the global config.TELEGRAM_EVENTS_MODE --
+    omit it (or pass None) to keep using the global default, same as before this existed."""
+    effective_mode = mode if mode is not None else config.TELEGRAM_EVENTS_MODE
+    if effective_mode not in ("image", "all"):
         return None
     try:
         resp = requests.post(
@@ -43,7 +48,7 @@ def build_visit_caption(camera: str, objects: str | None, event_count: int) -> s
 
 def send_visit_summary(
     camera: str, objects: str | None, event_count: int,
-    gif_base64: str | None = None, image_base64: str | None = None,
+    gif_base64: str | None = None, image_base64: str | None = None, mode: str | None = None,
 ) -> int | None:
     """Fires once per visit (Frigate review 'end', see mqtt_ingest.py). Prefers the visit's own
     animated preview GIF (crop.build_visit_preview -- sent via sendAnimation so Telegram actually
@@ -52,8 +57,13 @@ def send_visit_summary(
     isn't available (still being built, or the preview permanently failed), then a text-only
     summary if neither is ready. Gated by TELEGRAM_ALERTS_MODE being "image" or "all", independent
     of TELEGRAM_EVENTS_MODE above (the existing per-raw_event notifications) -- lets you A/B
-    per-event vs. per-visit notifications. Never raises."""
-    if config.TELEGRAM_ALERTS_MODE not in ("image", "all"):
+    per-event vs. per-visit notifications. Never raises.
+
+    `mode` lets a caller pass an already-resolved per-object-type override (see
+    profile_config.telegram_alerts_mode) instead of the global config.TELEGRAM_ALERTS_MODE --
+    omit it (or pass None) to keep using the global default, same as before this existed."""
+    effective_mode = mode if mode is not None else config.TELEGRAM_ALERTS_MODE
+    if effective_mode not in ("image", "all"):
         return None
     caption = build_visit_caption(camera, objects, event_count)
     try:
@@ -104,20 +114,30 @@ def _post_video(video_path: str, caption: str, reply_to_message_id: int | None) 
         return False
 
 
-def send_video(video_path: str, caption: str, reply_to_message_id: int | None) -> bool:
+def send_video(video_path: str, caption: str, reply_to_message_id: int | None, mode: str | None = None) -> bool:
     """POSTs the stored clip as a video, replying to reply_to_message_id if given (mirrors the
     n8n workflow's 'Has Reply Target?' branch -- 'Send Video (Reply)' vs 'Send Video (No Reply)').
-    Never raises; logs a warning and returns False on failure so the caller can carry on."""
-    if config.TELEGRAM_EVENTS_MODE not in ("video", "all"):
+    Never raises; logs a warning and returns False on failure so the caller can carry on.
+
+    `mode` lets a caller pass an already-resolved per-object-type override (see
+    profile_config.telegram_events_mode) instead of the global config.TELEGRAM_EVENTS_MODE."""
+    effective_mode = mode if mode is not None else config.TELEGRAM_EVENTS_MODE
+    if effective_mode not in ("video", "all"):
         return False
     return _post_video(video_path, caption, reply_to_message_id)
 
 
-def send_visit_video(video_path: str, caption: str, reply_to_message_id: int | None) -> bool:
+def send_visit_video(
+    video_path: str, caption: str, reply_to_message_id: int | None, mode: str | None = None,
+) -> bool:
     """Alerts-flow counterpart to send_video -- gated by TELEGRAM_ALERTS_MODE being "video" or
     "all" instead of TELEGRAM_EVENTS_MODE, otherwise identical (same reply-threading onto the
     earlier visit-summary message, same never-raises failure handling). Called by
-    alert_video_worker once a visit's clip finishes downloading (STORE_VIDEO_ALERTS)."""
-    if config.TELEGRAM_ALERTS_MODE not in ("video", "all"):
+    alert_video_worker once a visit's clip finishes downloading (STORE_VIDEO_ALERTS).
+
+    `mode` lets a caller pass an already-resolved per-object-type override (see
+    profile_config.telegram_alerts_mode) instead of the global config.TELEGRAM_ALERTS_MODE."""
+    effective_mode = mode if mode is not None else config.TELEGRAM_ALERTS_MODE
+    if effective_mode not in ("video", "all"):
         return False
     return _post_video(video_path, caption, reply_to_message_id)

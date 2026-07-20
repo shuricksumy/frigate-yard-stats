@@ -29,6 +29,40 @@ def dir_size_bytes(path: str) -> dict:
     return {"path": path, "exists": True, "bytes": total, "file_count": count}
 
 
+def _object_type_from_filename(name: str) -> str:
+    # video.py's store_clip/store_visit_clip name every file "{object_type}-{id}-..." or
+    # "visit-{object_type}-{id}-..." -- the object label is always the token right after a leading
+    # "visit-" if present, otherwise the very first token. A name that doesn't match this pattern
+    # at all (e.g. some other file someone dropped into the storage dir by hand) buckets under
+    # "unknown" rather than raising or being silently skipped.
+    parts = name.split("-")
+    if not parts or not parts[0]:
+        return "unknown"
+    if parts[0] == "visit" and len(parts) > 1 and parts[1]:
+        return parts[1]
+    return parts[0]
+
+
+def dir_size_by_object_type(path: str) -> dict:
+    # Same walk as dir_size_bytes, but bucketed by object type parsed from each file's own name --
+    # for the admin dashboard's "By object type" disk-usage breakdown. A missing/nonexistent path
+    # (same as dir_size_bytes) reports an empty breakdown rather than an error.
+    if not path or not os.path.isdir(path):
+        return {}
+    totals: dict[str, dict[str, int]] = {}
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            try:
+                size = os.path.getsize(os.path.join(root, name))
+            except OSError:
+                continue
+            object_type = _object_type_from_filename(name)
+            bucket = totals.setdefault(object_type, {"bytes": 0, "file_count": 0})
+            bucket["bytes"] += size
+            bucket["file_count"] += 1
+    return totals
+
+
 def check_embedding_backend(timeout_seconds: float = 8.0) -> dict:
     # Live smoke test against LLAMA_PROXY_BASE_URL/LLAMA_PROXY_EMBED_PATH -- confirms both that
     # something answers at all and that it returns the dimension this deployment is configured

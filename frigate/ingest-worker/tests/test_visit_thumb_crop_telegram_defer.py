@@ -127,7 +127,7 @@ def test_worker_sends_deferred_summary_on_successful_crop(conn_ok, monkeypatch):
     calls = []
     monkeypatch.setattr(
         visit_thumb_worker.telegram, "send_visit_summary",
-        lambda camera, objects, count, gif_base64=None, image_base64=None: calls.append(gif_base64 or image_base64) or 1,
+        lambda camera, objects, count, gif_base64=None, image_base64=None, mode=None: calls.append(gif_base64 or image_base64) or 1,
     )
 
     det_id = f"pytest-{uuid.uuid4()}"
@@ -162,7 +162,7 @@ def test_worker_sends_fallback_summary_once_crop_permanently_fails(conn_ok, monk
     calls = []
     monkeypatch.setattr(
         visit_thumb_worker.telegram, "send_visit_summary",
-        lambda camera, objects, count, gif_base64=None, image_base64=None: calls.append(gif_base64 or image_base64) or 1,
+        lambda camera, objects, count, gif_base64=None, image_base64=None, mode=None: calls.append(gif_base64 or image_base64) or 1,
     )
 
     det_id = f"pytest-{uuid.uuid4()}"
@@ -197,7 +197,7 @@ def test_worker_does_not_send_summary_while_still_retrying(conn_ok, monkeypatch)
     calls = []
     monkeypatch.setattr(
         visit_thumb_worker.telegram, "send_visit_summary",
-        lambda camera, objects, count, gif_base64=None, image_base64=None: calls.append(gif_base64 or image_base64) or 1,
+        lambda camera, objects, count, gif_base64=None, image_base64=None, mode=None: calls.append(gif_base64 or image_base64) or 1,
     )
 
     det_id = f"pytest-{uuid.uuid4()}"

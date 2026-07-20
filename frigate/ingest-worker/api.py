@@ -77,6 +77,7 @@ def purge_old_records(
     older_than_days: int = Query(..., ge=1, description="Delete/clear data with start_ts older than this many days"),
     confirm: bool = Query(False, description="Must be true to actually delete. Omitted/false previews counts only -- no rows are removed"),
     only_media: bool = Query(True, description="Default true: keeps every row and all its text/structured AI analysis (including embeddings) -- only deletes stored video files off disk and clears stored images/GIFs (crop_image_base64/preview_gif_base64), so old data stays searchable with just the media gone. false: deletes the rows entirely (raw_events, visits, and their dependent sightings) -- today's original full purge -- and rebuilds the vector search index afterward against whatever data remains."),
+    object_label: str | None = Query(None, description="Restrict this purge to a single Frigate object label (e.g. 'car'). Only ever affects raw_events and their sightings -- visits/visit_sightings are never touched when this is set, since a visit can span multiple distinct object types and there's no single-type-safe way to decide the visit row (or its own composite-grid media) belongs to just one type's purge. Omit for the existing all-types behavior, which does cover visits/visit_sightings same as before this param existed."),
 ):
     """Ad-hoc bulk purge with a caller-chosen cutoff, independent of the scheduled
     RETENTION_MONTHS sweep -- e.g. to clear out a backlog of old test data, reclaim space sooner
@@ -88,10 +89,10 @@ def purge_old_records(
     actually apply it."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
     if only_media:
-        counts = db.purge_media_older_than(cutoff, execute=confirm)
-        return {"cutoff": cutoff, "dry_run": not confirm, "only_media": True, "counts": counts}
-    counts = db.purge_older_than(cutoff, execute=confirm)
-    result = {"cutoff": cutoff, "dry_run": not confirm, "only_media": False, "counts": counts}
+        counts = db.purge_media_older_than(cutoff, execute=confirm, object_label=object_label)
+        return {"cutoff": cutoff, "dry_run": not confirm, "only_media": True, "object_label": object_label, "counts": counts}
+    counts = db.purge_older_than(cutoff, execute=confirm, object_label=object_label)
+    result = {"cutoff": cutoff, "dry_run": not confirm, "only_media": False, "object_label": object_label, "counts": counts}
     if confirm:
         # A full purge can remove a large fraction of the embedded rows the HNSW index was built
         # over -- rebuilding it against whatever survives keeps the index accurate/compact rather
@@ -381,13 +382,14 @@ def generate_report(
     hours: float = Query(24, gt=0, description="Used when start/end aren't both given -- window is the last N hours"),
     source: str = Query("events", pattern="^(events|visits)$", description="'events' (default) includes every sighting independently -- today's exact behavior. 'visits' dedups the same way POST /ai-queue/claim's source=visits does: only the sighting for a visit's earliest-linked raw_event, plus every sighting whose raw_event was never grouped into a visit -- for an alerts-scoped report where one real-world visit shouldn't show up once per det_id."),
     include_preview: str = Query("gif", pattern="^(none|image|gif)$", description="'gif' (default) embeds a visit's animated preview GIF inline when it's ready (today's behavior; only differs from 'image' under source=visits). 'image' skips fetching/embedding the GIF entirely, falling back to the static composite grid/event crop. 'none' skips the row image entirely (crop included), for both source=events and source=visits. Each narrower mode is a real payload-size reduction, not just a rendering change -- the dropped field(s) are never even fetched from Postgres."),
+    object_label: str | None = Query(None, description="Restrict the report to a single Frigate object label (e.g. 'car') -- for a per-type report alongside the default report covering every type. Omit for no filter (today's behavior)."),
 ):
     """Builds the same HTML report daily-report.json used to build itself in a Code node --
     n8n now just calls this and emails/Telegrams the result. Each row's inline image is a small
     on-the-fly thumbnail (never touching the stored full-quality crop); the full-size image is
     still available via the report's click-to-enlarge lightbox, embedded once, not twice."""
     resolved_start, resolved_end = _resolve_window(start, end, hours)
-    return report.generate_report(resolved_start, resolved_end, source, include_preview)
+    return report.generate_report(resolved_start, resolved_end, source, include_preview, object_label)
 
 
 @app.post("/ai-queue/claim", response_model=schemas.ClaimResponse, tags=["ai-queue"], dependencies=[Depends(require_api_key)])
@@ -468,6 +470,7 @@ def admin_overview():
     row_counts = db.get_table_row_counts()
     return {
         "row_counts": row_counts,
+        "row_counts_by_object_type": db.get_row_counts_by_object_type(),
         "stage_counts": db.get_stage_counts(),
         "embeddings": {
             "sightings_missing": missing_embeddings["sightings"],
@@ -476,6 +479,7 @@ def admin_overview():
             "visit_sightings_total": row_counts["visit_sightings"],
         },
         "db_size": db.get_db_size_info(),
+        "db_size_by_object_type": db.get_db_size_by_object_type(),
         "vector_index": db.get_vector_index_status(),
         "retention": db.get_retention_info(),
         "feature_flags": {
@@ -500,6 +504,8 @@ def admin_disk_usage():
     return {
         "video_storage": admin.dir_size_bytes(config.VIDEO_STORAGE_PATH),
         "video_storage_alerts": admin.dir_size_bytes(config.VIDEO_STORAGE_PATH_ALERTS),
+        "video_storage_by_object_type": admin.dir_size_by_object_type(config.VIDEO_STORAGE_PATH),
+        "video_storage_alerts_by_object_type": admin.dir_size_by_object_type(config.VIDEO_STORAGE_PATH_ALERTS),
     }
 
 

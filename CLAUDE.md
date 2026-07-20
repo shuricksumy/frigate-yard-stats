@@ -215,6 +215,16 @@ explicitly. A second mode, `only_media` (defaults to `true`), decides *what* get
   purge can remove a large fraction of the rows the index was built over, so this keeps it sized
   and accurate for whatever data survives rather than leaving it bloated for data that's gone.
 
+A third, optional `object_label` param restricts either mode to a single Frigate object type
+(e.g. `car`) -- for cleaning up one noisy/low-value type without touching everything else's
+retention. Deliberately scoped to `raw_events`/`sightings` only: `visits`/`visit_sightings` are
+**never** touched at all when `object_label` is set (their counts in the response come back `0`),
+since a visit can span multiple distinct object types (`visits.objects` is comma-joined -- see
+"Visit grouping" below) and there's no single-type-safe way to decide a multi-type visit row (or
+its own composite-grid media) belongs to just one type's purge. Omitting `object_label` (the
+default) still covers `visits`/`visit_sightings` exactly as it did before this param existed --
+only a type-scoped purge narrows to events/sightings alone.
+
 **Bug found and fixed while adding this**: both `purge_older_than` and `run_retention_cleanup`
 deleted `visits` *before* `raw_events`, but `raw_events.visit_id` references `visits(id)` -- the
 opposite direction from that delete order. Reproduced live (a raw_event still linked to an
@@ -348,6 +358,16 @@ claim*, i.e. a live queue-state decision), this is a pure read-time filter over 
 sightings -- it never touches `ai_status`, so `n8n/daily-report.json` (events, `source=events`,
 the default) and `n8n/alerts-report.json` (visits, `source=visits`) can both run on their own
 schedules without any conflict.
+
+An optional `object_label` param (e.g. `car`) restricts the report to one Frigate object type --
+for a "cars only" report alongside the default report covering every type. Applied as one more
+`WHERE s.object_label = %s` clause in `db.get_report_data`'s query, so it composes with `source`
+exactly like every other filter there: under `source=visits`, a visit spanning several object
+types (e.g. a car and a person) still groups by `visit_id` as normal, just with only the
+matching-type sighting(s) present in that group. The HTML title/caption gain a
+`(<object_label> only)` suffix (`report.generate_report`) so a filtered report doesn't read
+identically to the unfiltered one; the table itself needs no separate rendering path, since a
+filtered query just returns fewer rows.
 
 `source=visits`'s HTML also renders differently from `source=events`'s, not just differently
 dedup'd: `report.py`'s `_group_by_visit` groups every sighting a visit produced (any mix of object
@@ -577,6 +597,45 @@ whatever per-event analysis already exists instead of an empty lightbox. On the 
 events, never visits), `GET /events/{id}`'s `sighting` -- the events
 stage's own result -- is unaffected and unchanged; the alert stage/`alert_sighting` field only
 ever applies to the Visits tab.
+
+### Per-object-type overrides (`profile_config.py`)
+
+Four settings that used to be global-only env vars can now be overridden per Frigate object type
+directly in `profiles.yaml`'s `object_types.<label>` entry: `telegram_events_mode`,
+`telegram_alerts_mode`, `ai_events_stage_enabled`, `ai_alerts_enabled`. Every resolver lives in
+`profile_config.py` -- a small, pure (`no I/O, no caching`) module: a type's own override wins
+when present, otherwise the matching global `config.py` default applies
+(`_type_config(profile, object_label).get(key, config.THE_GLOBAL_DEFAULT)`). This lets one type
+(e.g. a low-priority `dog`) opt out of Telegram/AI-stage participation, or opt IN despite the
+global default being off, without a pipeline-wide switch -- every type that doesn't set an
+override behaves exactly as it did before this existed.
+
+`main.py` loads `profiles.yaml` once at startup and threads that same dict down to every worker
+that needs it (`crop_worker`/`video_worker`/`mqtt_ingest`/`visit_thumb_worker`/
+`alert_video_worker`/`ai_worker`/`alert_ai_worker`) rather than each thread re-reading the file
+independently. Thread-startup gating for the two AI stages now checks
+`profile_config.any_ai_events_stage_enabled`/`any_ai_alerts_enabled` instead of the bare global
+flag -- a per-type override can start that stage's poll thread even when the global env var is
+`false`, as long as at least one object type opts in; `ai_worker.run_once`/`alert_ai_worker.
+run_once` then further filter which types actually get claimed (`profile_config.
+ai_events_stage_enabled`/`ai_alerts_enabled` per label), so a type that doesn't want this stage
+never gets claimed even while the thread itself is running for other types.
+
+Telegram's four send functions (`telegram.send_photo`/`send_video`/`send_visit_summary`/
+`send_visit_video`) each gained an optional `mode: str | None = None` parameter -- when a caller
+passes an already-resolved mode (`profile_config.telegram_events_mode`/`telegram_alerts_mode`),
+that wins; omitted (`None`), the function falls back to the matching global `config.
+TELEGRAM_EVENTS_MODE`/`TELEGRAM_ALERTS_MODE` exactly as before this existed. `crop_worker.py`/
+`video_worker.py` resolve against the claimed row's own `objects` label directly. The alerts-flow
+callers (`mqtt_ingest.py`'s immediate summary, `visit_thumb_worker.py`'s deferred summary,
+`alert_video_worker.py`'s video reply) all resolve against the visit's own **representative**
+event's `objects` (`db.get_representative_event_for_visit`), not `visits.objects` -- the same
+single-type-per-visit convention `claim_alert_ai_batch` already uses, since a visit can span
+multiple distinct object types (`visits.objects` is comma-joined) but there's still exactly one
+representative event whose type the composite grid/notification is actually framed around.
+`mqtt_ingest.py` stores the loaded profile in a module-level `_profile` (set once by
+`start(profile)`) rather than threading it through every MQTT callback argument, since paho-mqtt's
+`on_message` signature is fixed and leaves no room for an extra parameter.
 
 ### Video storage, Telegram notifications, and the web report UI
 
@@ -1437,14 +1496,38 @@ feature-flags summary (`AI_EVENTS_STAGE_ENABLED`/`AI_ALERTS_ENABLED`/`STORE_VIDE
 `TELEGRAM_ALERTS_MODE`) so "what's currently turned on" is visible at a glance instead of having to
 check `.env` by hand. Everything in this call is cheap SQL -- deliberately excludes anything
 that's a real filesystem walk or network call, so the dashboard's main section always loads fast
-regardless of video backlog size or whether the VLM host is reachable.
+regardless of video backlog size or whether the VLM host is reachable. Note: this feature-flags
+summary only ever reflects the **global** env-var defaults -- it doesn't parse `profiles.yaml`, so
+a per-type override (see "Per-object-type overrides" above) won't show up here. The "By object
+type" section's row counts (below) do reflect whatever actually happened, which is shaped by any
+per-type override already in effect.
+
+`row_counts` additionally includes `row_counts_by_object_type` (`db.get_row_counts_by_object_type`)
+-- a per-Frigate-label breakdown of `raw_events`/`sightings`/`visit_sightings` row counts (three
+separate lists, one `GROUP BY` each, rather than one joined table -- a type can have `raw_events`
+with no sighting yet, so summing across tables would either double- or under-count depending on
+how it's done). `db_size` similarly gains `db_size_by_object_type`
+(`db.get_db_size_by_object_type`) -- an *approximate* per-type Postgres footprint via
+`sum(pg_column_size(t.*))` grouped by that table's own label column. This is a real byte count of
+each row's stored data, but still an approximation of the type's true on-disk footprint: it
+excludes per-row tuple overhead, TOAST storage for the crop/GIF columns' actual out-of-line
+chunks, and index space entirely -- `get_db_size_info()`'s `pg_total_relation_size` figures remain
+the authoritative whole-table sizes; this is for relative "which type is using the most space"
+comparison, not a precise accounting. The dashboard's "By object type" section combines this with
+disk usage below into one row per type.
 
 **`GET /admin/disk-usage`** is split out specifically because it *is* a real filesystem walk
 (`admin.dir_size_bytes`, `os.walk` summing real file sizes under `VIDEO_STORAGE_PATH`/
 `VIDEO_STORAGE_PATH_ALERTS`) -- kept separate so a large video backlog's scan time never blocks the
 rest of the dashboard from rendering. A path that doesn't exist (e.g. `VIDEO_STORAGE_PATH_ALERTS`
 when `STORE_VIDEO_ALERTS` has never been turned on) reports as zero bytes rather than an error --
-an unused optional storage location isn't a fault.
+an unused optional storage location isn't a fault. Also returns
+`video_storage[_alerts]_by_object_type` (`admin.dir_size_by_object_type`) -- the same walk, but
+bucketed by object type parsed from each file's own name (`video.py`'s `store_clip`/
+`store_visit_clip` always name a file `{object_type}-{id}-...` or `visit-{object_type}-{id}-...`,
+so the type is always either the first hyphen-token or the token right after a leading `visit-`).
+A name that doesn't match this pattern at all buckets under `"unknown"` rather than raising or
+being silently dropped from the total.
 
 **`GET /admin/embedding-backend/check`** is a live, on-demand smoke test against
 `LLAMA_PROXY_BASE_URL`/`LLAMA_PROXY_EMBED_PATH` (`admin.check_embedding_backend`) -- sends a tiny

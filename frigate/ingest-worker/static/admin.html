@@ -70,8 +70,8 @@
       <div class="stat-grid">
         <div class="stat-tile"><span class="stat-value" x-text="fmtNum(overview && overview.row_counts.raw_events)"></span><span class="stat-label">events</span></div>
         <div class="stat-tile"><span class="stat-value" x-text="fmtNum(overview && overview.row_counts.visits)"></span><span class="stat-label">visits (alerts)</span></div>
-        <div class="stat-tile"><span class="stat-value" x-text="fmtNum(overview && overview.row_counts.vehicle_sightings)"></span><span class="stat-label">vehicle sightings</span></div>
-        <div class="stat-tile"><span class="stat-value" x-text="fmtNum(overview && overview.row_counts.person_sightings)"></span><span class="stat-label">person sightings</span></div>
+        <div class="stat-tile"><span class="stat-value" x-text="fmtNum(overview && overview.row_counts.sightings)"></span><span class="stat-label">sightings (events)</span></div>
+        <div class="stat-tile"><span class="stat-value" x-text="fmtNum(overview && overview.row_counts.visit_sightings)"></span><span class="stat-label">sightings (alerts)</span></div>
       </div>
       <p class="status-line" x-show="overview">
         Retention: <span x-text="overview && overview.retention.retention_months"></span> months
@@ -80,17 +80,43 @@
       </p>
     </section>
 
+    <!-- ============ By object type ============ -->
+    <section class="admin-card" x-show="overview">
+      <h2>By object type</h2>
+      <p class="status-line">
+        Row counts are exact Postgres counts; "DB bytes" is an approximate row-data sum
+        (pg_column_size across raw_events/sightings/visit_sightings for that type -- doesn't
+        include index/TOAST/per-row overhead, see /admin/overview); "Video bytes" is a real
+        filesystem walk of stored clips whose filename starts with that type.
+      </p>
+      <table class="admin-table">
+        <thead><tr><th>Type</th><th class="num">Events</th><th class="num">Sightings</th><th class="num">Alert sightings</th><th class="num">DB bytes (approx.)</th><th class="num">Video bytes</th></tr></thead>
+        <tbody>
+          <template x-for="row in objectTypeRows()" :key="row.type">
+            <tr>
+              <td x-text="row.type"></td>
+              <td class="num" x-text="fmtNum(row.events)"></td>
+              <td class="num" x-text="fmtNum(row.sightings)"></td>
+              <td class="num" x-text="fmtNum(row.visitSightings)"></td>
+              <td class="num" x-text="fmtBytes(row.dbBytes)"></td>
+              <td class="num" x-text="diskUsage ? fmtBytes(row.videoBytes) : '...'"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </section>
+
     <!-- ============ Embedding coverage ============ -->
     <section class="admin-card" x-show="overview">
       <h2>Semantic search coverage</h2>
       <div class="admin-row" x-show="overview">
         <div>
-          Vehicle sightings: <strong x-text="overview && (overview.embeddings.vehicle_sightings_total - overview.embeddings.vehicle_sightings_missing)"></strong>
-          / <span x-text="overview && overview.embeddings.vehicle_sightings_total"></span> embedded
+          Event sightings: <strong x-text="overview && (overview.embeddings.sightings_total - overview.embeddings.sightings_missing)"></strong>
+          / <span x-text="overview && overview.embeddings.sightings_total"></span> embedded
         </div>
         <div>
-          Person sightings: <strong x-text="overview && (overview.embeddings.person_sightings_total - overview.embeddings.person_sightings_missing)"></strong>
-          / <span x-text="overview && overview.embeddings.person_sightings_total"></span> embedded
+          Alert sightings: <strong x-text="overview && (overview.embeddings.visit_sightings_total - overview.embeddings.visit_sightings_missing)"></strong>
+          / <span x-text="overview && overview.embeddings.visit_sightings_total"></span> embedded
         </div>
       </div>
       <div class="admin-row">
@@ -153,6 +179,15 @@
           Older than (days)
           <input type="number" min="1" x-model.number="purgeDays" style="width:100px" @change="purgePreview = null">
         </label>
+        <label>
+          Object type
+          <select x-model="purgeObjectLabel" @change="purgePreview = null">
+            <option value="">All types</option>
+            <template x-for="t in objectTypes" :key="t">
+              <option :value="t" x-text="t"></option>
+            </template>
+          </select>
+        </label>
         <label class="checkbox-label">
           <input type="checkbox" x-model="purgeOnlyMedia" @change="purgePreview = null">
           Media only (keep rows &amp; AI analysis text -- only clear stored video/images/GIFs)
@@ -168,6 +203,9 @@
       <p class="status-line" x-show="!purgeOnlyMedia">
         Deletes matching events/visits (and their sightings) entirely. The vector search index is rebuilt afterward against whatever data remains.
       </p>
+      <p class="status-line" x-show="purgeObjectLabel">
+        Restricted to object type "<span x-text="purgeObjectLabel"></span>" -- only affects events/sightings of that type. Visits (and their alert sightings/media) span potentially multiple types and are never touched by a type-scoped purge; leave "All types" selected to also cover those.
+      </p>
       <div x-show="purgePreview && purgeOnlyMedia" class="admin-row">
         <span>Would clear:</span>
         <span x-text="'event videos: ' + (purgePreview && purgePreview.counts.raw_events_video_files)"></span>
@@ -179,12 +217,48 @@
         <span>Would delete:</span>
         <span x-text="'events: ' + (purgePreview && purgePreview.counts.raw_events)"></span>
         <span x-text="'visits: ' + (purgePreview && purgePreview.counts.visits)"></span>
-        <span x-text="'vehicle sightings: ' + (purgePreview && purgePreview.counts.vehicle_sightings)"></span>
-        <span x-text="'person sightings: ' + (purgePreview && purgePreview.counts.person_sightings)"></span>
-        <span x-text="'alert vehicle sightings: ' + (purgePreview && purgePreview.counts.visit_vehicle_sightings)"></span>
-        <span x-text="'alert person sightings: ' + (purgePreview && purgePreview.counts.visit_person_sightings)"></span>
+        <span x-text="'sightings: ' + (purgePreview && purgePreview.counts.sightings)"></span>
+        <span x-text="'alert sightings: ' + (purgePreview && purgePreview.counts.visit_sightings)"></span>
       </div>
       <p x-show="purgeResult" x-text="purgeResult"></p>
+    </section>
+
+    <!-- ============ Reports ============ -->
+    <section class="admin-card">
+      <h2>Reports</h2>
+      <p class="status-line">Generate a report on demand and open it in a new tab -- the same HTML n8n's scheduled report workflows email/Telegram.</p>
+      <div class="admin-row">
+        <label>
+          Type
+          <select x-model="reportSource">
+            <option value="events">Events</option>
+            <option value="visits">Visits (alerts)</option>
+          </select>
+        </label>
+        <label>
+          Object type
+          <select x-model="reportObjectLabel">
+            <option value="">All types</option>
+            <template x-for="t in objectTypes" :key="t">
+              <option :value="t" x-text="t"></option>
+            </template>
+          </select>
+        </label>
+        <label>
+          Last (hours)
+          <input type="number" min="1" x-model.number="reportHours" style="width:90px">
+        </label>
+        <label>
+          Preview
+          <select x-model="reportIncludePreview">
+            <option value="gif">GIF</option>
+            <option value="image">Image only</option>
+            <option value="none">None</option>
+          </select>
+        </label>
+        <button @click="generateReport()" :disabled="generatingReport">Generate &amp; open</button>
+      </div>
+      <p class="status-line" x-show="reportError" style="color:#ff6b6b" x-text="reportError"></p>
     </section>
 
   </div>

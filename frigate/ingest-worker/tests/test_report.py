@@ -284,6 +284,37 @@ def test_source_events_never_includes_preview_gif(conn_ok):
         _cleanup(raw_id, visit_id=visit_id)
 
 
+def test_object_label_filters_to_one_type(conn_ok):
+    car_id, _ = _insert_raw_event(objects="car")
+    person_id, _ = _insert_raw_event(objects="person")
+    _insert_sighting(car_id, "car", "red")
+    _insert_sighting(person_id, "person", "dark jacket")
+    try:
+        start, end = _window()
+        data = db.get_report_data(start, end, object_label="car")
+        raw_event_ids = {s["raw_event_id"] for s in data["sightings"]}
+        assert car_id in raw_event_ids
+        assert person_id not in raw_event_ids
+        assert all(s["object_label"] == "car" for s in data["sightings"])
+    finally:
+        _cleanup(car_id, person_id)
+
+
+def test_object_label_omitted_includes_every_type(conn_ok):
+    car_id, _ = _insert_raw_event(objects="car")
+    person_id, _ = _insert_raw_event(objects="person")
+    _insert_sighting(car_id, "car", "red")
+    _insert_sighting(person_id, "person", "dark jacket")
+    try:
+        start, end = _window()
+        data = db.get_report_data(start, end)
+        raw_event_ids = {s["raw_event_id"] for s in data["sightings"]}
+        assert car_id in raw_event_ids
+        assert person_id in raw_event_ids
+    finally:
+        _cleanup(car_id, person_id)
+
+
 def test_source_events_never_uses_visit_thumb_crop(conn_ok):
     # source="events" (the default) never applies the visit-crop preference at all -- matches
     # claim_ai_batch's own scoping decision (only source=visits substitutes the crop).

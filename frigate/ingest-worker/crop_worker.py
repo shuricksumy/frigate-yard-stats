@@ -4,13 +4,14 @@ import time
 import config
 import crop
 import db
+import profile_config
 import retention
 import telegram
 
 logger = logging.getLogger(__name__)
 
 
-def process_claimed_event(row: dict) -> None:
+def process_claimed_event(row: dict, profile: dict | None = None) -> None:
     event_id = row["id"]
     # Frigate is still finalizing the event/clip right after the "end" event fires -- give it a
     # head start before the first attempt (mirrors video_worker's VIDEO_INITIAL_WAIT_SECONDS).
@@ -28,7 +29,8 @@ def process_claimed_event(row: dict) -> None:
         # Never allowed to fail the crop stage -- telegram.py itself doesn't raise, but wrap
         # anyway (belt and suspenders, same spirit as the n8n workflow's onError branches).
         try:
-            message_id = telegram.send_photo(result["crop_image_base64"], telegram.build_caption(row))
+            mode = profile_config.telegram_events_mode(profile, row.get("objects"))
+            message_id = telegram.send_photo(result["crop_image_base64"], telegram.build_caption(row), mode=mode)
             if message_id is not None:
                 db.set_telegram_photo_message_id(event_id, message_id)
         except Exception:
@@ -39,7 +41,7 @@ def process_claimed_event(row: dict) -> None:
         db.mark_crop_failed(event_id)
 
 
-def run_once() -> None:
+def run_once(profile: dict | None = None) -> None:
     retention.maybe_run_retention()
 
     db.reap_stale_processing()
@@ -49,10 +51,10 @@ def run_once() -> None:
         return
 
     for row in db.claim_next_batch(available_capacity):
-        process_claimed_event(row)
+        process_claimed_event(row, profile)
 
 
-def run_forever() -> None:
+def run_forever(profile: dict | None = None) -> None:
     logger.info(
         "crop_worker starting: parallel_limit=%s stale_minutes=%s max_attempts=%s initial_wait=%ss "
         "poll_interval=%ss retention_months=%s retention_check_interval=%ss",
@@ -61,7 +63,7 @@ def run_forever() -> None:
     )
     while True:
         try:
-            run_once()
+            run_once(profile)
         except Exception:
             logger.exception("crop_worker poll iteration failed")
         time.sleep(config.POLL_INTERVAL_SECONDS)

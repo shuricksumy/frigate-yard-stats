@@ -214,3 +214,19 @@ def test_generate_report_include_preview_image_omits_gif(conn_ok):
         assert "(no image)" in none_mode["html"]
     finally:
         _cleanup(raw_id, visit_id=visit_id)
+
+
+def test_generate_report_object_label_filters_and_labels_title(conn_ok):
+    car_id, _ = _insert_raw_event(objects="car")
+    person_id, _ = _insert_raw_event(objects="person")
+    _insert_sighting(car_id, "car", "silver sedan")
+    _insert_sighting(person_id, "person", "dark jacket")
+    try:
+        now = datetime.now(timezone.utc)
+        result = report.generate_report(now - timedelta(hours=1), now + timedelta(hours=1), object_label="car")
+        assert "(car only)" in result["html"]
+        assert "silver sedan" in result["html"]
+        assert "dark jacket" not in result["html"]
+        assert result["sighting_count"] == 1
+    finally:
+        _cleanup(car_id, person_id)

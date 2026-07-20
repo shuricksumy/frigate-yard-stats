@@ -193,3 +193,89 @@ def test_purge_media_older_than_does_not_delete_sighting_rows(conn_ok):
         assert rows[0]["c"] == 1
     finally:
         _cleanup(event_id, visit_id)
+
+
+# ---- object_label filter (only ever scopes raw_events/sightings -- never visits/visit_sightings,
+# since a visit can span multiple distinct object types with no single-type-safe way to decide it
+# belongs to just one type's purge) ----
+
+def _make_old_raw_event(days_old, objects, camera):
+    det_id = f"pytest-retention-{uuid.uuid4()}"
+    rows = db._execute(
+        """
+        INSERT INTO yard_stats.raw_events
+            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot,
+             crop_status, ai_status, crop_image_base64, video_path)
+        VALUES (%s, 'z', %s, %s, %s, %s, true, true, 'done', 'done', 'ZmFrZQ==', '/data/video/fake.mp4')
+        RETURNING id
+        """,
+        (camera, objects, _old_ts(days_old), _old_ts(days_old), det_id), fetch=True,
+    )
+    event_id = rows[0]["id"]
+    db._execute(
+        "INSERT INTO yard_stats.sightings (raw_event_id, object_label, description) VALUES (%s, %s, 'x')",
+        (event_id, objects),
+    )
+    return event_id
+
+
+def _cleanup_events(*event_ids):
+    db._execute("DELETE FROM yard_stats.sightings WHERE raw_event_id = ANY(%s)", (list(event_ids),))
+    db._execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", (list(event_ids),))
+
+
+def test_purge_older_than_object_label_only_affects_matching_type(conn_ok):
+    car_id = _make_old_raw_event(100, "car", "pytest-retention-label-cam")
+    person_id = _make_old_raw_event(100, "person", "pytest-retention-label-cam")
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+        preview = db.purge_older_than(cutoff, execute=False, object_label="car")
+        assert preview["raw_events"] == 1
+        assert preview["sightings"] == 1
+        assert preview["visits"] == 0
+        assert preview["visit_sightings"] == 0
+
+        db.purge_older_than(cutoff, execute=True, object_label="car")
+        assert db.get_raw_event(car_id) is None
+        assert db.get_raw_event(person_id) is not None  # untouched -- different type
+    finally:
+        _cleanup_events(car_id, person_id)
+
+
+def test_purge_older_than_object_label_never_touches_visits(conn_ok):
+    event_id, visit_id = _make_old_visit_with_everything()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+        db.purge_older_than(cutoff, execute=True, object_label="car")
+        # The matching raw_event is gone (it's the type-scoped purge's whole point)...
+        assert db.get_raw_event(event_id) is None
+        # ...but the visit and its own alert sighting/media are completely untouched, even though
+        # the visit's representative event was itself a "car".
+        assert db.get_visit(visit_id) is not None
+        assert db.get_visit_alert_sighting(visit_id) is not None
+    finally:
+        db._execute("DELETE FROM yard_stats.visit_sightings WHERE visit_id = %s", (visit_id,))
+        db._execute("DELETE FROM yard_stats.raw_events WHERE id = %s", (event_id,))
+        db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
+
+
+def test_purge_media_older_than_object_label_only_affects_matching_type(conn_ok):
+    car_id = _make_old_raw_event(100, "car", "pytest-retention-label-cam")
+    person_id = _make_old_raw_event(100, "person", "pytest-retention-label-cam")
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+        preview = db.purge_media_older_than(cutoff, execute=False, object_label="car")
+        assert preview["raw_events_video_files"] == 1
+        assert preview["raw_events_images"] == 1
+        assert preview["visits_video_files"] == 0
+        assert preview["visits_images_or_gifs"] == 0
+
+        db.purge_media_older_than(cutoff, execute=True, object_label="car")
+        car_event = db.get_raw_event(car_id)
+        person_event = db.get_raw_event(person_id)
+        assert car_event["crop_image_base64"] is None
+        assert car_event["video_path"] is None
+        assert person_event["crop_image_base64"] is not None  # untouched -- different type
+        assert person_event["video_path"] is not None
+    finally:
+        _cleanup_events(car_id, person_id)
