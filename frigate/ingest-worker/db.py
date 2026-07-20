@@ -9,7 +9,25 @@ import config
 
 logger = logging.getLogger(__name__)
 
+# Must match schema.sql's vector(768) columns (nomic-embed-text-v1.5's output size) -- n8n computes
+# and sends these, ingest-worker only ever stores/queries them, never calls an embedding model
+# itself.
+EMBEDDING_DIMENSIONS = 768
+
 _conn = None
+
+
+def _vector_literal(embedding: list[float] | None) -> str | None:
+    # Formats a Python list as a pgvector input literal ("[0.1,0.2,...]") passed through psycopg2
+    # as a plain string param and cast with ::vector in SQL -- avoids depending on the separate
+    # `pgvector` package's connection-level type adapter (which itself needs the extension already
+    # created before it can register, an ordering hazard not worth taking on for a write-mostly,
+    # read-never-as-a-list column).
+    if embedding is None:
+        return None
+    if len(embedding) != EMBEDDING_DIMENSIONS:
+        raise ValueError(f"embedding must have {EMBEDDING_DIMENSIONS} dimensions, got {len(embedding)}")
+    return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
 
 
 def get_conn():
@@ -58,6 +76,20 @@ def get_status_breakdown() -> list:
         """,
         fetch=True,
     )
+
+
+def get_retention_info() -> dict:
+    # Lets a caller (the Q&A agent, via /status) tell "nothing happened in that range" apart from
+    # "that range was already purged" -- config.RETENTION_MONTHS alone doesn't say how much data
+    # actually survives right now (the scheduled sweep runs on its own slow cadence, so the true
+    # oldest row can be somewhat newer than the nominal cutoff).
+    rows = _execute(
+        "SELECT min(start_ts) AS oldest_start_ts FROM yard_stats.raw_events", fetch=True,
+    )
+    return {
+        "retention_months": config.RETENTION_MONTHS,
+        "oldest_available_start_ts": rows[0]["oldest_start_ts"] if rows else None,
+    }
 
 
 def get_raw_event(event_id: int) -> dict | None:
@@ -1318,6 +1350,7 @@ def complete_vehicle_sighting(
     plate_text_frigate: str | None,
     plate_confidence: str | None,
     notes: str | None,
+    embedding: list[float] | None = None,
 ) -> int:
     # Insert + mark ai_status='done' in one transaction -- replaces the old Insert Vehicle
     # Sighting + Mark Done pair of n8n Postgres nodes, closing the gap where a crash between the
@@ -1331,13 +1364,14 @@ def complete_vehicle_sighting(
                 INSERT INTO yard_stats.vehicle_sightings
                     (raw_event_id, color, body_type, make_guess, make_confidence,
                      model_guess, model_confidence, notable_features,
-                     plate_text_llm, plate_text_frigate, plate_confidence, notes)
-                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                     plate_text_llm, plate_text_frigate, plate_confidence, notes, embedding)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s::vector)
                 RETURNING id
                 """,
                 (raw_event_id, color, body_type, make_guess, make_confidence,
                  model_guess, model_confidence, notable_features,
-                 plate_text_llm, plate_text_frigate, plate_confidence, notes),
+                 plate_text_llm, plate_text_frigate, plate_confidence, notes,
+                 _vector_literal(embedding)),
             )
             sighting_id = cur.fetchone()["id"]
             cur.execute(
@@ -1353,18 +1387,21 @@ def complete_vehicle_sighting(
         conn.autocommit = True
 
 
-def complete_person_sighting(raw_event_id: int, description: str | None, notes: str | None) -> int:
+def complete_person_sighting(
+    raw_event_id: int, description: str | None, notes: str | None,
+    embedding: list[float] | None = None,
+) -> int:
     conn = get_conn()
     conn.autocommit = False
     try:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(
                 """
-                INSERT INTO yard_stats.person_sightings (raw_event_id, description, notes)
-                VALUES (%s, %s, %s)
+                INSERT INTO yard_stats.person_sightings (raw_event_id, description, notes, embedding)
+                VALUES (%s, %s, %s, %s::vector)
                 RETURNING id
                 """,
-                (raw_event_id, description, notes),
+                (raw_event_id, description, notes, _vector_literal(embedding)),
             )
             sighting_id = cur.fetchone()["id"]
             cur.execute(
@@ -1378,6 +1415,65 @@ def complete_person_sighting(raw_event_id: int, description: str | None, notes: 
         raise
     finally:
         conn.autocommit = True
+
+
+def semantic_search_sightings(
+    embedding: list[float],
+    start: datetime | None = None,
+    end: datetime | None = None,
+    object_types: list[str] | None = None,
+    limit: int = 10,
+) -> list[dict]:
+    # Cosine-distance ("<=>") ordered search across vehicle_sightings/person_sightings, filtered by
+    # time range -- the agent resolves "last week"/"today" into concrete start/end itself (see
+    # CLAUDE.md), this only ever ranks by semantic similarity *within* that already-resolved window,
+    # same division of labor claim_ai_batch's own time filters already have. embedding IS NOT NULL
+    # naturally excludes sightings from before this feature existed (or any n8n run that didn't
+    # attach one) -- they're simply not semantically searchable, not an error.
+    vector_literal = _vector_literal(embedding)
+    want_vehicles = object_types is None or "vehicle" in object_types
+    want_persons = object_types is None or "person" in object_types
+    parts = []
+    params: list = []
+    if want_vehicles:
+        parts.append(
+            """
+            SELECT 'vehicle' AS sighting_type, vs.id AS sighting_id, vs.raw_event_id,
+                   re.start_ts, re.camera, re.objects,
+                   vs.color, vs.body_type, vs.make_guess, vs.model_guess,
+                   vs.notable_features, vs.plate_text_llm, vs.plate_text_frigate,
+                   NULL AS description,
+                   vs.embedding <=> %s::vector AS distance
+            FROM yard_stats.vehicle_sightings vs
+            JOIN yard_stats.raw_events re ON re.id = vs.raw_event_id
+            WHERE vs.embedding IS NOT NULL
+              AND (%s::timestamptz IS NULL OR re.start_ts >= %s)
+              AND (%s::timestamptz IS NULL OR re.start_ts <= %s)
+            """
+        )
+        params.extend([vector_literal, start, start, end, end])
+    if want_persons:
+        parts.append(
+            """
+            SELECT 'person' AS sighting_type, ps.id AS sighting_id, ps.raw_event_id,
+                   re.start_ts, re.camera, re.objects,
+                   NULL AS color, NULL AS body_type, NULL AS make_guess, NULL AS model_guess,
+                   NULL AS notable_features, NULL AS plate_text_llm, NULL AS plate_text_frigate,
+                   ps.description,
+                   ps.embedding <=> %s::vector AS distance
+            FROM yard_stats.person_sightings ps
+            JOIN yard_stats.raw_events re ON re.id = ps.raw_event_id
+            WHERE ps.embedding IS NOT NULL
+              AND (%s::timestamptz IS NULL OR re.start_ts >= %s)
+              AND (%s::timestamptz IS NULL OR re.start_ts <= %s)
+            """
+        )
+        params.extend([vector_literal, start, start, end, end])
+    if not parts:
+        return []
+    query = " UNION ALL ".join(parts) + " ORDER BY distance ASC LIMIT %s"
+    params.append(limit)
+    return _execute(query, tuple(params), fetch=True)
 
 
 def fail_ai_event(event_id: int, max_attempts: int) -> dict:

@@ -3,6 +3,7 @@ import threading
 
 import uvicorn
 
+import ai_worker
 import alert_video_worker
 import config
 import crop_worker
@@ -32,6 +33,10 @@ def main():
     # Independent switch, independent thread -- same reasoning as STORE_VIDEO_ALERTS above.
     if config.VISIT_THUMB_CROP_ENABLED:
         threading.Thread(target=visit_thumb_worker.run_forever, name="visit_thumb_worker", daemon=True).start()
+    # Alternative to n8n/metadata-processor.json (see CLAUDE.md) -- off by default so a fresh
+    # deploy still needs n8n for the AI stage until this is deliberately opted into.
+    if config.AI_STAGE_ENABLED:
+        threading.Thread(target=ai_worker.run_forever, name="ai_worker", daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=config.API_PORT)
 
 

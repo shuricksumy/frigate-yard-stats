@@ -17,7 +17,11 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:16
+        # pgvector-enabled, matching docker-compose.yml's postgres-projects image -- schema.sql's
+        # CREATE EXTENSION IF NOT EXISTS vector needs the extension actually present in the image,
+        # not just SQL to enable it (same class of gap the ffmpeg CI fix addressed: a runtime
+        # capability the code now depends on, silently missing from the CI service container).
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: n8n_projects
           POSTGRES_PASSWORD: test

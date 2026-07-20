@@ -21,6 +21,11 @@ once — bring it up in stages so if something looks wrong, you know which piece
    [`frigate.md`](frigate.md) for why the visit-preview feature specifically depends on your
    Frigate recording retention settings).
 4. **Turn on Telegram** whenever you want notifications — independent of everything else.
+5. **Semantic search and the internal AI stage are both separate, later opt-ins** — neither is
+   needed to get the core pipeline or n8n's `metadata-processor.json` working. Turn on pgvector
+   embeddings once you're already running `metadata-processor.json` successfully; only consider
+   the internal AI stage (`AI_STAGE_ENABLED`) once you're comfortable letting it replace that n8n
+   workflow.
 
 ## Required settings
 
@@ -150,3 +155,42 @@ cutoff of your own choosing right now rather than waiting for or reconfiguring t
 tracks, so the web UI's Type filter dropdown matches reality. Add a label here (matching what you
 added to `frigate.conf`'s `objects.track`) and it appears in the dropdown on next restart, no code
 change needed. See [`web-ui.md`](web-ui.md) for a tour of the UI itself.
+
+## Semantic search (pgvector)
+
+Requires `postgres-projects` to run the `pgvector/pgvector:pg16` image (already the default in
+`docker-compose.yml`) rather than plain `postgres:16` — `schema.sql`'s `CREATE EXTENSION IF NOT
+EXISTS vector` needs that extension actually present in the image. No `ingest-worker` env var
+turns this on/off by itself — `vehicle_sightings`/`person_sightings` gain a nullable `embedding`
+column either way; it just stays empty until something (n8n's `metadata-processor.json`, or the
+internal AI stage below) actually sends one via `POST /sightings/vehicles|persons`. `POST
+/search/semantic` is the read side — cosine-similarity search over whatever sightings do have an
+embedding, filtered by a time range. See CLAUDE.md's "Semantic search and the Q&A agent" section
+for the full design, and `n8n/yard-stats-semantic-search-tool.json` /
+`n8n/yard-stats-qa.json` for the Q&A agent that uses it.
+
+## Internal AI stage (alternative to n8n's metadata-processor.json)
+
+Off by default (`AI_STAGE_ENABLED=false`) — n8n's `metadata-processor.json` is the AI stage until
+you deliberately opt into this instead. Don't run both against the same queue at once (see
+CLAUDE.md's "Internal AI stage" section for why that's wasteful, though not unsafe).
+
+- Object types + prompts + per-type model slot/timeout live in **`frigate/profiles.yaml`** (repo
+  root, alongside `docker-compose.yml`), not env vars — that's genuinely a lot of config to cram
+  into `.env` readably. `docker-compose.yml` already bind-mounts this file into the container, so
+  just edit it and restart `ingest-worker` — no rebuild needed. (`AI_STAGE_PROFILE_PATH`, default
+  `/app/profiles.yaml`, is the path the bind mount lands on; you'd only touch this env var if you
+  wanted to point at a differently-named file instead.) A Frigate object label with no entry in
+  this file (e.g. `dog`) is simply never analyzed by this stage.
+- `AI_STAGE_PARALLEL_LIMIT`/`AI_STAGE_STALE_MINUTES`/`AI_STAGE_MAX_ATTEMPTS`/
+  `AI_STAGE_MAX_AGE_HOURS`/`AI_STAGE_POLL_INTERVAL_SECONDS` — same queue-tuning shape as the crop
+  stage above, just for this stage's own `ai_status` claims.
+- `LLAMA_PROXY_BASE_URL` (required once `AI_STAGE_ENABLED=true`) — your `llama_slot_proxy`'s own
+  base URL, called directly instead of going through n8n. `LLAMA_PROXY_TOKEN` is optional (blank =
+  no `Authorization` header — `llama_slot_proxy` is unauthenticated on the LAN in most setups
+  today). `LLAMA_PROXY_EMBED_PATH` is the embedding model's own URL path segment (same one-
+  path-per-slot convention `profiles.yaml`'s `chat_path` uses).
+- `AI_STAGE_DEFAULT_TIMEOUT_SECONDS` (default `180`)/`AI_STAGE_EMBED_TIMEOUT_SECONDS` (default
+  `60`) — fallback timeouts; the real per-type chat timeout belongs in `profiles.yaml` itself
+  (`timeout_seconds`), since a local model's response time genuinely depends on which model/prompt
+  you've picked for that type.

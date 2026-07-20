@@ -1,0 +1,65 @@
+# This copy is baked into the image (Dockerfile's COPY . .) as the fallback default -- in normal
+# deployment via docker-compose.yml, frigate/profiles.yaml (repo root, alongside docker-compose.yml)
+# is bind-mounted over this same path (/app/profiles.yaml) instead, so that's the one that actually
+# takes effect; this copy only matters if that bind mount is ever removed. Keep the two in sync
+# yourself if you edit one.
+#
+# Configures the internal AI stage (ai_worker.py, only runs when AI_STAGE_ENABLED=true) -- an
+# alternative to n8n/metadata-processor.json, not a replacement for it: that workflow is left
+# untouched in the repo and can be re-enabled in n8n at any time (see CLAUDE.md's "Internal AI
+# stage" section).
+#
+# object_types maps a Frigate object label (raw_events.objects) to which prompt/sighting shape to
+# use. A label with no entry here is never claimed by this stage at all -- ai_status stays 'new'
+# indefinitely, exactly as if AI_STAGE_ENABLED were off for that one type. This is deliberate for
+# any type with no matching sightings table (e.g. 'dog') -- not a bug to fix.
+object_types:
+  car:
+    sighting_type: vehicle
+  truck:
+    sighting_type: vehicle
+  person:
+    sighting_type: person
+
+# One entry per sighting_type used above. chat_path is appended to LLAMA_PROXY_BASE_URL -- the
+# llama_slot_proxy convention already used by n8n's VLM calls is one URL path segment per model
+# slot (e.g. /spare/v1/chat/completions), not a "model" field in the request body.
+vehicle:
+  chat_path: /REPLACE_WITH_VEHICLE_SLOT/v1/chat/completions
+  # How long to wait for this type's chat completion, in seconds -- a local model on CPU/modest
+  # GPU can genuinely take minutes, especially for a slower/larger model or a longer prompt like
+  # this one (attributes + plate OCR combined). Falls back to AI_STAGE_DEFAULT_TIMEOUT_SECONDS if
+  # omitted. Per-type (not a single global value) since different prompts/models have real
+  # differences in load -- the person prompt below is much shorter and typically faster.
+  timeout_seconds: 180
+  # Ported verbatim from n8n/metadata-processor.json's "Call Qwen (Attributes + Plate)" node --
+  # merged attributes + plate OCR in one call for speed. Keep this in sync with that node's prompt
+  # if you're running both this stage and metadata-processor.json at different times, so switching
+  # between them doesn't change analysis quality.
+  prompt: >-
+    This image is a 2x2 grid of 4 frames of the SAME vehicle captured moments apart during one
+    sighting (not 4 different vehicles) -- use all 4 panels together to give the single most
+    confident answer, since a detail unclear in one panel (angle, glare, motion blur) may be
+    legible in another, e.g. the plate. Respond with ONLY a JSON object, no other text before or
+    after it, no markdown, no explanation, and do not mention that the image is a grid:
+    {"color": string, "body_type": string (e.g. sedan/suv/truck/van/pickup/minivan), "make": string
+    or null if unsure, "make_confidence": "low"|"medium"|"high", "model": string or null if unsure
+    (e.g. "F-150", "Camry", "Model 3" -- the specific model, not just the make), "model_confidence":
+    "low"|"medium"|"high", "notable_features": string or null, a short phrase (under 10 words) for
+    anything visually distinctive -- roof rack, ladder rack, trailer hitch, bike rack, tinted
+    windows, decals or commercial branding/text, visible damage or rust, unusual color/wrap,
+    aftermarket wheels/lift kit -- use null if the vehicle looks unremarkable, "plate_text": string
+    or null}. plate_text must be ONLY the plate's characters (e.g. "10MG407") with no spaces,
+    punctuation, labels, or reasoning -- if no plate is visible or legible in any panel, use null.
+    Do not describe your process.
+
+person:
+  chat_path: /REPLACE_WITH_PERSON_SLOT/v1/chat/completions
+  timeout_seconds: 180
+  # Ported verbatim from "Call VLM (Person)".
+  prompt: >-
+    This image is a 2x2 grid of 4 frames of the SAME person captured moments apart during one
+    sighting (not 4 different people) -- use all 4 panels together, since a detail unclear in one
+    may be visible in another. Describe this person's clothing colors and what they appear to be
+    doing across the sequence, in one short sentence. No speculation about identity. Do not mention
+    that the image is a grid.

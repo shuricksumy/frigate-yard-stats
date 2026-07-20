@@ -209,3 +209,39 @@ TELEGRAM_ALERTS_MODE = _telegram_mode("TELEGRAM_ALERTS_MODE")
 # and it shows up in the dropdown on next restart, no frontend change needed.
 # -------------------------------------------------
 OBJECT_TYPES = [t.strip() for t in _env("OBJECT_TYPES", "car,truck,person,dog").split(",") if t.strip()]
+
+# -------------------------------------------------
+# Internal AI stage (ai_worker.py) -- an alternative to n8n/metadata-processor.json, not a
+# replacement for it: that workflow is left untouched in the repo and can be re-enabled in n8n at
+# any time. Off by default, same convention as STORE_VIDEO/VISIT_THUMB_CROP_ENABLED above -- when
+# on, this thread claims the exact same ai_status='new'/'retry' rows metadata-processor.json's
+# "Claim Next Batch (API)" node does (via db.claim_ai_batch directly, not over HTTP), so the two
+# must not run against the same queue at the same time.
+# -------------------------------------------------
+AI_STAGE_ENABLED = _env("AI_STAGE_ENABLED", "false").lower() == "true"
+# Same idea as SCHEMA_SQL_PATH -- baked into the image by default, bind-mount a different file and
+# point this at it to customize prompts/models without a rebuild.
+AI_STAGE_PROFILE_PATH = _env("AI_STAGE_PROFILE_PATH", "/app/profiles.yaml")
+AI_STAGE_PARALLEL_LIMIT = int(_env("AI_STAGE_PARALLEL_LIMIT", "2"))
+AI_STAGE_STALE_MINUTES = int(_env("AI_STAGE_STALE_MINUTES", "5"))
+AI_STAGE_MAX_ATTEMPTS = int(_env("AI_STAGE_MAX_ATTEMPTS", "3"))
+# Optional throughput safety valve, same purpose as VIDEO_MAX_AGE_HOURS -- unset (default) means no
+# cutoff, every eligible row is still claimable regardless of age.
+_ai_stage_max_age_hours_env = os.environ.get("AI_STAGE_MAX_AGE_HOURS")
+AI_STAGE_MAX_AGE_HOURS = float(_ai_stage_max_age_hours_env) if _ai_stage_max_age_hours_env else None
+AI_STAGE_POLL_INTERVAL_SECONDS = float(_env("AI_STAGE_POLL_INTERVAL_SECONDS", "5"))
+# llama_slot_proxy's own base URL, called directly instead of going through n8n -- e.g.
+# http://llama-proxy-host:port. Only required when AI_STAGE_ENABLED is true.
+LLAMA_PROXY_BASE_URL = _env("LLAMA_PROXY_BASE_URL", "").rstrip("/")
+# Optional -- llama_slot_proxy is unauthenticated on the LAN today (same as every VLM call n8n
+# makes directly), so this is future-proofing rather than a hard requirement. Blank means no
+# Authorization header is sent at all.
+LLAMA_PROXY_TOKEN = _env("LLAMA_PROXY_TOKEN", "")
+LLAMA_PROXY_EMBED_PATH = _env("LLAMA_PROXY_EMBED_PATH", "/REPLACE_WITH_EMBED_SLOT/v1/embeddings")
+# Fallback chat-completion timeout (seconds) for a profiles.yaml entry that doesn't set its own
+# timeout_seconds -- a local model's response time genuinely varies by prompt/model, so the real
+# per-call value lives in the profile, not here (see profiles.yaml's own comment).
+AI_STAGE_DEFAULT_TIMEOUT_SECONDS = float(_env("AI_STAGE_DEFAULT_TIMEOUT_SECONDS", "180"))
+# Separate, shorter default -- a single small forward pass, not autoregressive generation like a
+# chat completion, so it's normally much faster regardless of which chat model/prompt was used.
+AI_STAGE_EMBED_TIMEOUT_SECONDS = float(_env("AI_STAGE_EMBED_TIMEOUT_SECONDS", "60"))

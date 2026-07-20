@@ -87,6 +87,7 @@ every stage, endpoint, and the production issues that shaped this design.
 frigate/                        # main project folder -- the pipeline + Frigate's own config
   docker-compose.yml             # ONE file, three Compose profiles: pipeline + nvr + mqtt
   .env.example                    # ONE shared template -- covers both stacks below (see comments)
+  profiles.yaml                    # internal AI stage's object-type/prompt/model config, bind-mounted
   sql/queue-debug.sql             # manual check/fix/reset queries (raw_events AND visits queues)
   ingest-worker/                  # the Python service, including its static/ web report UI
   mosquitto/                      # optional local MQTT broker (--profile mqtt), for dev/testing

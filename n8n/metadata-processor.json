@@ -140,19 +140,49 @@
       }
     },
     {
+      "id": "94",
+      "name": "Build Embedding Text (Person)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 100],
+      "notes": "One line of text to embed, from the same description field the person gets analyzed into -- nothing new to compute, just the input the embedding model needs.",
+      "notesInFlow": true,
+      "parameters": {
+        "jsCode": "const p = $input.first().json;\nreturn [{ json: { ...p, embed_text: p.description || '' } }];"
+      }
+    },
+    {
+      "id": "95",
+      "name": "Call Embedding Model (Person)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1850, 100],
+      "onError": "continueErrorOutput",
+      "notes": "nomic-embed-text-v1.5 (768 dims) via its own llama_slot_proxy slot -- same unauthenticated-on-the-LAN convention as the VLM calls above, just a different slot/path. continueErrorOutput on purpose: an embedding failure shouldn't lose an already-computed sighting -- both outputs feed Insert Person Sighting (API), which falls back to embedding=null via optional chaining if this errored.",
+      "notesInFlow": true,
+      "parameters": {
+        "method": "POST",
+        "url": "http://REPLACE_WITH_VLM_HOST:REPLACE_WITH_VLM_PORT/REPLACE_WITH_EMBED_SLOT/v1/embeddings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"input\": $json.embed_text } }}",
+        "options": {}
+      }
+    },
+    {
       "id": "9",
       "name": "Insert Person Sighting (API)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1650, 100],
-      "notes": "Replaces the old Insert Person Sighting + Mark Done Postgres node pair -- ingest-worker's POST /sightings/persons inserts the sighting and marks ai_status='done' in one DB transaction.",
+      "position": [2050, 100],
+      "notes": "Replaces the old Insert Person Sighting + Mark Done Postgres node pair -- ingest-worker's POST /sightings/persons inserts the sighting and marks ai_status='done' in one DB transaction. embedding pulls from Call Embedding Model (Person) explicitly (not bare $json) since that's the immediately preceding node now -- ?? null covers both a clean 'no embedding' case and that call having errored.",
       "notesInFlow": true,
       "parameters": {
         "method": "POST",
         "url": "http://REPLACE_WITH_INGEST_WORKER_HOST:REPLACE_WITH_INGEST_WORKER_PORT/sightings/persons",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { \"raw_event_id\": $json.raw_event_id, \"description\": $json.description, \"notes\": $json.notes } }}",
+        "jsonBody": "={{ { \"raw_event_id\": $('Parse VLM Response (Person)').item.json.raw_event_id, \"description\": $('Parse VLM Response (Person)').item.json.description, \"notes\": $('Parse VLM Response (Person)').item.json.notes, \"embedding\": $('Call Embedding Model (Person)').item.json.data?.[0]?.embedding ?? null } }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {}
@@ -193,19 +223,49 @@
       }
     },
     {
+      "id": "96",
+      "name": "Build Embedding Text (Vehicle)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1650, 400],
+      "notes": "Same color/body/make/model + notable_features + plate combination report.py's _vehicle_summary already uses for the alerts report's one-line description -- embedding the same text a human would read about this sighting, not a separately-invented format.",
+      "notesInFlow": true,
+      "parameters": {
+        "jsCode": "const v = $input.first().json;\nconst bits = [v.color, v.body_type, v.make_guess, v.model_guess].filter(Boolean);\nconst plate = v.plate_text_llm || v.plate_text_frigate;\nconst parts = [bits.length ? bits.join(' ') : null, v.notable_features].filter(Boolean);\nif (plate) parts.push(`plate ${plate}`);\nreturn [{ json: { ...v, embed_text: parts.join(' -- ') } }];"
+      }
+    },
+    {
+      "id": "97",
+      "name": "Call Embedding Model (Vehicle)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1850, 400],
+      "onError": "continueErrorOutput",
+      "notes": "Same embedding slot as Call Embedding Model (Person). continueErrorOutput on purpose -- an embedding failure shouldn't lose an already-computed vehicle sighting; both outputs feed Insert Vehicle Sighting (API), which falls back to embedding=null via optional chaining if this errored.",
+      "notesInFlow": true,
+      "parameters": {
+        "method": "POST",
+        "url": "http://REPLACE_WITH_VLM_HOST:REPLACE_WITH_VLM_PORT/REPLACE_WITH_EMBED_SLOT/v1/embeddings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"input\": $json.embed_text } }}",
+        "options": {}
+      }
+    },
+    {
       "id": "73",
       "name": "Insert Vehicle Sighting (API)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
-      "position": [1650, 400],
-      "notes": "Replaces the old Insert Vehicle Sighting + Mark Done Postgres node pair -- ingest-worker's POST /sightings/vehicles inserts the sighting and marks ai_status='done' in one DB transaction.",
+      "position": [2050, 400],
+      "notes": "Replaces the old Insert Vehicle Sighting + Mark Done Postgres node pair -- ingest-worker's POST /sightings/vehicles inserts the sighting and marks ai_status='done' in one DB transaction. embedding pulls from Call Embedding Model (Vehicle) explicitly (not bare $json) since that's the immediately preceding node now -- ?? null covers both a clean 'no embedding' case and that call having errored.",
       "notesInFlow": true,
       "parameters": {
         "method": "POST",
         "url": "http://REPLACE_WITH_INGEST_WORKER_HOST:REPLACE_WITH_INGEST_WORKER_PORT/sightings/vehicles",
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ { \"raw_event_id\": $json.raw_event_id, \"color\": $json.color, \"body_type\": $json.body_type, \"make_guess\": $json.make_guess, \"make_confidence\": $json.make_confidence, \"model_guess\": $json.model_guess, \"model_confidence\": $json.model_confidence, \"notable_features\": $json.notable_features, \"plate_text_llm\": $json.plate_text_llm, \"plate_text_frigate\": $json.plate_text_frigate, \"plate_confidence\": $json.plate_confidence, \"notes\": $json.notes } }}",
+        "jsonBody": "={{ { \"raw_event_id\": $('Parse VLM Responses (Vehicle)').item.json.raw_event_id, \"color\": $('Parse VLM Responses (Vehicle)').item.json.color, \"body_type\": $('Parse VLM Responses (Vehicle)').item.json.body_type, \"make_guess\": $('Parse VLM Responses (Vehicle)').item.json.make_guess, \"make_confidence\": $('Parse VLM Responses (Vehicle)').item.json.make_confidence, \"model_guess\": $('Parse VLM Responses (Vehicle)').item.json.model_guess, \"model_confidence\": $('Parse VLM Responses (Vehicle)').item.json.model_confidence, \"notable_features\": $('Parse VLM Responses (Vehicle)').item.json.notable_features, \"plate_text_llm\": $('Parse VLM Responses (Vehicle)').item.json.plate_text_llm, \"plate_text_frigate\": $('Parse VLM Responses (Vehicle)').item.json.plate_text_frigate, \"plate_confidence\": $('Parse VLM Responses (Vehicle)').item.json.plate_confidence, \"notes\": $('Parse VLM Responses (Vehicle)').item.json.notes, \"embedding\": $('Call Embedding Model (Vehicle)').item.json.data?.[0]?.embedding ?? null } }}",
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
         "options": {}
@@ -284,7 +344,16 @@
       ]
     },
     "Parse VLM Response (Person)": {
-      "main": [[{ "node": "Insert Person Sighting (API)", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Build Embedding Text (Person)", "type": "main", "index": 0 }]]
+    },
+    "Build Embedding Text (Person)": {
+      "main": [[{ "node": "Call Embedding Model (Person)", "type": "main", "index": 0 }]]
+    },
+    "Call Embedding Model (Person)": {
+      "main": [
+        [{ "node": "Insert Person Sighting (API)", "type": "main", "index": 0 }],
+        [{ "node": "Insert Person Sighting (API)", "type": "main", "index": 0 }]
+      ]
     },
     "Insert Person Sighting (API)": {
       "main": [[{ "node": "Loop Over Claimed Events", "type": "main", "index": 0 }]]
@@ -296,7 +365,16 @@
       ]
     },
     "Parse VLM Responses (Vehicle)": {
-      "main": [[{ "node": "Insert Vehicle Sighting (API)", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Build Embedding Text (Vehicle)", "type": "main", "index": 0 }]]
+    },
+    "Build Embedding Text (Vehicle)": {
+      "main": [[{ "node": "Call Embedding Model (Vehicle)", "type": "main", "index": 0 }]]
+    },
+    "Call Embedding Model (Vehicle)": {
+      "main": [
+        [{ "node": "Insert Vehicle Sighting (API)", "type": "main", "index": 0 }],
+        [{ "node": "Insert Vehicle Sighting (API)", "type": "main", "index": 0 }]
+      ]
     },
     "Insert Vehicle Sighting (API)": {
       "main": [[{ "node": "Loop Over Claimed Events", "type": "main", "index": 0 }]]

@@ -134,17 +134,51 @@ class VehicleSightingCreate(BaseModel):
     plate_text_frigate: str | None = None
     plate_confidence: str | None = None
     notes: str | None = None
+    # Optional: n8n computes this (nomic-embed-text-v1.5, 768 dims) before calling this endpoint --
+    # ingest-worker only ever stores/queries it, never calls an embedding model itself. Omitted or
+    # null means this sighting just isn't semantically searchable, not an error.
+    embedding: list[float] | None = None
 
 
 class PersonSightingCreate(BaseModel):
     raw_event_id: int
     description: str | None = None
     notes: str | None = None
+    embedding: list[float] | None = None
 
 
 class SightingCreated(BaseModel):
     id: int
     ai_status: str = "done"
+
+
+class SemanticSearchRequest(BaseModel):
+    # A vector, not free text, because ingest-worker never calls an embedding model itself -- the
+    # caller (n8n) already resolved the query text to a vector using the same model that wrote the
+    # stored sightings' embeddings before calling this.
+    embedding: list[float]
+    start: datetime | None = None
+    end: datetime | None = None
+    object_types: list[str] | None = None
+    limit: int = 10
+
+
+class SemanticSearchResult(BaseModel):
+    sighting_type: str
+    sighting_id: int
+    raw_event_id: int
+    start_ts: datetime
+    camera: str
+    objects: str | None
+    color: str | None = None
+    body_type: str | None = None
+    make_guess: str | None = None
+    model_guess: str | None = None
+    notable_features: str | None = None
+    plate_text_llm: str | None = None
+    plate_text_frigate: str | None = None
+    description: str | None = None
+    distance: float
 
 
 class FailResponse(BaseModel):

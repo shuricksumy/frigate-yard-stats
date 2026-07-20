@@ -46,7 +46,9 @@ def health():
 
 @app.get("/status")
 def status():
-    return {"breakdown": db.get_status_breakdown()}
+    # retention/oldest_available_start_ts let a caller (the Q&A agent) tell "nothing happened in
+    # that range" apart from "that range was already purged" -- see db.get_retention_info.
+    return {"breakdown": db.get_status_breakdown(), **db.get_retention_info()}
 
 
 @app.post("/crop/{event_id}")
@@ -399,7 +401,7 @@ def create_vehicle_sighting(sighting: schemas.VehicleSightingCreate):
         sighting.raw_event_id, sighting.color, sighting.body_type, sighting.make_guess,
         sighting.make_confidence, sighting.model_guess, sighting.model_confidence,
         sighting.notable_features, sighting.plate_text_llm, sighting.plate_text_frigate,
-        sighting.plate_confidence, sighting.notes,
+        sighting.plate_confidence, sighting.notes, sighting.embedding,
     )
     return {"id": sighting_id, "ai_status": "done"}
 
@@ -407,8 +409,26 @@ def create_vehicle_sighting(sighting: schemas.VehicleSightingCreate):
 @app.post("/sightings/persons", response_model=schemas.SightingCreated, tags=["sightings"], dependencies=[Depends(require_api_key)])
 def create_person_sighting(sighting: schemas.PersonSightingCreate):
     """Inserts a person sighting and marks the raw_event's ai_status='done' in one transaction."""
-    sighting_id = db.complete_person_sighting(sighting.raw_event_id, sighting.description, sighting.notes)
+    sighting_id = db.complete_person_sighting(
+        sighting.raw_event_id, sighting.description, sighting.notes, sighting.embedding,
+    )
     return {"id": sighting_id, "ai_status": "done"}
+
+
+@app.post("/search/semantic", response_model=list[schemas.SemanticSearchResult], tags=["sightings"], dependencies=[Depends(require_api_key)])
+def semantic_search(search: schemas.SemanticSearchRequest):
+    """Cosine-similarity search over already-analyzed sightings' embeddings, filtered by the
+    caller-resolved time range -- a POST (not GET) since a 768-float vector doesn't belong in a
+    query string. Built for the Q&A agent's fuzzy-content asks ("anything unusual"), as opposed to
+    /events'/'/sightings/*'s structured filters."""
+    if len(search.embedding) != db.EMBEDDING_DIMENSIONS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"embedding must have {db.EMBEDDING_DIMENSIONS} dimensions, got {len(search.embedding)}",
+        )
+    return db.semantic_search_sightings(
+        search.embedding, search.start, search.end, search.object_types, search.limit,
+    )
 
 
 @app.post("/ai-queue/{event_id}/fail", response_model=schemas.FailResponse, tags=["ai-queue"], dependencies=[Depends(require_api_key)])

@@ -8,6 +8,11 @@
 
 CREATE SCHEMA IF NOT EXISTS yard_stats;
 
+-- Backs vehicle_sightings.embedding/person_sightings.embedding (see below) -- requires the
+-- pgvector/pgvector:pg16 Postgres image (see docker-compose.yml's postgres-projects service);
+-- plain postgres:16 doesn't ship this extension's .so.
+CREATE EXTENSION IF NOT EXISTS vector;
+
 -- One row per Frigate review/alert segment (frigate/reviews MQTT topic) -- groups the raw_events
 -- det_ids Frigate's own tracker considers the same real-world activity (occlusion handling,
 -- re-ID, label flicker e.g. car -> truck mid-track). Populated by db.record_visit. See CLAUDE.md's
@@ -142,3 +147,17 @@ CREATE TABLE IF NOT EXISTS yard_stats.person_sightings (
   created_at TIMESTAMPTZ DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS idx_person_sightings_raw_event ON yard_stats.person_sightings (raw_event_id);
+
+-- Semantic search over AI-written sighting text (n8n computes these via nomic-embed-text-v1.5,
+-- 768 dims -- ingest-worker never calls an LLM/embedding model itself, it only stores/queries the
+-- vector n8n already computed, same division as every other AI-shaped call in this project).
+-- Nullable: only newly-analyzed sightings get one; existing rows stay searchable by every other
+-- filter, just not semantically, until/unless backfilled. HNSW (not ivfflat) since it needs no
+-- existing rows to "train" on, so it's safe to create immediately against a column that starts
+-- empty.
+ALTER TABLE yard_stats.vehicle_sightings ADD COLUMN IF NOT EXISTS embedding vector(768);
+ALTER TABLE yard_stats.person_sightings ADD COLUMN IF NOT EXISTS embedding vector(768);
+CREATE INDEX IF NOT EXISTS idx_vehicle_sightings_embedding ON yard_stats.vehicle_sightings
+  USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_person_sightings_embedding ON yard_stats.person_sightings
+  USING hnsw (embedding vector_cosine_ops);

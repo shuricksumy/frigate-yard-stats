@@ -15,20 +15,70 @@
       }
     },
     {
-      "id": "2",
-      "name": "Query Recent Car Sightings (API)",
+      "id": "20",
+      "name": "Get Status (API)",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [450, 300],
-      "alwaysOutputData": true,
-      "notes": "Replaces a direct Postgres query -- ingest-worker's GET /sightings/vehicles already returns exactly this shape (most-recent-first, same fields), no SQL needed here anymore. alwaysOutputData keeps the workflow going even on a zero-row response.",
+      "notes": "Fetched once up front so the Agent's system prompt can state the retention boundary as a fact (config.RETENTION_MONTHS + the oldest surviving raw_events.start_ts) -- lets it tell 'nothing happened in that range' apart from 'that range was already purged' instead of guessing.",
       "notesInFlow": true,
       "parameters": {
         "method": "GET",
-        "url": "http://REPLACE_WITH_INGEST_WORKER_HOST:REPLACE_WITH_INGEST_WORKER_PORT/sightings/vehicles",
+        "url": "http://REPLACE_WITH_INGEST_WORKER_HOST:REPLACE_WITH_INGEST_WORKER_PORT/status",
+        "options": {}
+      }
+    },
+    {
+      "id": "21",
+      "name": "Yard Stats Agent",
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 1.7,
+      "position": [700, 300],
+      "notes": "Replaces the old fixed-'dump last 200 rows, ask once' Build Prompt/Ask Qwen pair -- this now resolves the question's own time range and picks which tool(s) to call, rather than always loading every recent sighting into context regardless of what was actually asked (which also silently truncated at 200 rows with no time filtering at all).",
+      "notesInFlow": true,
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $('Ask Webhook').item.json.body?.question ?? $('Ask Webhook').item.json.question }}",
+        "options": {
+          "systemMessage": "=You are a helpful assistant answering questions about home security camera activity for a monitored yard/driveway (Frigate NVR). You can ONLY answer using data returned by your tools -- these only ever cover events that had a persisted clip in Frigate, were cropped, and analyzed by an AI vision model. Do not speculate beyond what a tool returns. If a tool returns nothing relevant, say so clearly rather than guessing.\n\nThe current date/time is {{ $now.toISO() }} (UTC) -- resolve any relative time phrase ('today', 'last week', 'since Monday') into concrete ISO 8601 start/end timestamps yourself before calling a tool; every tool expects already-resolved timestamps, not phrases like 'last week'.\n\nData retention: only the last {{ $('Get Status (API)').item.json.retention_months }} months are kept, and the oldest data currently available starts at {{ $('Get Status (API)').item.json.oldest_available_start_ts }}. If asked about something before that, say the data has already been purged rather than reporting 'nothing happened'.\n\nTool guidance: use get_summary_stats for aggregate counts, search_events for structured filters (camera, object type, exact text match, time range), semantic_search for fuzzy/conceptual asks that don't map to a specific field ('anything unusual', 'a red car'), and get_event_detail/get_visit_sightings to look closer at a specific result you've already found -- don't dump every row into your answer, pull detail only for what's actually relevant to the question."
+        }
+      }
+    },
+    {
+      "id": "22",
+      "name": "Chat Model",
+      "type": "@n8n/n8n-nodes-langchain.lmChatOpenAi",
+      "typeVersion": 1,
+      "position": [600, 550],
+      "notes": "Points at the existing VLM host via llama_slot_proxy -- same OpenAI-compatible chat endpoint the old Ask Qwen node called directly. Needs an 'OpenAi' credential set up after import: API Key can be any placeholder value (llama_slot_proxy doesn't check it), Base URL should be http://REPLACE_WITH_VLM_HOST:REPLACE_WITH_VLM_PORT/spare/v1 -- unlike the plain HTTP nodes used elsewhere in this project, this LangChain sub-node type requires a credential object to hold its base URL, it can't call a bare unauthenticated URL directly.",
+      "notesInFlow": true,
+      "parameters": {
+        "model": "REPLACE_WITH_MODEL_NAME",
+        "options": {}
+      },
+      "credentials": {
+        "openAiApi": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "llama_slot_proxy (OpenAI-compatible)"
+        }
+      }
+    },
+    {
+      "id": "23",
+      "name": "Get Summary Stats Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1,
+      "position": [850, 550],
+      "parameters": {
+        "toolDescription": "Aggregate counts (total events/sightings, breakdown by camera/object type/day) over a time range. Use for questions like 'how many cars showed up' or 'how much activity today' -- not for descriptions of individual sightings.",
+        "method": "GET",
+        "url": "http://REPLACE_WITH_INGEST_WORKER_HOST:REPLACE_WITH_INGEST_WORKER_PORT/stats/summary",
         "sendQuery": true,
-        "queryParameters": {
-          "parameters": [{ "name": "limit", "value": "200" }]
+        "parametersQuery": {
+          "values": [
+            { "name": "start", "value": "={{ $fromAI('start', 'Resolved ISO 8601 start timestamp of the time range', 'string') }}" },
+            { "name": "end", "value": "={{ $fromAI('end', 'Resolved ISO 8601 end timestamp of the time range', 'string') }}" }
+          ]
         },
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
@@ -42,20 +92,25 @@
       }
     },
     {
-      "id": "3",
-      "name": "Query Recent Person Sightings (API)",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [650, 300],
-      "alwaysOutputData": true,
-      "notes": "Replaces a direct Postgres query -- ingest-worker's GET /sightings/persons already returns exactly this shape. alwaysOutputData keeps the workflow going even on a zero-row response.",
-      "notesInFlow": true,
+      "id": "24",
+      "name": "Search Events Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1,
+      "position": [1050, 550],
       "parameters": {
+        "toolDescription": "Structured search over individual analyzed events/sightings within a time range, filterable by camera, object type, and an exact-substring text match against the AI analysis result. Use this for anything with a concrete filter (a specific camera, object type, or known word/phrase) rather than a fuzzy/conceptual description -- use semantic_search for that instead. Returns up to 'limit' rows (each with the event's id, time, camera, and analysis fields) -- use get_event_detail to look closer at any one of them.",
         "method": "GET",
-        "url": "http://REPLACE_WITH_INGEST_WORKER_HOST:REPLACE_WITH_INGEST_WORKER_PORT/sightings/persons",
+        "url": "http://REPLACE_WITH_INGEST_WORKER_HOST:REPLACE_WITH_INGEST_WORKER_PORT/events",
         "sendQuery": true,
-        "queryParameters": {
-          "parameters": [{ "name": "limit", "value": "200" }]
+        "parametersQuery": {
+          "values": [
+            { "name": "start", "value": "={{ $fromAI('start', 'Resolved ISO 8601 start timestamp of the time range', 'string') }}" },
+            { "name": "end", "value": "={{ $fromAI('end', 'Resolved ISO 8601 end timestamp of the time range', 'string') }}" },
+            { "name": "object_type", "value": "={{ $fromAI('object_type', \"Comma-separated Frigate object labels to filter by, e.g. 'car,truck'. Omit for no filter\", 'string') }}" },
+            { "name": "camera", "value": "={{ $fromAI('camera', 'Camera name to filter by. Omit for no filter', 'string') }}" },
+            { "name": "q", "value": "={{ $fromAI('q', 'Exact substring to search for in the AI analysis text (color/body type/make/model/notable features/plate, or person description). Omit for no text filter', 'string') }}" },
+            { "name": "limit", "value": "={{ $fromAI('limit', 'Max rows to return, default 20, max 200', 'number') }}" }
+          ]
         },
         "authentication": "genericCredentialType",
         "genericAuthType": "httpHeaderAuth",
@@ -69,39 +124,72 @@
       }
     },
     {
-      "id": "4",
-      "name": "Build Prompt",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [850, 300],
+      "id": "25",
+      "name": "Semantic Search Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolWorkflow",
+      "typeVersion": 2.2,
+      "position": [1250, 550],
+      "notes": "Calls the Yard Stats: Semantic Search Tool sub-workflow (n8n/yard-stats-semantic-search-tool.json) -- import that workflow first, then set workflowId below to its id. Packaged as a sub-workflow rather than a single HTTP tool specifically so the 768-float embedding vector never has to round-trip through this Agent's own context.",
+      "notesInFlow": true,
       "parameters": {
-        "jsCode": "// Only ever pulls from vehicle_sightings/person_sightings (via ingest-worker's\n// /sightings/* API) -- rows only exist there once a raw event was cropped and analyzed\n// by the VLM, so the agent can only ever answer from genuinely analyzed events.\nconst isReal = (o) => o && Object.keys(o).length > 0;\n\n// Defensive against either shape an HTTP node can produce for a JSON-array response: one item\n// per array element (most n8n versions auto-split this), or one item whose json IS the array.\nfunction collectRows(nodeName) {\n  const items = $(nodeName).all();\n  if (items.length === 1 && Array.isArray(items[0].json)) {\n    return items[0].json.filter(isReal);\n  }\n  return items.map((i) => i.json).filter(isReal);\n}\n\nconst cars = collectRows('Query Recent Car Sightings (API)');\nconst persons = collectRows('Query Recent Person Sightings (API)');\n\nconst webhookJson = $('Ask Webhook').first().json;\nconst body = webhookJson.body ?? webhookJson;\nconst question = (body.question ?? '').toString().trim();\n\nfunction fmtTime(ts) {\n  return new Date(ts).toLocaleString('en-GB', { timeZone: 'UTC' }) + ' UTC';\n}\n\nconst carLines = cars.map((c) => `- ${fmtTime(c.start_ts)} camera=${c.camera} color=${c.color ?? '?'} body=${c.body_type ?? '?'} make=${c.make_guess ?? '?'} plate=${c.plate_text_llm || c.plate_text_frigate || '?'}`);\nconst personLines = persons.map((p) => `- ${fmtTime(p.start_ts)} camera=${p.camera} description=\"${p.description}\"`);\n\nconst context = [\n  `Vehicle sightings (${cars.length}, most recent first):`,\n  ...(carLines.length ? carLines : ['(none)']),\n  '',\n  `Person sightings (${persons.length}, most recent first):`,\n  ...(personLines.length ? personLines : ['(none)']),\n].join('\\n');\n\nreturn [{ json: { question, context } }];"
+        "description": "Semantic/fuzzy search over AI-written sighting descriptions (color, body type, notable features, plate text, person description) within a time range. Use this for asks that don't map to a specific structured filter -- 'anything unusual', 'a suspicious-looking person', 'a red truck with a ladder rack' -- rather than search_events, which only does exact substring matches.",
+        "workflowId": {
+          "__rl": true,
+          "mode": "id",
+          "value": "REPLACE_AFTER_IMPORT_WITH_SEMANTIC_SEARCH_TOOL_WORKFLOW_ID"
+        },
+        "workflowInputs": {
+          "mappingMode": "defineBelow",
+          "value": {
+            "query_text": "={{ $fromAI('query_text', 'The fuzzy/semantic aspect of the question to search for, e.g. \"red truck with a ladder rack\" or \"person carrying a large box\"', 'string') }}",
+            "start": "={{ $fromAI('start', 'Resolved ISO 8601 start timestamp of the time range to search', 'string') }}",
+            "end": "={{ $fromAI('end', 'Resolved ISO 8601 end timestamp of the time range to search', 'string') }}",
+            "object_types": "={{ $fromAI('object_types', \"'vehicle', 'person', or omit to search both\", 'string') }}",
+            "limit": "={{ $fromAI('limit', 'Max results to return, default 10', 'number') }}"
+          }
+        }
       }
     },
     {
-      "id": "5",
-      "name": "Ask Qwen",
-      "type": "n8n-nodes-base.httpRequest",
-      "typeVersion": 4.2,
-      "position": [850, 300],
-      "onError": "continueErrorOutput",
+      "id": "26",
+      "name": "Get Event Detail Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1,
+      "position": [1450, 550],
       "parameters": {
-        "method": "POST",
-        "url": "http://REPLACE_WITH_VLM_HOST:REPLACE_WITH_VLM_PORT/spare/v1/chat/completions",
-        "sendBody": true,
-        "specifyBody": "json",
-        "jsonBody": "={{ { \"messages\": [ { \"role\": \"system\", \"content\": \"You are a helpful assistant answering questions about home security camera activity for a monitored yard/driveway (Frigate NVR). You can ONLY answer using the event data given in the user's message -- these are events that had a persisted clip in Frigate, were cropped, and analyzed by an AI vision model. Do not speculate beyond this data. If the answer isn't in the provided data, say so clearly rather than guessing.\" }, { \"role\": \"user\", \"content\": \"Recent analyzed events:\\n\\n\" + $json.context + \"\\n\\nQuestion: \" + $json.question } ], \"temperature\": 0.2 } }}",
+        "toolDescription": "Full detail for one specific event by id, including its complete AI analysis result. Use this to look closer at a specific row already found via search_events or semantic_search -- not for browsing.",
+        "method": "GET",
+        "url": "=http://REPLACE_WITH_INGEST_WORKER_HOST:REPLACE_WITH_INGEST_WORKER_PORT/events/{{ $fromAI('event_id', 'The raw_event id to fetch full detail for', 'number') }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
         "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "ingest-worker API Key"
+        }
       }
     },
     {
-      "id": "6",
-      "name": "Parse Answer",
-      "type": "n8n-nodes-base.code",
-      "typeVersion": 2,
-      "position": [1050, 300],
+      "id": "27",
+      "name": "Get Visit Sightings Tool",
+      "type": "@n8n/n8n-nodes-langchain.toolHttpRequest",
+      "typeVersion": 1,
+      "position": [1650, 550],
       "parameters": {
-        "jsCode": "let answer;\ntry {\n  answer = $input.first().json.choices?.[0]?.message?.content?.trim();\n} catch (err) {\n  answer = null;\n}\nif (!answer) {\n  answer = 'Sorry, I could not get an answer right now (the LLM call failed or returned no content).';\n}\n\nreturn [{ json: { answer } }];"
+        "toolDescription": "Every AI-analyzed sighting linked to one visit (Frigate review/alert segment) by visit id -- a visit can have both a vehicle sighting and a person sighting (e.g. someone getting out of their car), unlike a single event which has at most one. Use when a search result is visit-grouped and you want the full picture, not just its representative event.",
+        "method": "GET",
+        "url": "=http://REPLACE_WITH_INGEST_WORKER_HOST:REPLACE_WITH_INGEST_WORKER_PORT/visits/{{ $fromAI('visit_id', 'The visit id to fetch all linked sightings for', 'number') }}/sightings",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "ingest-worker API Key"
+        }
       }
     },
     {
@@ -109,34 +197,40 @@
       "name": "Respond",
       "type": "n8n-nodes-base.respondToWebhook",
       "typeVersion": 1.1,
-      "position": [1250, 300],
+      "position": [950, 300],
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ { \"answer\": $json.answer } }}"
+        "responseBody": "={{ { \"answer\": $json.output } }}"
       }
     }
   ],
   "connections": {
     "Ask Webhook": {
-      "main": [[{ "node": "Query Recent Car Sightings (API)", "type": "main", "index": 0 }]]
+      "main": [[{ "node": "Get Status (API)", "type": "main", "index": 0 }]]
     },
-    "Query Recent Car Sightings (API)": {
-      "main": [[{ "node": "Query Recent Person Sightings (API)", "type": "main", "index": 0 }]]
+    "Get Status (API)": {
+      "main": [[{ "node": "Yard Stats Agent", "type": "main", "index": 0 }]]
     },
-    "Query Recent Person Sightings (API)": {
-      "main": [[{ "node": "Build Prompt", "type": "main", "index": 0 }]]
-    },
-    "Build Prompt": {
-      "main": [[{ "node": "Ask Qwen", "type": "main", "index": 0 }]]
-    },
-    "Ask Qwen": {
-      "main": [
-        [{ "node": "Parse Answer", "type": "main", "index": 0 }],
-        [{ "node": "Parse Answer", "type": "main", "index": 0 }]
-      ]
-    },
-    "Parse Answer": {
+    "Yard Stats Agent": {
       "main": [[{ "node": "Respond", "type": "main", "index": 0 }]]
+    },
+    "Chat Model": {
+      "ai_languageModel": [[{ "node": "Yard Stats Agent", "type": "ai_languageModel", "index": 0 }]]
+    },
+    "Get Summary Stats Tool": {
+      "ai_tool": [[{ "node": "Yard Stats Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "Search Events Tool": {
+      "ai_tool": [[{ "node": "Yard Stats Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "Semantic Search Tool": {
+      "ai_tool": [[{ "node": "Yard Stats Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "Get Event Detail Tool": {
+      "ai_tool": [[{ "node": "Yard Stats Agent", "type": "ai_tool", "index": 0 }]]
+    },
+    "Get Visit Sightings Tool": {
+      "ai_tool": [[{ "node": "Yard Stats Agent", "type": "ai_tool", "index": 0 }]]
     }
   },
   "active": false,

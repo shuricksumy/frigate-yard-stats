@@ -1,0 +1,79 @@
+{
+  "name": "Yard Stats: Semantic Search Tool",
+  "nodes": [
+    {
+      "id": "1",
+      "name": "Workflow Input",
+      "type": "n8n-nodes-base.executeWorkflowTrigger",
+      "typeVersion": 1.1,
+      "position": [200, 300],
+      "notes": "Called by the 'Semantic Search' tool node inside Yard Stats: Q&A (Call n8n Workflow Tool) -- not meant to be run standalone or scheduled. Expects {query_text, start?, end?, object_types?, limit?} as input -- start/end should be resolved ISO timestamps (the calling Agent already resolved 'last week'/'today' into concrete bounds before calling this tool, same as every other tool in that workflow). Packaged as its own sub-workflow (rather than one HTTP Request Tool node) specifically so the 768-float embedding vector never has to round-trip through the Agent's own context/tokens -- it's computed and consumed entirely server-side, between these two HTTP calls.",
+      "notesInFlow": true,
+      "parameters": {
+        "workflowInputs": {
+          "values": [
+            { "name": "query_text", "type": "string" },
+            { "name": "start", "type": "string" },
+            { "name": "end", "type": "string" },
+            { "name": "object_types", "type": "string" },
+            { "name": "limit", "type": "number" }
+          ]
+        }
+      }
+    },
+    {
+      "id": "2",
+      "name": "Call Embedding Model",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [450, 300],
+      "notes": "Same embedding slot/model (nomic-embed-text-v1.5, 768 dims) metadata-processor.json's Call Embedding Model (Vehicle)/(Person) nodes use -- the query text has to be embedded with the same model that wrote the stored sightings' vectors, or cosine distance between them is meaningless.",
+      "notesInFlow": true,
+      "parameters": {
+        "method": "POST",
+        "url": "http://REPLACE_WITH_VLM_HOST:REPLACE_WITH_VLM_PORT/REPLACE_WITH_EMBED_SLOT/v1/embeddings",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"input\": $json.query_text } }}",
+        "options": {}
+      }
+    },
+    {
+      "id": "3",
+      "name": "Search Semantic (API)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [650, 300],
+      "notes": "ingest-worker's POST /search/semantic -- cosine-distance ordered, filtered by the start/end window and object_types the Agent already resolved/chose. Returns the rows as-is; the Agent reads this tool's output directly, no separate parse step needed.",
+      "notesInFlow": true,
+      "parameters": {
+        "method": "POST",
+        "url": "http://REPLACE_WITH_INGEST_WORKER_HOST:REPLACE_WITH_INGEST_WORKER_PORT/search/semantic",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ { \"embedding\": $('Call Embedding Model').item.json.data?.[0]?.embedding, \"start\": $('Workflow Input').item.json.start || null, \"end\": $('Workflow Input').item.json.end || null, \"object_types\": $('Workflow Input').item.json.object_types ? $('Workflow Input').item.json.object_types.split(',').map(s => s.trim()) : null, \"limit\": $('Workflow Input').item.json.limit || 10 } }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "credentials": {
+        "httpHeaderAuth": {
+          "id": "REPLACE_AFTER_IMPORT",
+          "name": "ingest-worker API Key"
+        }
+      }
+    }
+  ],
+  "connections": {
+    "Workflow Input": {
+      "main": [[{ "node": "Call Embedding Model", "type": "main", "index": 0 }]]
+    },
+    "Call Embedding Model": {
+      "main": [[{ "node": "Search Semantic (API)", "type": "main", "index": 0 }]]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  }
+}

@@ -140,7 +140,10 @@ are actually enforced.
   themselves, and never call Telegram — they only ever read `crop_image_base64` that's already
   sitting on the claimed row, and no longer run raw SQL at all — claim/complete/fail all go through
   `ingest-worker`'s `/ai-queue/*` and `/sightings/*` endpoints. `ingest-worker` never calls an LLM,
-  by design.
+  by design -- **when this n8n-driven flow is what's active.** `ai_worker.py` (see "Internal AI
+  stage" below) is an opt-in, off-by-default alternative that deliberately breaks this one
+  invariant, calling `llama_slot_proxy` directly instead of going through n8n; the two are meant to
+  be run one at a time, not both.
 - **VLM inference** goes through the user's existing `llama_slot_proxy` setup — one more per-agent
   slot/port pointing at its own `.gguf` + `mmproj` pair. Vehicle attributes and plate OCR are a
   single combined call to one model (merged for speed -- see `n8n/metadata-processor.json`'s
@@ -320,6 +323,87 @@ and same-type re-tracked duplicates still collapse to one. There's no longer a r
 workflows or ever pick plain `source=events` -- `n8n/metadata-processor.json` is now the only
 processing workflow, using `source=visits` unconditionally; `metadata-processor-alerts.json` was
 removed.
+
+### Internal AI stage (`ai_worker.py`) -- an alternative to `metadata-processor.json`
+
+`metadata-processor.json`'s own logic -- claim work, call the VLM, parse the response, insert the
+sighting -- is genuinely deterministic control flow; the only actual "AI" part is the VLM call
+itself, which happens regardless of which language issues it. `ai_worker.py` is that same logic
+ported straight into `ingest-worker` as a real, testable Python poll-loop stage, following the
+exact same `process_claimed_event`/`run_once`/`run_forever` shape `crop_worker.py`/`video_worker.py`
+already use -- own daemon thread, started conditionally in `main.py` (`if config.AI_STAGE_ENABLED`),
+off by default like `STORE_VIDEO`/`VISIT_THUMB_CROP_ENABLED`. It calls the exact same three `db.py`
+functions n8n's HTTP calls already wrap -- `claim_ai_batch`, `fail_ai_event`,
+`complete_vehicle_sighting`/`complete_person_sighting` -- directly rather than over HTTP, so **no
+`db.py`/`api.py`/schema change was needed at all** for the queue mechanics. `claim_ai_batch` already
+folds reap-stale + count-in-progress + capacity + claim into one call (unlike crop/video's claim
+functions), so `ai_worker.run_once` is simpler than `crop_worker.run_once` -- just one call plus a
+loop.
+
+**This is an alternative, not a replacement** -- `n8n/metadata-processor.json` is left untouched and
+inactive in n8n, not deleted, and every existing API endpoint (`/ai-queue/*`, `/sightings/*`,
+`/search/semantic`, etc.) is completely unchanged, so the n8n-driven flow can be re-enabled at any
+time. The two must not run against the same queue simultaneously in practice (both would claim
+`ai_status='new'`/`'retry'` rows -- safe from a correctness standpoint, `FOR UPDATE SKIP LOCKED`
+prevents a double-claim either way, but wasteful/confusing to run both at once) -- pick one.
+
+**Prompts and per-object-type model routing live in `frigate/profiles.yaml`, not env vars** --
+`docker-compose.yml` bind-mounts this file (repo root, alongside `docker-compose.yml` itself) over
+`/app/profiles.yaml` by default (read-only), the same path `AI_STAGE_PROFILE_PATH` already defaults
+to -- so editing it and restarting the container is enough to change prompts/models, no image
+rebuild needed. `frigate/ingest-worker/profiles.yaml` is a separate copy still baked into the image
+via the Dockerfile's `COPY . .` (same as `schema.sql`) purely as a fallback default for if that
+bind mount is ever removed -- the two aren't linked, keep them in sync by hand if you edit one.
+Two-level structure: `object_types` maps a Frigate
+object label (`raw_events.objects`) to a `sighting_type` ("vehicle" or "person" -- which table/
+prompt/parsing shape to use); `vehicle`/`person` sections hold that type's `chat_path` (appended to
+`LLAMA_PROXY_BASE_URL` -- `llama_slot_proxy`'s convention is one URL path segment per model slot,
+e.g. `/spare/v1/chat/completions`, not a `model` field in the request body) and `prompt` (ported
+verbatim from `metadata-processor.json`'s `Call Qwen (Attributes + Plate)`/`Call VLM (Person)`
+nodes -- keep both in sync if you're switching between the two flows, so analysis quality doesn't
+change with the switch). **A Frigate object label with no `object_types` entry (e.g. `dog`, which
+has no matching sightings table) is simply never claimed by this stage at all** -- its
+`object_types` keys become exactly the `object_types` list passed to `claim_ai_batch`, so an
+unmapped type's rows just stay `ai_status='new'` indefinitely, the same as if the stage were off for
+that one type. Not a bug to fix -- there's nowhere to store a "dog sighting" today.
+
+Vehicle response parsing (`ai_worker.parse_vehicle_response`) is a straight Python port of
+`Parse VLM Responses (Vehicle)`'s JS -- regex-extract the `{...}` JSON blob, `json.loads`, the same
+plate-text sanitizer (`_sanitize_plate`: a clean short token passes through as-is, a narrative
+answer gets the most plate-like token pulled out of it instead). Embed text reuses
+`report._vehicle_summary`/`report._person_summary` directly (`ai_worker.py` imports `report`)
+instead of a third copy of that combination logic -- n8n's `Build Embedding Text (Vehicle)`/
+`(Person)` nodes are the second copy, `report.py`'s own use in the alerts report is the first; all
+three now describe a sighting in the exact same one-line format. An embedding-call failure falls
+back to `embedding=None` rather than losing the whole sighting (same decision as the n8n version's
+`continueErrorOutput` nodes) -- only a chat-call/parsing failure routes to
+`db.fail_ai_event(event_id, config.AI_STAGE_MAX_ATTEMPTS)`, mirroring `crop_worker.py`'s
+except-block pattern exactly.
+
+`LLAMA_PROXY_BASE_URL`/`LLAMA_PROXY_TOKEN`/`LLAMA_PROXY_EMBED_PATH` point this stage at
+`llama_slot_proxy` directly, the same host n8n's VLM nodes already call -- `LLAMA_PROXY_TOKEN` is
+optional (blank means no `Authorization` header at all, since `llama_slot_proxy` is unauthenticated
+on the LAN today, same as every VLM call n8n makes directly); it exists for whenever that changes,
+not because it's required now.
+
+Each `profiles.yaml` type entry has its own `timeout_seconds` for that type's chat-completion call
+(falls back to `AI_STAGE_DEFAULT_TIMEOUT_SECONDS`, default 180, if omitted) -- a local model's
+response time genuinely depends on which model/prompt is selected (a longer combined-attributes-
+plus-plate prompt vs. a short one-sentence description prompt), so this is a per-type profile value,
+not a single global one. The embedding call gets its own separate, shorter default
+(`AI_STAGE_EMBED_TIMEOUT_SECONDS`, default 60) -- a single forward pass, not autoregressive
+generation, so normally much faster regardless of which chat model/prompt was used for the same
+row. A timeout still counts as a failure for retry-with-a-cap purposes -- it routes to
+`db.fail_ai_event` exactly like any other chat-call exception (see above), it isn't a special case.
+
+Each poll tick's claimed batch is processed sequentially within the thread (one `_chat_request` at
+a time, same limitation `video_worker.py` already has regardless of its own `*_PARALLEL_LIMIT` --
+see "Video storage" below) -- a slow call only delays this stage's own next claimed row, never the
+crop/video/visit-thumb-crop stages, MQTT ingestion, or the FastAPI app, since each runs in its own
+daemon thread and Python releases the GIL during the blocking HTTP wait. The one shared resource is
+the single global Postgres connection (`db.get_conn()`) every thread already uses -- `ai_worker.py`
+only touches it briefly, for the claim and the final insert, never while waiting on the VLM/
+embedding response.
 
 ### Video storage, Telegram notifications, and the web report UI
 
@@ -984,6 +1068,107 @@ everything in-zone comes back `alert`. Tightening `detections.required_zones` to
 `alerts.required_zones` would change that, but that's a Frigate config decision, not something
 `ingest-worker` can affect.
 
+### Semantic search and the Q&A agent
+
+Answering free-form questions ("any new cars in the last 2 weeks?", "what interesting happened
+today?") combines two different kinds of lookup: **structured filtering** (time range, camera,
+object type -- resolved from natural language into concrete `start`/`end` by the agent itself, then
+passed as real query params to the existing read API) and **semantic/fuzzy matching** over the
+AI-written sighting text for asks that don't map to a column ("anything unusual", "a red truck with
+a ladder rack"). Embeddings are generated by **n8n**, not `ingest-worker` -- preserves the existing
+"`ingest-worker` never calls an LLM" boundary (see above) -- and stored as a `vector` column
+directly on `vehicle_sightings`/`person_sightings` via **pgvector**, not a separate vector DB. This
+keeps the project's "own Postgres instance/schema, no new moving parts" philosophy, and means
+embeddings are swept for free by the existing retention-cleanup delete (`run_retention_cleanup`/
+`purge_older_than`) with no separate sync-on-delete logic needed -- a row's embedding lives and
+dies with the row itself. Regeneration is always possible for any row that still exists, since the
+source text is stored durably alongside it.
+
+`postgres-projects` runs `pgvector/pgvector:pg16` (a drop-in build on top of plain `postgres:16` --
+same data directory/volume, existing data untouched, just adds `CREATE EXTENSION vector`
+capability) instead of plain `postgres:16`; the CI workflow's Postgres service container was
+switched the same way, for the same reason the ffmpeg CI gap got fixed -- a capability the code now
+depends on has to actually be present in the CI service container, not just assumed. `schema.sql`
+adds `CREATE EXTENSION IF NOT EXISTS vector;` near the top (idempotent, applied by `ensure_schema()`
+on every startup like everything else in that file) plus a nullable `embedding vector(768)` column
+on both sighting tables (768 = `nomic-embed-text-v1.5`'s output size, the embedding model chosen for
+this -- one more slot in the user's existing `llama_slot_proxy` multi-model setup, no `mmproj`
+needed since it's text-only) with an HNSW cosine-distance index on each (`vector_cosine_ops` --
+HNSW rather than ivfflat since it needs no existing rows to "train" on, safe to create immediately
+against a column that starts empty).
+
+`db.py` formats a Python list as a pgvector input literal (`"[0.1,0.2,...]"`) passed through
+psycopg2 as a plain string param and cast with `::vector` in SQL (`_vector_literal`), rather than
+depending on the separate `pgvector` package's connection-level type adapter -- avoids that
+package's own registration-ordering hazard (it needs the extension already created in the database
+before it can register) for a column this code only ever writes or ranks by distance, never reads
+back as a Python list. `complete_vehicle_sighting`/`complete_person_sighting` both gained an
+optional `embedding` parameter, stored in the same existing transaction -- no new queue stage, since
+n8n computes the vector *before* calling `POST /sightings/vehicles|persons`, the same request/
+response shape as today plus one more optional field. Omitted or null just means that sighting
+isn't semantically searchable, not an error -- this is how every pre-existing sighting row (from
+before this feature existed) behaves until/unless backfilled.
+
+**`POST /search/semantic`** (`X-API-Key` protected, `db.semantic_search_sightings`): cosine-distance
+(`<=>`) ordered search across whichever of `vehicle_sightings`/`person_sightings` `object_types`
+selects (default both), filtered by the caller-resolved `start`/`end` window -- a POST, not GET,
+since a 768-float array doesn't belong in a query string. `embedding IS NOT NULL` naturally excludes
+sightings that predate this feature or came from an n8n run that didn't attach one; that's a
+narrower result set, not an error. Rows without their own embedding just aren't candidates, same as
+`GET /events`' `q` only ever matching rows that already have a sighting.
+
+**`GET /status`** additionally returns `retention_months` (`config.RETENTION_MONTHS`) and
+`oldest_available_start_ts` (`db.get_retention_info`, `MIN(raw_events.start_ts)`) -- lets the Q&A
+agent tell "nothing happened in that range" apart from "that range was already purged" instead of
+reporting a quiet day that was actually just missing data. The true oldest surviving row can be
+somewhat newer than the nominal `RETENTION_MONTHS` cutoff, since the scheduled sweep runs on its own
+slow cadence -- this reflects what's actually still in the database right now, not the configured
+policy alone.
+
+`n8n/metadata-processor.json` gained one step per branch, right before each existing final POST:
+**Build Embedding Text (Person/Vehicle)** (code node) combines the sighting's fields into one line
+-- the vehicle side reuses the exact same color/body/make/model + notable_features + plate
+combination `report.py`'s `_vehicle_summary` already uses for the alerts report's one-line
+description, so the text that gets embedded matches what a human would read about the same sighting,
+not a separately-invented format -- then **Call Embedding Model (Person/Vehicle)** (HTTP node) POSTs
+it to the new embedding slot, following the existing VLM-call nodes' convention (hardcoded
+`REPLACE_WITH_...` placeholders, no credentials block, since it's unauthenticated on the LAN like
+every other `llama_slot_proxy` call in this project). Both nodes use `onError: continueErrorOutput`
+wired straight into the existing `Insert Person/Vehicle Sighting (API)` node either way (success or
+error output) -- an embedding failure shouldn't lose an already-computed sighting, so the Insert
+node's `embedding` field falls back to `null` via optional chaining
+(`$('Call Embedding Model...').item.json.data?.[0]?.embedding ?? null`) rather than routing through
+`Handle Failure (API)` the way a real VLM-call failure does.
+
+**`n8n/yard-stats-qa.json`** was upgraded in place (same `Ask Webhook`/`Respond` shape any existing
+caller already uses) from a naive "dump the last 200 rows, ask once" workflow -- which had no time
+filtering at all and silently truncated past 200 rows -- into a real tool-calling **AI Agent**
+(`@n8n/n8n-nodes-langchain.agent`, the first use of LangChain-style nodes in this project's `n8n/`
+folder). Its system prompt injects the current date/time (`{{ $now.toISO() }}`) so it resolves
+"last week"/"today" itself before calling any tool, plus the retention-boundary fact from
+`GET /status` above (fetched once up front by a `Get Status (API)` node). Tools, each following the
+existing `httpHeaderAuth`/`REPLACE_AFTER_IMPORT` pattern already used for every `ingest-worker` call
+in this project:
+- **`get_summary_stats`** -> `GET /stats/summary` (aggregate counts)
+- **`search_events`** -> `GET /events` (structured filters: time range, camera, object type, exact
+  substring match)
+- **`semantic_search`** -> a separate sub-workflow, **`n8n/yard-stats-semantic-search-tool.json`**
+  (`@n8n/n8n-nodes-langchain.toolWorkflow`, called via `workflowId`, filled in after both workflows
+  are imported), rather than a single HTTP Request Tool node -- a tool node can only make one HTTP
+  call, but this needs two (embed the query text, then `POST /search/semantic`), and packaging it as
+  its own callable sub-workflow means the 768-float embedding vector is computed and consumed
+  entirely server-side, never round-tripping through the Agent's own context/tokens the way passing
+  it between two separate tool calls would require.
+- **`get_event_detail`** / **`get_visit_sightings`** -> `GET /events/{id}` /
+  `GET /visits/{id}/sightings`, for drilling into whichever specific rows the agent decides are
+  worth a closer look, instead of dumping every row into context up front.
+
+The Chat Model (`@n8n/n8n-nodes-langchain.lmChatOpenAi`) points at the same VLM host via
+`llama_slot_proxy` the old `Ask Qwen` node called directly -- unlike the plain HTTP nodes used
+everywhere else in this project, this LangChain sub-node type requires a credential object to hold
+its base URL, it can't call a bare unauthenticated URL the way `Call Qwen (Attributes + Plate)` etc.
+do; the API Key field can be any placeholder value since `llama_slot_proxy` doesn't check it.
+
 ### Schema (`yard_stats`)
 
 - `raw_events` — one row per Frigate `end` event, any label. Carries all three queue state machines
@@ -1002,7 +1187,9 @@ everything in-zone comes back `alert`. Tightening `detections.required_zones` to
   (see "Visit preview" above).
 - `vehicle_sightings` / `person_sightings` — one row per AI-analyzed event. `vehicle_sightings`
   keeps `plate_text_frigate` (from `raw_events.sub_label`) next to `plate_text_llm` (the OCR
-  model's read) as a cross-check.
+  model's read) as a cross-check. Both also carry a nullable `embedding vector(768)` (pgvector,
+  `nomic-embed-text-v1.5`) for `POST /search/semantic` -- see "Semantic search and the Q&A agent"
+  above.
 
 ### Prerequisites this plan assumes
 
