@@ -16,12 +16,15 @@ def load_profile(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def _chat_request(chat_path: str, prompt: str, crop_image_base64: str, timeout: float) -> dict:
+def _llama_proxy_chat_request(type_config: dict, prompt: str, crop_image_base64: str, timeout: float) -> dict:
+    # The original, still-default shape: llama_slot_proxy speaks an OpenAI-compatible
+    # chat-completions API with no "model" field at all -- the slot is selected entirely by
+    # chat_path (one URL path segment per model), not a body field.
     headers = {}
     if config.LLAMA_PROXY_TOKEN:
         headers["Authorization"] = f"Bearer {config.LLAMA_PROXY_TOKEN}"
     resp = requests.post(
-        f"{config.LLAMA_PROXY_BASE_URL}{chat_path}",
+        f"{config.LLAMA_PROXY_BASE_URL}{type_config['chat_path']}",
         json={
             "messages": [
                 {
@@ -44,7 +47,97 @@ def _chat_request(chat_path: str, prompt: str, crop_image_base64: str, timeout: 
     return resp.json()
 
 
-def parse_sighting_response(response: dict, row: dict) -> dict:
+def _openai_chat_request(type_config: dict, prompt: str, crop_image_base64: str, timeout: float) -> dict:
+    # Same request/response shape llama_slot_proxy already speaks (it's deliberately
+    # OpenAI-compatible) -- the two real differences are the base URL/auth and that OpenAI needs a
+    # "model" field in the body instead of selecting the model via the URL path.
+    headers = {"Authorization": f"Bearer {config.OPENAI_API_KEY}"}
+    resp = requests.post(
+        f"{config.OPENAI_BASE_URL}/v1/chat/completions",
+        json={
+            "model": type_config["model"],
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": f"data:image/jpeg;base64,{crop_image_base64}"},
+                        },
+                    ],
+                }
+            ],
+            "temperature": 0,
+        },
+        headers=headers,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _anthropic_chat_request(type_config: dict, prompt: str, crop_image_base64: str, timeout: float) -> dict:
+    # Claude's Messages API -- a genuinely different shape from the other two providers: auth is
+    # x-api-key + anthropic-version headers (not Authorization: Bearer), images are a "source"
+    # block instead of a data-URI image_url, and max_tokens is required (there's no server-side
+    # default the way OpenAI/llama_slot_proxy have one).
+    headers = {
+        "x-api-key": config.ANTHROPIC_API_KEY,
+        "anthropic-version": config.ANTHROPIC_VERSION,
+    }
+    resp = requests.post(
+        f"{config.ANTHROPIC_BASE_URL}/v1/messages",
+        json={
+            "model": type_config["model"],
+            "max_tokens": type_config.get("max_tokens", config.AI_STAGE_DEFAULT_MAX_TOKENS),
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": prompt},
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/jpeg",
+                                "data": crop_image_base64,
+                            },
+                        },
+                    ],
+                }
+            ],
+        },
+        headers=headers,
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+def _chat_request(type_config: dict, prompt: str, crop_image_base64: str, timeout: float) -> dict:
+    # Dispatches on this type's own `provider` (profiles.yaml, per object type -- see
+    # profiles.yaml.example) -- "llama_proxy" (the default, unchanged behavior) if the key is
+    # omitted entirely, so an existing deployment's profiles.yaml needs no edit to keep working.
+    provider = type_config.get("provider", "llama_proxy")
+    if provider == "openai":
+        return _openai_chat_request(type_config, prompt, crop_image_base64, timeout)
+    if provider == "anthropic":
+        return _anthropic_chat_request(type_config, prompt, crop_image_base64, timeout)
+    return _llama_proxy_chat_request(type_config, prompt, crop_image_base64, timeout)
+
+
+def _extract_response_text(response: dict, type_config: dict | None) -> str:
+    # Claude's response shape (content[0].text) differs from the OpenAI-compatible shape
+    # llama_slot_proxy and OpenAI itself both use (choices[0].message.content) -- type_config is
+    # optional so existing callers/tests that only ever dealt with the OpenAI-compatible shape
+    # keep working unchanged.
+    if (type_config or {}).get("provider") == "anthropic":
+        return response["content"][0]["text"]
+    return response["choices"][0]["message"]["content"]
+
+
+def parse_sighting_response(response: dict, row: dict, type_config: dict | None = None) -> dict:
     # No JSON parsing, no per-type branching -- the whole chat response is the sighting's
     # description verbatim. Whatever profiles.yaml's event_prompt asked the model to mention
     # (color, plate, breed, clothing, whatever) is already in that text; there's nothing left to
@@ -52,8 +145,35 @@ def parse_sighting_response(response: dict, row: dict) -> dict:
     return {
         "raw_event_id": row["id"],
         "object_label": row.get("objects"),
-        "description": response["choices"][0]["message"]["content"],
+        "description": _extract_response_text(response, type_config),
     }
+
+
+def _embed_request(text: str, timeout: float) -> dict:
+    # config.EMBEDDING_PROVIDER is independent of whichever provider(s) profiles.yaml routes chat
+    # calls to -- Claude has no embeddings endpoint at all, so a deployment using
+    # `provider: anthropic` for chat still needs this set to "llama_proxy" (default) or "openai"
+    # for semantic search/backfill to work.
+    if config.EMBEDDING_PROVIDER == "openai":
+        headers = {"Authorization": f"Bearer {config.OPENAI_API_KEY}"}
+        resp = requests.post(
+            f"{config.OPENAI_BASE_URL}/v1/embeddings",
+            json={"model": config.OPENAI_EMBED_MODEL, "input": text},
+            headers=headers,
+            timeout=timeout,
+        )
+    else:
+        headers = {}
+        if config.LLAMA_PROXY_TOKEN:
+            headers["Authorization"] = f"Bearer {config.LLAMA_PROXY_TOKEN}"
+        resp = requests.post(
+            f"{config.LLAMA_PROXY_BASE_URL}{config.LLAMA_PROXY_EMBED_PATH}",
+            json={"input": text},
+            headers=headers,
+            timeout=timeout,
+        )
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _embed_text(text: str | None) -> list[float] | None:
@@ -63,13 +183,7 @@ def _embed_text(text: str | None) -> list[float] | None:
     if not text:
         return None
     try:
-        resp = requests.post(
-            f"{config.LLAMA_PROXY_BASE_URL}{config.LLAMA_PROXY_EMBED_PATH}",
-            json={"input": text},
-            timeout=config.AI_STAGE_EMBED_TIMEOUT_SECONDS,
-        )
-        resp.raise_for_status()
-        embedding = resp.json()["data"][0]["embedding"]
+        embedding = _embed_request(text, config.AI_STAGE_EMBED_TIMEOUT_SECONDS)["data"][0]["embedding"]
         if len(embedding) != config.EMBEDDING_DIMENSIONS:
             logger.warning(
                 "Embedding call returned %d dims, expected %d (wrong model loaded at "
@@ -92,13 +206,7 @@ def embed_query_text(text: str) -> list[float]:
     response instead of silently returning empty results."""
     if not text or not text.strip():
         raise ValueError("query text must not be empty")
-    resp = requests.post(
-        f"{config.LLAMA_PROXY_BASE_URL}{config.LLAMA_PROXY_EMBED_PATH}",
-        json={"input": text},
-        timeout=config.AI_STAGE_EMBED_TIMEOUT_SECONDS,
-    )
-    resp.raise_for_status()
-    embedding = resp.json()["data"][0]["embedding"]
+    embedding = _embed_request(text, config.AI_STAGE_EMBED_TIMEOUT_SECONDS)["data"][0]["embedding"]
     if len(embedding) != config.EMBEDDING_DIMENSIONS:
         raise ValueError(
             f"embedding backend returned {len(embedding)} dims, expected {config.EMBEDDING_DIMENSIONS} "
@@ -114,7 +222,10 @@ def run_embedding_backfill(limit: int) -> dict:
     # ever re-embeds each sighting's own already-stored description, never re-runs the VLM. Covers
     # both event-level and visit-level sightings now -- one universal shape, one backfill loop
     # each, no more vehicle/person split to run twice.
-    if not config.LLAMA_PROXY_BASE_URL:
+    if config.EMBEDDING_PROVIDER == "openai":
+        if not config.OPENAI_API_KEY:
+            raise RuntimeError("OPENAI_API_KEY is not configured")
+    elif not config.LLAMA_PROXY_BASE_URL:
         raise RuntimeError("LLAMA_PROXY_BASE_URL is not configured")
 
     result = {"sightings_processed": 0, "sightings_updated": 0, "visit_sightings_processed": 0, "visit_sightings_updated": 0}
@@ -147,8 +258,8 @@ def process_claimed_event(row: dict, profile: dict) -> None:
     timeout = type_config.get("timeout_seconds", config.AI_STAGE_DEFAULT_TIMEOUT_SECONDS)
 
     try:
-        response = _chat_request(type_config["chat_path"], type_config["event_prompt"], row["crop_image_base64"], timeout)
-        fields = parse_sighting_response(response, row)
+        response = _chat_request(type_config, type_config["event_prompt"], row["crop_image_base64"], timeout)
+        fields = parse_sighting_response(response, row, type_config)
         embedding = _embed_text(fields["description"])
         db.complete_sighting(fields["raw_event_id"], fields["object_label"], fields["description"], embedding)
         logger.info("AI analysis done for raw_event id=%s object_label=%s", event_id, fields["object_label"])

@@ -1,9 +1,10 @@
 # Yard Stats + Vehicle Metadata
 
 Extends an existing [Frigate](https://frigate.video) NVR setup with a pipeline that logs yard/
-driveway activity and uses local vision-language models to describe vehicles (color, body type,
-make, license plate) and people passing through camera zones — no cloud API calls, and nothing
-here ever touches Frigate's own database.
+driveway activity and uses vision-language models to describe vehicles (color, body type, make,
+license plate) and people passing through camera zones — local by default, with an optional
+per-object-type hosted provider (OpenAI/Claude) if you want one — and nothing here ever touches
+Frigate's own database.
 
 ![Web report UI demo](docs/images/web-ui-demo.gif)
 
@@ -21,10 +22,12 @@ footage) — just to show the UI itself in motion.*
   (per-event and/or per-visit) and sends Telegram notifications (photo/video per event, or one
   summary + composite preview grid/GIF per visit).
 - An internal AI-stage poll loop (`ai_worker.py`, off by default) sends the cropped image (or, for
-  a visit, a composite grid of frames sampled across its whole span) to a locally-hosted VLM, using
-  whatever prompt `profiles.yaml` defines for that Frigate object type — a vehicle prompt asking
-  for color/body-type/plate, a person prompt asking for a clothing description, and so on. Frigate's
-  own LPR read is kept alongside whatever the VLM says as a cross-check.
+  a visit, a composite grid of frames sampled across its whole span) to a VLM — locally-hosted by
+  default, or OpenAI/Claude per object type if you'd rather use a hosted provider for one or more
+  types (see [`docs/configuration.md`](docs/configuration.md#hosted-vlm-providers-openai--claude))
+  — using whatever prompt `profiles.yaml` defines for that Frigate object type — a vehicle prompt
+  asking for color/body-type/plate, a person prompt asking for a clothing description, and so on.
+  Frigate's own LPR read is kept alongside whatever the VLM says as a cross-check.
 - A read/query/report/AI-queue API on `ingest-worker` (events, visits, sightings, aggregate stats,
   HTML report generation, plus the AI-stage queue mechanics the internal stage uses and n8n or any
   other caller can use instead) and a natural-language
@@ -126,11 +129,12 @@ object type) since that maps cleanly to real fields.
 Under the hood this uses **pgvector** (a Postgres extension), not a separate vector database — the
 embeddings live as one more column right alongside everything else in the same universal `sightings`/
 `visit_sightings` tables, so there's no extra service to run or keep in sync. The actual embedding
-model is one more slot on your locally-hosted VLM setup (e.g.
-[`llama-slot-proxy`](https://github.com/shuricksumy/llama-slot-proxy)) — see
-[`docs/configuration.md`](docs/configuration.md) for `LLAMA_PROXY_EMBED_PATH`/
-`EMBEDDING_DIMENSIONS`, and `POST /embeddings/backfill` to fill this in for sightings that already
-existed before semantic search was turned on.
+model is, by default, one more slot on your locally-hosted VLM setup (e.g.
+[`llama-slot-proxy`](https://github.com/shuricksumy/llama-slot-proxy)), or OpenAI's own embeddings
+API instead (`EMBEDDING_PROVIDER=openai`) — see [`docs/configuration.md`](docs/configuration.md)
+for `LLAMA_PROXY_EMBED_PATH`/`EMBEDDING_DIMENSIONS`/`EMBEDDING_PROVIDER`, and
+`POST /embeddings/backfill` to fill this in for sightings that already existed before semantic
+search was turned on.
 
 ## Repository layout
 
@@ -160,7 +164,10 @@ Mosquitto broker) for a from-scratch dev stack with no external broker dependenc
   the low-res detect stream) — clips and crops come from the record stream.
 - A locally-hosted OpenAI-compatible VLM endpoint (e.g. a `llama.cpp` server, or
   [`llama-slot-proxy`](https://github.com/shuricksumy/llama-slot-proxy) — see Related projects
-  below) reachable over HTTP.
+  below) reachable over HTTP — or, per object type, a hosted provider (OpenAI/Claude) instead, see
+  [`docs/configuration.md`](docs/configuration.md#hosted-vlm-providers-openai--claude). Semantic
+  search's embedding step is separately configurable to either a local model or OpenAI (Claude has
+  no embeddings API), regardless of which provider(s) chat routes to.
 - (Optional) An n8n instance, if you want the daily/alerts report emails or the Q&A webhook — not
   required for the core pipeline, which analyzes events internally via `ai_worker.py`.
 - Docker + Docker Compose.

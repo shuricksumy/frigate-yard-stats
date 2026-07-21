@@ -620,6 +620,77 @@ events, never visits), `GET /events/{id}`'s `sighting` -- the events
 stage's own result -- is unaffected and unchanged; the alert stage/`alert_sighting` field only
 ever applies to the Visits tab.
 
+### Cloud VLM providers (OpenAI / Claude) as an alternative to `llama_slot_proxy`
+
+Both internal AI stages (`ai_worker.py`/`alert_ai_worker.py`) originally spoke exactly one wire
+shape for their chat call -- `llama_slot_proxy`'s OpenAI-compatible chat-completions API, model
+selection entirely via `chat_path` (one URL path segment per slot), no `model` field in the body
+at all. That single-provider assumption was lifted into a **per-object-type provider dispatch**:
+`ai_worker._chat_request(type_config, prompt, crop_image_base64, timeout)` now reads
+`type_config["provider"]` (`profiles.yaml`, same tier the always-per-type `chat_path`/
+`event_prompt`/`alert_prompt`/`timeout_seconds` already live at -- **not** `profile_config.py`'s
+two-tier `defaults:`-then-hardcoded-fallback resolver, since there's no sensible profile-wide
+default for "which cloud account" the way there is for e.g. `crop_padding_pct`) and dispatches to
+one of three private request builders: `_llama_proxy_chat_request` (today's original behavior,
+unchanged, and still the default when `provider` is omitted entirely -- an existing deployment's
+`profiles.yaml` needs no edit), `_openai_chat_request`, or `_anthropic_chat_request`.
+`alert_ai_worker.process_claimed_visit` calls the exact same `ai_worker._chat_request` (it already
+imported `ai_worker` and called its `_chat_request` directly, pre-dating this change) with its own
+`type_config`/`alert_prompt`, so both stages get every provider for free from one dispatch point --
+no alert-stage-specific provider code exists anywhere.
+
+OpenAI's Chat Completions API is close enough to `llama_slot_proxy`'s own (deliberately
+OpenAI-compatible) shape that `_openai_chat_request` reuses the identical message/content-block
+structure (`image_url` with a `data:image/jpeg;base64,...` URI) -- the only real differences are
+the base URL/auth (`OPENAI_BASE_URL`/`OPENAI_API_KEY`, `Authorization: Bearer` header) and that
+OpenAI selects the model via a `"model"` body field (`type_config["model"]`) rather than the URL
+path, since OpenAI has no per-model URL convention the way a self-hosted multi-slot proxy does.
+Claude's Messages API is a genuinely different shape, not just a different host:
+`_anthropic_chat_request` posts to `{ANTHROPIC_BASE_URL}/v1/messages` with `x-api-key`/
+`anthropic-version` headers (not `Authorization: Bearer`), an image `source` block instead of a
+data-URI `image_url` (`{"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
+"data": ...}}`), and a required top-level `max_tokens` -- unlike the other two providers, Claude's
+API has no server-side default and 400s without it. `max_tokens` follows the identical two-tier
+shape `timeout_seconds` already established (`type_config.get("max_tokens",
+config.AI_STAGE_DEFAULT_MAX_TOKENS)`, default `1024`), for the same reason: a type-appropriate
+value (a one-sentence person description needs far fewer output tokens than a detailed vehicle
+plate/make/model/features answer), not a single global constant with no per-type escape hatch.
+
+Response parsing has the identical branch point, in reverse: `ai_worker._extract_response_text
+(response, type_config)` reads `content[0]["text"]` for `provider: anthropic`, else falls through
+to the original `choices[0]["message"]["content"]` shape both `llama_proxy` and `openai` share.
+`type_config` is optional (defaults treat a missing/`None` config as the original shape) so every
+pre-existing caller/test that only ever dealt with the OpenAI-compatible response continues to
+work with no signature change forced on it -- `parse_sighting_response`/
+`parse_alert_sighting_response` both grew an optional third `type_config` parameter for exactly
+this reason, threaded through from `process_claimed_event`/`process_claimed_visit`, which already
+had the row's `type_config` in scope. No JSON parsing was added on either branch -- this is
+strictly "which response envelope holds the text," not a return to the structured-response world
+this project deliberately left behind (see "Universal sightings" above); the extracted string
+still becomes `sightings.description`/`visit_sightings.description` verbatim regardless of which
+provider produced it.
+
+**Embeddings are a separate axis, deliberately not folded into the same per-type `provider`
+key.** Claude has no embeddings endpoint at all, so a type routed to `provider: anthropic` for its
+chat/description call still needs semantic search's embedding step pointed somewhere else --
+`config.EMBEDDING_PROVIDER` (`llama_proxy` default, or `openai`) is a **global** `.env` setting,
+not a `profiles.yaml` per-type one, read by a new shared `ai_worker._embed_request(text, timeout)`
+helper that both `_embed_text` (the AI-stage's own post-chat embed step) and `embed_query_text`
+(the web UI Search tab's query-embed path) now call instead of building the `requests.post` call
+inline themselves. `OPENAI_EMBED_MODEL` (default `text-embedding-3-small`, 1536 dimensions) only
+matters when `EMBEDDING_PROVIDER=openai`; switching providers still means updating
+`EMBEDDING_DIMENSIONS` and re-running `POST /embeddings/backfill?confirm=true` for the same reason
+switching local embedding models already required one (an incomparable vector space regardless of
+dimension) -- this migration cost is unchanged by this feature, not new.
+
+This is opt-in and additive in every direction: a deployment that never sets `provider` in
+`profiles.yaml`, never sets `EMBEDDING_PROVIDER`, and never sets `OPENAI_API_KEY`/
+`ANTHROPIC_API_KEY` behaves byte-for-byte identically to before this existed (confirmed by the
+full existing test suite passing unmodified). See `frigate/profiles.yaml.example`'s `car` entry
+and `frigate/.env.example` for the exact keys, and `docs/configuration.md`'s "Hosted VLM providers"
+section for the operational/cost/privacy tradeoffs and which provider tends to suit which kind of
+description task.
+
 ### Per-object-type overrides (`profile_config.py`)
 
 A number of settings live entirely in `profiles.yaml`, not `.env` -- deliberately: these are all

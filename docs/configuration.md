@@ -367,3 +367,89 @@ enabled, never every mapped type unconditionally. See "Per-object-type overrides
   fallback timeouts; the real per-type chat timeout belongs in `profiles.yaml` itself
   (`timeout_seconds`), since a local model's response time genuinely depends on which model/prompt
   you've picked for that type. Plain technical knobs, `profiles.yaml`'s `defaults:` only.
+
+## Hosted VLM providers (OpenAI / Claude)
+
+Both internal AI stages default to calling a **locally-hosted** model through `LLAMA_PROXY_BASE_URL`
+(e.g. `llama_slot_proxy`) — the "no cloud calls" behavior this project started with. You can
+instead route individual object types to a hosted provider (OpenAI or Anthropic/Claude) by adding
+two keys to that type's `profiles.yaml` entry, alongside (or instead of) `chat_path`:
+
+```yaml
+object_types:
+  car:
+    provider: openai        # or "anthropic"; omit entirely to keep using llama_proxy
+    model: gpt-4o            # or e.g. claude-opus-4-8 for anthropic
+    # max_tokens: 1024       # anthropic only, optional -- see below
+    event_prompt: >-
+      ...
+    alert_prompt: >-
+      ...
+```
+
+This is a **per-object-type** choice, exactly like `chat_path` already is — one type can stay on
+your local model while another routes to a hosted one, in the same file. A type with no `provider`
+key behaves exactly as before (`llama_proxy`, selected via `chat_path`); nothing changes for an
+existing deployment that never sets this.
+
+| `provider` | Needs in `.env` | Needs in `profiles.yaml` (per type) |
+|---|---|---|
+| `llama_proxy` (default) | `LLAMA_PROXY_BASE_URL` (+ optional `LLAMA_PROXY_TOKEN`) | `chat_path` |
+| `openai` | `OPENAI_API_KEY` | `model` (e.g. `gpt-4o`) |
+| `anthropic` | `ANTHROPIC_API_KEY` | `model` (e.g. `claude-opus-4-8`), optional `max_tokens` (default `1024`, via `AI_STAGE_DEFAULT_MAX_TOKENS`) |
+
+`chat_path` is only read for `llama_proxy`; `model`/`max_tokens` are only read for `openai`/
+`anthropic`. Mixing them on the same entry is harmless (the unused one is simply ignored) but only
+set the ones your chosen provider actually needs — see `frigate/profiles.yaml.example`'s `car`
+entry for both hosted shapes written out in full.
+
+**Embeddings (semantic search) are configured separately, and never follow `provider` above** —
+`EMBEDDING_PROVIDER` (`.env`, `llama_proxy` default or `openai`) applies globally, not per object
+type. This is a hard constraint, not a design choice: Claude has no embeddings API at all, so a
+type routed to `provider: anthropic` for its description still needs `EMBEDDING_PROVIDER` set to
+`llama_proxy` (default) or `openai` for that same sighting's embedding vector to get computed at
+all. Switching `EMBEDDING_PROVIDER` to `openai` also means setting `EMBEDDING_DIMENSIONS=1536`
+(OpenAI's `text-embedding-3-small`, the default `OPENAI_EMBED_MODEL`) and re-running
+`POST /embeddings/backfill?confirm=true` — same migration dance described under
+`EMBEDDING_DIMENSIONS` above, since a different model's vectors are an incomparable vector space
+regardless of dimension.
+
+**Cost and privacy, briefly:** a hosted provider means that type's cropped images (and, for the
+alerts stage, composite grids) leave your network on every analyzed sighting, billed per request —
+worth weighing against `llama_slot_proxy`'s one-time hardware cost and zero marginal cost per
+sighting. A common middle ground is routing only your highest-value type (e.g. `car`, for plate/
+make/model accuracy) to a hosted provider while everything else stays local.
+
+### Which model should I actually use?
+
+There's no single right answer — it depends on what you're optimizing for. Some starting points,
+based on what each provider is actually good at for this project's kind of task (a single cropped
+photo or a 2×2 composite grid, answered as one or two free-text sentences):
+
+- **Staying local (`llama_proxy`, the default)** — zero marginal cost, zero data leaving your
+  network, and genuinely adequate quality for most of this project's prompts (color/body-type/
+  plate/clothing description is a much easier task than open-ended reasoning). The trade-off is
+  hardware: plate-text legibility and make/model identification noticeably improve with a larger
+  local model, which needs more VRAM/compute than a small one. Start here if privacy or ongoing
+  cost matters more than squeezing out the last bit of accuracy — it's what this project is
+  designed around, and every other section of this doc assumes it.
+- **OpenAI (`gpt-4o` or a newer GPT-4-class vision model)** — a reasonable middle ground: cheaper
+  per-request than Claude's higher-tier models, fast, and its vision quality on the kind of crops
+  this project sends (a single vehicle/person in frame, decent resolution) is solid for color/
+  body-type/clothing description. Plate-text OCR accuracy varies more than a dedicated OCR model
+  would give you — Frigate's own LPR read (`raw_events.sub_label`) is still captured on every row
+  regardless of what the VLM says, specifically as a cross-check for exactly this reason.
+- **Claude (`claude-opus-4-8` or `claude-sonnet-5`)** — the more capable option for the *composite
+  grid* prompt specifically (`alert_prompt`, the visit-level "what changed across these 4 frames"
+  task) — reading fine detail across multiple panels and reasoning about what changed between them
+  is closer to genuine visual reasoning than the single-frame `event_prompt` case, and that's
+  where a stronger model's accuracy shows up most. `claude-sonnet-5` is the cheaper, faster choice
+  if `claude-opus-4-8`'s cost/latency isn't worth it for your volume — both are meaningfully more
+  expensive per request than OpenAI's `gpt-4o` tier or a local model's zero marginal cost.
+
+**A practical split**, if you want to try hosted providers without committing everything to one:
+route `car`/`truck`'s `event_prompt` (single-frame, plate-legibility-sensitive) to whichever local
+or hosted model reads plates best in your own testing, and leave `person`/`dog` on a cheaper/local
+model, since clothing-color/breed description doesn't benefit as much from a stronger model. Since
+this is all per-object-type in `profiles.yaml`, testing a combination costs nothing but editing the
+file and restarting the container — no code change, no redeploy of a different image.

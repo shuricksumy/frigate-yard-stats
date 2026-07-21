@@ -73,6 +73,86 @@ def test_parse_sighting_response_uses_raw_events_objects_as_label():
     assert fields["description"] == "red sedan, roof rack, plate 10MG407"
 
 
+def test_parse_sighting_response_extracts_anthropic_shape_when_provider_set():
+    response = {"content": [{"type": "text", "text": "silver hatchback"}]}
+    fields = ai_worker.parse_sighting_response(
+        response, {"id": 1, "objects": "car"}, {"provider": "anthropic"},
+    )
+    assert fields["description"] == "silver hatchback"
+
+
+# ---- _chat_request provider dispatch ----
+
+def test_chat_request_openai_provider_sends_model_and_bearer_auth(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "https://api.openai.com")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test")
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured.update(url=url, json=json, headers=headers)
+        return _Resp(_chat_response("blue suv"))
+
+    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    type_config = {"provider": "openai", "model": "gpt-4o"}
+    response = ai_worker._chat_request(type_config, "describe it", "aGVsbG8=", 30)
+
+    assert captured["url"] == "https://api.openai.com/v1/chat/completions"
+    assert captured["json"]["model"] == "gpt-4o"
+    assert captured["headers"]["Authorization"] == "Bearer sk-test"
+    assert response["choices"][0]["message"]["content"] == "blue suv"
+
+
+def test_chat_request_anthropic_provider_uses_messages_api_shape(monkeypatch):
+    monkeypatch.setattr(config, "ANTHROPIC_BASE_URL", "https://api.anthropic.com")
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr(config, "ANTHROPIC_VERSION", "2023-06-01")
+    monkeypatch.setattr(config, "AI_STAGE_DEFAULT_MAX_TOKENS", 1024)
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured.update(url=url, json=json, headers=headers)
+        return _Resp({"content": [{"type": "text", "text": "silver hatchback"}]})
+
+    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    type_config = {"provider": "anthropic", "model": "claude-opus-4-8"}
+    ai_worker._chat_request(type_config, "describe it", "aGVsbG8=", 30)
+
+    assert captured["url"] == "https://api.anthropic.com/v1/messages"
+    assert captured["json"]["model"] == "claude-opus-4-8"
+    assert captured["json"]["max_tokens"] == 1024  # falls back to config default
+    assert captured["headers"]["x-api-key"] == "sk-ant-test"
+    assert captured["headers"]["anthropic-version"] == "2023-06-01"
+    image_block = captured["json"]["messages"][0]["content"][1]
+    assert image_block == {
+        "type": "image",
+        "source": {"type": "base64", "media_type": "image/jpeg", "data": "aGVsbG8="},
+    }
+
+
+def test_chat_request_anthropic_provider_uses_per_type_max_tokens(monkeypatch):
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "sk-ant-test")
+    captured = {}
+    monkeypatch.setattr(
+        ai_worker.requests, "post",
+        lambda url, json=None, **k: captured.update(json=json) or _Resp({"content": [{"text": "x"}]}),
+    )
+    type_config = {"provider": "anthropic", "model": "claude-opus-4-8", "max_tokens": 256}
+    ai_worker._chat_request(type_config, "describe it", "aGVsbG8=", 30)
+    assert captured["json"]["max_tokens"] == 256
+
+
+def test_chat_request_defaults_to_llama_proxy_when_provider_omitted(monkeypatch):
+    monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
+    calls = []
+    monkeypatch.setattr(
+        ai_worker.requests, "post",
+        lambda url, **k: calls.append(url) or _Resp(_chat_response("x")),
+    )
+    type_config = {"chat_path": "/vehicle-slot/v1/chat/completions"}
+    ai_worker._chat_request(type_config, "describe it", "aGVsbG8=", 30)
+    assert calls == ["http://llama.test/vehicle-slot/v1/chat/completions"]
+
+
 # ---- load_profile ----
 
 def test_load_profile_parses_real_file():
@@ -277,7 +357,100 @@ def test_process_claimed_event_embedding_failure_still_inserts_sighting(monkeypa
     assert not failed
 
 
+def test_process_claimed_event_routes_to_anthropic_provider(monkeypatch):
+    # End-to-end (mocked HTTP) with a type routed to Claude instead of llama_proxy -- confirms
+    # process_claimed_event actually threads type_config through _chat_request/parse_sighting_response,
+    # not just that the two pieces work in isolation.
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")  # embeddings stay local
+
+    def fake_post(url, **kwargs):
+        if url.endswith("/v1/messages"):
+            return _Resp({"content": [{"type": "text", "text": "silver hatchback"}]})
+        return _Resp(_embed_response([0.1, 0.2]))
+
+    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    inserted = []
+    monkeypatch.setattr(db, "complete_sighting", lambda *a, **k: inserted.append(a) or 1)
+    failed = []
+    monkeypatch.setattr(db, "fail_ai_event", lambda *a, **k: failed.append((a, k)))
+
+    profile = {
+        "object_types": {
+            "car": {"provider": "anthropic", "model": "claude-opus-4-8", "event_prompt": "describe it"},
+        },
+    }
+    row = {"id": 20, "objects": "car", "crop_image_base64": "aGVsbG8=", "sub_label": None, "det_id": "d9"}
+    ai_worker.process_claimed_event(row, profile)
+
+    assert not failed
+    assert len(inserted) == 1
+    assert inserted[0][:3] == (20, "car", "silver hatchback")
+
+
 # ---- run_embedding_backfill ----
+
+def test_run_embedding_backfill_requires_openai_api_key_when_embedding_provider_is_openai(monkeypatch):
+    monkeypatch.setattr(config, "EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "")
+    with pytest.raises(RuntimeError):
+        ai_worker.run_embedding_backfill(limit=10)
+
+
+# ---- _embed_request provider dispatch ----
+
+def test_embed_request_uses_openai_when_embedding_provider_is_openai(monkeypatch):
+    monkeypatch.setattr(config, "EMBEDDING_PROVIDER", "openai")
+    monkeypatch.setattr(config, "OPENAI_BASE_URL", "https://api.openai.com")
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(config, "OPENAI_EMBED_MODEL", "text-embedding-3-small")
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured.update(url=url, json=json, headers=headers)
+        return _Resp(_embed_response([0.1, 0.2]))
+
+    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    ai_worker._embed_request("a red truck", 30)
+
+    assert captured["url"] == "https://api.openai.com/v1/embeddings"
+    assert captured["json"] == {"model": "text-embedding-3-small", "input": "a red truck"}
+    assert captured["headers"]["Authorization"] == "Bearer sk-test"
+
+
+def test_embed_request_sends_llama_proxy_token_when_set(monkeypatch):
+    monkeypatch.setattr(config, "EMBEDDING_PROVIDER", "llama_proxy")
+    monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
+    monkeypatch.setattr(config, "LLAMA_PROXY_EMBED_PATH", "/embed-slot/v1/embeddings")
+    monkeypatch.setattr(config, "LLAMA_PROXY_TOKEN", "shh-secret")
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured.update(url=url, headers=headers)
+        return _Resp(_embed_response([0.1, 0.2]))
+
+    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    ai_worker._embed_request("a red truck", 30)
+
+    assert captured["url"] == "http://llama.test/embed-slot/v1/embeddings"
+    assert captured["headers"]["Authorization"] == "Bearer shh-secret"
+
+
+def test_embed_request_sends_no_auth_header_when_llama_proxy_token_blank(monkeypatch):
+    monkeypatch.setattr(config, "EMBEDDING_PROVIDER", "llama_proxy")
+    monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
+    monkeypatch.setattr(config, "LLAMA_PROXY_TOKEN", "")
+    captured = {}
+
+    def fake_post(url, json=None, headers=None, timeout=None):
+        captured.update(headers=headers)
+        return _Resp(_embed_response([0.1, 0.2]))
+
+    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    ai_worker._embed_request("a red truck", 30)
+
+    assert captured["headers"] == {}
+
 
 # ---- embed_query_text (web UI Search tab's own embed-then-search entry point) ----
 

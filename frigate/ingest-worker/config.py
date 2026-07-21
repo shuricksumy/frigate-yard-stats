@@ -297,6 +297,28 @@ LLAMA_PROXY_BASE_URL = _env("LLAMA_PROXY_BASE_URL", "").rstrip("/")
 # Authorization header is sent at all.
 LLAMA_PROXY_TOKEN = _env("LLAMA_PROXY_TOKEN", "")
 LLAMA_PROXY_EMBED_PATH = _env("LLAMA_PROXY_EMBED_PATH", "/REPLACE_WITH_EMBED_SLOT/v1/embeddings")
+# Hosted-provider credentials, opt-in per profiles.yaml object type via `provider: openai` /
+# `provider: anthropic` (see profiles.yaml.example) -- llama_slot_proxy above stays the default for
+# any type that doesn't set `provider` at all, so a deployment that never touches these two blocks
+# behaves exactly as before. Only required for whichever provider(s) a profiles.yaml entry actually
+# names; an unset key/token for a provider nothing routes to is simply never read.
+OPENAI_API_KEY = _env("OPENAI_API_KEY", "")
+OPENAI_BASE_URL = _env("OPENAI_BASE_URL", "https://api.openai.com").rstrip("/")
+ANTHROPIC_API_KEY = _env("ANTHROPIC_API_KEY", "")
+ANTHROPIC_BASE_URL = _env("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+ANTHROPIC_VERSION = _env("ANTHROPIC_VERSION", "2023-06-01")
+# Claude's Messages API requires max_tokens on every request (OpenAI/llama_slot_proxy don't) --
+# this is the fallback for a `provider: anthropic` type that doesn't set its own `max_tokens`
+# (same two-tier shape timeout_seconds already has: per-type value if set, else this constant).
+AI_STAGE_DEFAULT_MAX_TOKENS = 1024
+# Which backend _embed_text/embed_query_text call -- "llama_proxy" (default, unchanged behavior)
+# or "openai". Independent of the chat provider(s) profiles.yaml routes individual object types to
+# -- Claude has no embeddings endpoint at all, so a deployment running `provider: anthropic` for
+# chat still needs either llama_proxy (default) or "openai" here for semantic search/backfill to
+# work. OPENAI_EMBED_MODEL only matters when this is "openai"; EMBEDDING_DIMENSIONS must still
+# match whatever model actually answers (1536 for text-embedding-3-small, OpenAI's own default).
+EMBEDDING_PROVIDER = _env("EMBEDDING_PROVIDER", "llama_proxy")
+OPENAI_EMBED_MODEL = _env("OPENAI_EMBED_MODEL", "text-embedding-3-small")
 # Fallback chat-completion timeout (seconds) for a profiles.yaml entry that doesn't set its own
 # timeout_seconds -- a local model's response time genuinely varies by prompt/model, so the real
 # per-call value lives in the profile, not here (see profiles.yaml's own comment). A technical

@@ -9,7 +9,7 @@ import profile_config
 logger = logging.getLogger(__name__)
 
 
-def parse_alert_sighting_response(response: dict, row: dict) -> dict:
+def parse_alert_sighting_response(response: dict, row: dict, type_config: dict | None = None) -> dict:
     # Same shape as ai_worker.parse_sighting_response, just keyed by visit_id instead of
     # raw_event_id -- no JSON parsing, no per-type branching. alert_prompt already asks the model
     # to cover both static attributes and what changed across the grid's 4 frames in one flowing
@@ -17,7 +17,7 @@ def parse_alert_sighting_response(response: dict, row: dict) -> dict:
     return {
         "visit_id": row["id"],
         "object_label": row.get("objects"),
-        "description": response["choices"][0]["message"]["content"],
+        "description": ai_worker._extract_response_text(response, type_config),
     }
 
 
@@ -33,9 +33,9 @@ def process_claimed_visit(row: dict, profile: dict) -> None:
 
     try:
         response = ai_worker._chat_request(
-            type_config["chat_path"], type_config["alert_prompt"], row["crop_image_base64"], timeout,
+            type_config, type_config["alert_prompt"], row["crop_image_base64"], timeout,
         )
-        fields = parse_alert_sighting_response(response, row)
+        fields = parse_alert_sighting_response(response, row, type_config)
         embedding = ai_worker._embed_text(fields["description"])
         db.complete_visit_sighting(fields["visit_id"], fields["object_label"], fields["description"], embedding)
         logger.info("Alert AI analysis done for visit id=%s object_label=%s", visit_id, fields["object_label"])

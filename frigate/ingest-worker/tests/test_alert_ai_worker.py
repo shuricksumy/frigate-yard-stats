@@ -294,6 +294,49 @@ def test_process_claimed_visit_success(monkeypatch):
     assert calls[0] == "http://llama.test/vehicle-slot/v1/chat/completions"
 
 
+def test_process_claimed_visit_routes_to_openai_provider(monkeypatch):
+    # Confirms process_claimed_visit threads type_config through ai_worker._chat_request/
+    # parse_alert_sighting_response the same way ai_worker.process_claimed_event does.
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test")
+    captured = {}
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, json=None, **kwargs):
+        if url.endswith("/v1/chat/completions"):
+            captured.update(url=url, json=json)
+            return _Resp({"choices": [{"message": {"content": "orange suv, drove past"}}]})
+        return _Resp({"data": [{"embedding": [0.1, 0.2]}]})
+
+    monkeypatch.setattr(alert_ai_worker.ai_worker.requests, "post", fake_post)
+    inserted = []
+    monkeypatch.setattr(db, "complete_visit_sighting", lambda *a, **k: inserted.append(a) or 1)
+    failed = []
+    monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: failed.append((a, k)))
+
+    profile = {
+        "object_types": {
+            "car": {"provider": "openai", "model": "gpt-4o", "alert_prompt": "describe the grid"},
+        },
+    }
+    row = {"id": 15, "objects": "car", "crop_image_base64": "aGVsbG8=", "det_id": "d7"}
+    alert_ai_worker.process_claimed_visit(row, profile)
+
+    assert not failed
+    assert len(inserted) == 1
+    assert inserted[0][:3] == (15, "car", "orange suv, drove past")
+    assert captured["url"] == f"{config.OPENAI_BASE_URL}/v1/chat/completions"
+    assert captured["json"]["model"] == "gpt-4o"
+
+
 def test_process_claimed_visit_unmapped_object_type_is_skipped(monkeypatch):
     inserted = []
     monkeypatch.setattr(db, "complete_visit_sighting", lambda *a, **k: inserted.append(a))

@@ -38,6 +38,81 @@
 # captured (plate text, breed, collar color, whatever), ask for it directly in the prompt's own
 # wording -- the model's own sentence is the record, not a set of columns.
 #
+# provider (optional, per type, default "llama_proxy") -- which backend ai_worker.py/
+# alert_ai_worker.py call for THIS type's chat completion. Three values:
+#   llama_proxy (default) -- your own locally-hosted model behind LLAMA_PROXY_BASE_URL (e.g.
+#     llama_slot_proxy), selected via chat_path (below). Omitting `provider` entirely keeps this
+#     the behavior -- an existing profiles.yaml with no `provider` key anywhere needs no edit.
+#   openai -- OpenAI's own hosted API (OPENAI_BASE_URL/OPENAI_API_KEY in .env). Needs `model`
+#     (below) instead of chat_path -- OpenAI selects the model via a body field, not a URL path.
+#   anthropic -- Claude's Messages API (ANTHROPIC_BASE_URL/ANTHROPIC_API_KEY/ANTHROPIC_VERSION in
+#     .env). Also needs `model`, plus takes an optional `max_tokens` (falls back to
+#     AI_STAGE_DEFAULT_MAX_TOKENS, 1024, if omitted) -- Claude's API requires max_tokens on every
+#     request, unlike the other two.
+# This is a per-type choice, not a global one -- one type can stay on llama_proxy while another
+# routes to Claude or OpenAI, in the same file, same as chat_path already lets you point different
+# types at different local model slots. See CLAUDE.md's "Cloud VLM providers" section and
+# docs/configuration.md's "Internal AI stages" section for a fuller explanation, including which
+# provider tends to suit which kind of description task.
+#
+# chat_path is llama_proxy-only (ignored for openai/anthropic, which use `model` instead). model
+# is required for openai/anthropic (ignored for llama_proxy, which selects the model via
+# chat_path). Only set the one your chosen provider actually needs.
+#
+# ---------------------------------------------------------------------------------------------
+# Three complete, mutually-exclusive shapes for wiring up ONE object type's chat call, shown
+# side by side so it's clear exactly which keys travel together -- don't mix keys from two of
+# these on the same entry. (event_prompt/alert_prompt omitted below for brevity; see the real
+# values under object_types.car further down for what those actually look like.)
+#
+#   1) llama_proxy (the default) -- your own locally-hosted model, no `provider` key at all.
+#      Despite the name, this shape works against ANY server that speaks an OpenAI-compatible
+#      /v1/chat/completions API at LLAMA_PROXY_BASE_URL -- not only llama_slot_proxy:
+#     car:
+#       chat_path: /REPLACE_WITH_VEHICLE_SLOT/v1/chat/completions
+#       timeout_seconds: 180
+#
+#      1a) Through llama_slot_proxy (multiple model slots behind one host, one URL path
+#          segment per slot -- the shape above, and what this file's examples assume):
+#            .env:  LLAMA_PROXY_BASE_URL=http://llama-proxy-host:port
+#            here:  chat_path: /REPLACE_WITH_VEHICLE_SLOT/v1/chat/completions
+#
+#      1b) Direct to a bare llama.cpp server (`llama-server`), no proxy in front -- llama.cpp's
+#          own server already speaks the identical OpenAI-compatible API, so chat_path is just
+#          llama.cpp's real, fixed route (no per-slot path segment, since one llama-server
+#          process only ever serves the one model it was started with):
+#            .env:  LLAMA_PROXY_BASE_URL=http://llama-cpp-host:8080
+#            here:  chat_path: /v1/chat/completions
+#          Caveat: LLAMA_PROXY_BASE_URL is one global host (.env, not per-type) -- this shape is
+#          clean when every type shares that one loaded model, or you only care about one type.
+#          Routing different types to different *local* models without a proxy in front isn't
+#          possible with this shape alone, since chat_path only varies the URL path, never the
+#          host/port -- that per-type multiplexing is exactly what llama_slot_proxy (1a) is for.
+#
+#   2) openai -- OpenAI's hosted API, model selected via `model` (chat_path is unused/ignored):
+#     car:
+#       provider: openai
+#       model: gpt-4o
+#       timeout_seconds: 180
+#
+#   3) anthropic -- Claude's Messages API, model selected via `model`, plus an optional
+#      max_tokens (Claude's API requires max_tokens on every request, unlike the other two):
+#     car:
+#       provider: anthropic
+#       model: claude-opus-4-8
+#       max_tokens: 1024   # optional; falls back to AI_STAGE_DEFAULT_MAX_TOKENS (1024) if omitted
+#       timeout_seconds: 180
+#
+# object_types.car below actually uses shape 1 (llama_proxy) -- to route that one type to a
+# hosted provider instead, swap its chat_path line for shape 2's or 3's keys.
+# ---------------------------------------------------------------------------------------------
+#
+# Embeddings (semantic search) are configured separately from chat, via .env's EMBEDDING_PROVIDER
+# (llama_proxy default, or openai) -- NOT here, and NOT per object type. This is because Claude has
+# no embeddings API at all: a type routed to `provider: anthropic` for its chat/description call
+# still needs EMBEDDING_PROVIDER set to llama_proxy (default) or openai for that same sighting's
+# embedding to be computed. See docs/configuration.md's "Semantic search" section.
+#
 # A bunch of settings, ALL OPTIONAL, live entirely in this file -- see profile_config.py. These are
 # NOT env vars at all (deliberately -- they're settings you'd realistically want different per
 # Frigate object type, so this file is the one place to configure them, not split across .env and
@@ -163,6 +238,10 @@ object_types:
     # How long to wait for this type's chat completion, in seconds -- a local model on CPU/modest
     # GPU can genuinely take minutes. Falls back to AI_STAGE_DEFAULT_TIMEOUT_SECONDS if omitted.
     timeout_seconds: 180
+    # This entry uses shape 1 (llama_proxy, the default) from the three-way provider comparison
+    # near the top of this file -- swap the chat_path line above for shape 2's (openai) or
+    # shape 3's (anthropic) keys to route THIS type to a hosted provider instead.
+    #
     # Example overrides (commented out -- uncomment/edit to actually use). Left here as a
     # discoverable template rather than only described in prose above.
     # telegram_events_mode: image
