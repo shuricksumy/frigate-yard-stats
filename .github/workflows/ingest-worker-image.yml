@@ -101,6 +101,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up QEMU
+        # Lets the amd64 GitHub-hosted runner cross-build the arm64 image too (e.g. for a
+        # Raspberry Pi / other arm64 host running ingest-worker) via emulation -- Buildx alone
+        # can only build for the runner's own native architecture without this.
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -144,6 +152,11 @@ jobs:
         with:
           context: ./frigate/ingest-worker
           push: true
+          # amd64 (the existing NVR/pipeline hosts) plus arm64 (e.g. a Raspberry Pi or other
+          # arm64 host) -- Buildx assembles both into one multi-arch manifest under the same
+          # tags, so `docker pull`/`docker compose` on either architecture transparently gets
+          # the right image with no separate tag or config needed.
+          platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha

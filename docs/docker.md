@@ -104,6 +104,12 @@ If you're actively developing changes to `ingest-worker` yourself, swap the comp
 `image:` line for `build: ./ingest-worker` and use `docker compose --profile pipeline build
 ingest-worker` instead — see [`configuration.md`](configuration.md) for more on that.
 
+The published image is multi-arch (`linux/amd64` and `linux/arm64`, built in one pass via Docker
+Buildx + QEMU emulation) — `docker compose --profile pipeline pull` transparently picks the right
+one for whatever host you're running on, no separate tag or config needed either way. Useful if
+`ingest-worker` ends up on an arm64 host (e.g. a Raspberry Pi) rather than the same amd64 box as
+everything else.
+
 ## Basic troubleshooting
 
 - **A container keeps restarting / exits immediately** — `docker compose --profile pipeline logs
