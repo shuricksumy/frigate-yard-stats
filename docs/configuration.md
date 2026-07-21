@@ -298,6 +298,15 @@ once with no `confirm` to see how many rows are missing an embedding, then repea
 hit zero. Needs `LLAMA_PROXY_BASE_URL` set (see "Internal AI stage" below) even if you're not using
 that stage for anything else — it's the only thing this endpoint needs from that section.
 
+**`POST /search`** is the web UI's own entry point (the "Search" tab — see
+[`web-ui.md`](web-ui.md)) — unlike `POST /search/semantic` above, it takes plain query text
+instead of a pre-computed embedding, since a browser can't call the embedding backend directly.
+`ingest-worker` embeds the text server-side (same backend/model as everything else here) and ranks
+across **both** `sightings` and `visit_sightings` together (or just one, via an optional `source`
+param the UI itself doesn't expose). Same `LLAMA_PROXY_BASE_URL`/`LLAMA_PROXY_EMBED_PATH`
+requirement as the backfill endpoint above — a 502 response means that backend is unreachable or
+misconfigured, surfaced in the UI as an error banner rather than a silent empty result.
+
 ## Internal AI stages
 
 Two independent stages, both configured in `profiles.yaml` (not `.env` — see "Per-object-type

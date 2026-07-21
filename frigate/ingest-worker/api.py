@@ -448,6 +448,27 @@ def semantic_search(search: schemas.SemanticSearchRequest):
     )
 
 
+@app.post("/search", response_model=schemas.TextSearchResponse, tags=["sightings"], dependencies=[Depends(require_api_key)])
+def text_search(search: schemas.TextSearchRequest):
+    """The web UI Search tab's own entry point -- takes plain query text (not a pre-computed
+    embedding, unlike POST /search/semantic above, which is n8n's contract and stays untouched),
+    embeds it server-side, then ranks by cosine similarity across sightings and/or visit_sightings
+    (db.semantic_search_combined) depending on `source`. A browser can't call the embedding
+    backend directly, so this is the one endpoint that does the embed-then-search round trip in a
+    single call for it."""
+    try:
+        embedding = ai_worker.embed_query_text(search.query)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502, detail=f"Embedding backend unavailable or misconfigured: {exc}",
+        )
+    resolved_start, resolved_end = _resolve_window(search.start, search.end, search.hours)
+    results = db.semantic_search_combined(
+        embedding, resolved_start, resolved_end, search.object_types, search.limit, source=search.source,
+    )
+    return {"results": results}
+
+
 @app.post("/ai-queue/{event_id}/fail", response_model=schemas.FailResponse, tags=["ai-queue"], dependencies=[Depends(require_api_key)])
 def fail_ai_event(
     event_id: int,

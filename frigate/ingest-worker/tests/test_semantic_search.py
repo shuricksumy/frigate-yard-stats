@@ -138,6 +138,132 @@ def test_semantic_search_excludes_sightings_without_embedding(conn_ok):
         _cleanup_event(event_id)
 
 
+def _insert_visit(camera, objects="car", det_ids=None):
+    visit_id = db.record_visit({
+        "camera": camera, "zone": "z", "objects": objects,
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": det_ids or [],
+    })
+    return visit_id
+
+
+def _cleanup_visit(visit_id):
+    db._execute("DELETE FROM yard_stats.visit_sightings WHERE visit_id = %s", (visit_id,))
+    db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
+
+
+# ---- semantic_search_combined (web UI Search tab's own combined events+visits lookup) ----
+
+def test_semantic_search_combined_events_only_matches_semantic_search_sightings(conn_ok):
+    camera = f"pytest-combo-{uuid.uuid4()}"
+    event_id = _insert_event(camera=camera)
+    try:
+        db.complete_sighting(event_id, "car", "red sedan", embedding=_vec(1.0))
+        results = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=10, source="events")
+        assert all(r["kind"] == "event" for r in results)
+        assert event_id in {r["id"] for r in results}
+        # Lightbox-ready fields -- has_image reflects _insert_event's own crop_image_base64,
+        # ai_status reflects raw_events.ai_status ('done', set by _insert_event).
+        row = next(r for r in results if r["id"] == event_id)
+        assert row["has_image"] is True
+        assert row["has_video"] is False
+        assert row["has_preview_gif"] is False
+        assert row["ai_status"] == "done"
+    finally:
+        _cleanup_event(event_id)
+
+
+def test_semantic_search_combined_visits_only(conn_ok):
+    camera = f"pytest-combo-{uuid.uuid4()}"
+    visit_id = _insert_visit(camera=camera)
+    try:
+        db.complete_visit_sighting(visit_id, "car", "silver suv pulling into the driveway", embedding=_vec(1.0))
+        results = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=10, source="visits")
+        assert all(r["kind"] == "visit" for r in results)
+        assert visit_id in {r["id"] for r in results}
+        # ai_status reflects visits.alert_ai_status ('done', set by complete_visit_sighting) --
+        # has_image/has_video/has_preview_gif are false here since this test never runs the actual
+        # thumb-crop/video workers that would populate those visit columns.
+        row = next(r for r in results if r["id"] == visit_id)
+        assert row["ai_status"] == "done"
+        assert row["has_image"] is False
+        assert row["has_video"] is False
+        assert row["has_preview_gif"] is False
+    finally:
+        _cleanup_visit(visit_id)
+
+
+def test_semantic_search_combined_default_source_ranks_both_together(conn_ok):
+    camera = f"pytest-combo-{uuid.uuid4()}"
+    event_id = _insert_event(camera=camera)
+    visit_id = _insert_visit(camera=camera)
+    try:
+        db.complete_sighting(event_id, "car", "red sedan", embedding=_vec(1.0))
+        db.complete_visit_sighting(visit_id, "car", "red sedan pulling in", embedding=_vec(1.0))
+        results = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=50)
+        kinds_and_ids = {(r["kind"], r["id"]) for r in results}
+        assert ("event", event_id) in kinds_and_ids
+        assert ("visit", visit_id) in kinds_and_ids
+    finally:
+        _cleanup_event(event_id)
+        _cleanup_visit(visit_id)
+
+
+def test_semantic_search_combined_orders_by_distance_across_both_tables(conn_ok):
+    camera = f"pytest-combo-{uuid.uuid4()}"
+    close_event_id = _insert_event(camera=camera)
+    far_visit_id = _insert_visit(camera=camera)
+    try:
+        db.complete_sighting(close_event_id, "car", "red sedan", embedding=_vec(1.0))
+        db.complete_visit_sighting(far_visit_id, "car", "blue hatchback", embedding=_vec(-1.0))
+        results = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=50)
+        ids_in_order = [(r["kind"], r["id"]) for r in results]
+        assert ids_in_order.index(("event", close_event_id)) < ids_in_order.index(("visit", far_visit_id))
+    finally:
+        _cleanup_event(close_event_id)
+        _cleanup_visit(far_visit_id)
+
+
+def test_semantic_search_combined_respects_time_window(conn_ok):
+    camera = f"pytest-combo-{uuid.uuid4()}"
+    old_event_id = db._execute(
+        """
+        INSERT INTO yard_stats.raw_events
+            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot,
+             crop_status, ai_status, crop_image_base64)
+        VALUES (%s, 'z', 'car', now() - interval '2 days', now() - interval '2 days', %s,
+                true, true, 'done', 'done', 'ZmFrZQ==')
+        RETURNING id
+        """,
+        (camera, f"pytest-{uuid.uuid4()}"), fetch=True,
+    )[0]["id"]
+    try:
+        db.complete_sighting(old_event_id, "car", "red sedan", embedding=_vec(1.0))
+        from datetime import datetime, timedelta, timezone
+        results = db.semantic_search_combined(
+            _vec(1.0), start=datetime.now(timezone.utc) - timedelta(hours=1),
+            object_types=["car"], limit=50, source="events",
+        )
+        assert old_event_id not in {r["id"] for r in results}
+    finally:
+        _cleanup_event(old_event_id)
+
+
+def test_semantic_search_combined_excludes_rows_without_embedding(conn_ok):
+    camera = f"pytest-combo-{uuid.uuid4()}"
+    event_id = _insert_event(camera=camera)
+    visit_id = _insert_visit(camera=camera)
+    try:
+        db.complete_sighting(event_id, "car", "no embedding here")
+        db.complete_visit_sighting(visit_id, "car", "no embedding here either")
+        results = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=50)
+        kinds_and_ids = {(r["kind"], r["id"]) for r in results}
+        assert ("event", event_id) not in kinds_and_ids
+        assert ("visit", visit_id) not in kinds_and_ids
+    finally:
+        _cleanup_event(event_id)
+        _cleanup_visit(visit_id)
+
+
 def test_get_retention_info_returns_configured_months_and_oldest_ts(conn_ok):
     info = db.get_retention_info()
     assert info["retention_months"] == db.config.RETENTION_MONTHS

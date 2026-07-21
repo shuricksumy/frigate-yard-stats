@@ -1878,6 +1878,110 @@ def semantic_search_sightings(
     )
 
 
+def semantic_search_combined(
+    embedding: list[float],
+    start: datetime | None = None,
+    end: datetime | None = None,
+    object_types: list[str] | None = None,
+    limit: int = 20,
+    source: str | None = None,
+) -> list[dict]:
+    # Web UI "Search" tab's own combined lookup -- unlike semantic_search_sightings above (the
+    # n8n-facing endpoint's underlying function, left untouched so that existing contract never
+    # shifts), this one can rank across BOTH sightings (events) and visit_sightings (alerts) at
+    # once, since the web UI wants "anything relevant," not one flow specifically. source=None
+    # (the default) searches both, unioned and re-ranked together by distance; source="events" or
+    # "visits" searches just that one table -- skipping the other branch's JOIN/WHERE entirely
+    # rather than fetching then discarding, since a caller that already knows which flow it wants
+    # shouldn't pay for the other half of the query.
+    #
+    # Each row is tagged `kind` ("event"/"visit") and `id` (that row's raw_event_id or visit_id) so
+    # the caller can route a click to the right lightbox -- the two id spaces are independent
+    # sequences (a raw_event id and a visit id can collide), so `kind` is required to disambiguate,
+    # never optional. Also carries has_image/has_video/has_preview_gif/ai_status (the same fields
+    # EventSummary/VisitSummary already expose) so the web UI can open a result straight into the
+    # existing lightbox with no follow-up fetch -- there's no GET /visits/{id} single-item endpoint
+    # to fetch those for a visit-kind result on demand, and adding one just to re-fetch what this
+    # query can already compute in the same pass would be a slower, more roundabout path to the
+    # same information.
+    vector_literal = _vector_literal(embedding)
+    branches = []
+    params: list = []
+
+    if source in (None, "events"):
+        clauses = ["s.embedding IS NOT NULL"]
+        branch_params: list = [vector_literal]
+        if start:
+            clauses.append("re.start_ts >= %s")
+            branch_params.append(start)
+        if end:
+            clauses.append("re.start_ts <= %s")
+            branch_params.append(end)
+        if object_types:
+            clauses.append("s.object_label = ANY(%s)")
+            branch_params.append(object_types)
+        branches.append((
+            f"""
+            SELECT 'event' AS kind, re.id AS id, s.id AS sighting_id, re.start_ts, re.camera,
+                   re.objects, s.object_label, s.description, s.embedding <=> %s::vector AS distance,
+                   (re.crop_image_base64 IS NOT NULL) AS has_image,
+                   (re.video_path IS NOT NULL) AS has_video,
+                   false AS has_preview_gif, re.ai_status
+            FROM yard_stats.sightings s
+            JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
+            WHERE {' AND '.join(clauses)}
+            """,
+            branch_params,
+        ))
+
+    if source in (None, "visits"):
+        # has_image mirrors _build_visits_query's own (has_thumb_crop OR event_has_image) --
+        # falls back to the representative (earliest-linked) raw_event's own crop whenever the
+        # visit's own thumb-crop grid isn't ready/enabled, same convention GET /visits/{id}/
+        # thumbnail already applies server-side, so a search result never hides a thumbnail that's
+        # actually fetchable.
+        clauses = ["vs.embedding IS NOT NULL"]
+        branch_params = [vector_literal]
+        if start:
+            clauses.append("v.start_ts >= %s")
+            branch_params.append(start)
+        if end:
+            clauses.append("v.start_ts <= %s")
+            branch_params.append(end)
+        if object_types:
+            clauses.append("vs.object_label = ANY(%s)")
+            branch_params.append(object_types)
+        branches.append((
+            f"""
+            SELECT 'visit' AS kind, v.id AS id, vs.id AS sighting_id, v.start_ts, v.cameras AS camera,
+                   v.objects, vs.object_label, vs.description, vs.embedding <=> %s::vector AS distance,
+                   ((v.crop_image_base64 IS NOT NULL) OR COALESCE((
+                       SELECT re.crop_image_base64 IS NOT NULL
+                       FROM yard_stats.raw_events re
+                       WHERE re.visit_id = v.id
+                       ORDER BY re.start_ts ASC, re.id ASC
+                       LIMIT 1
+                   ), false)) AS has_image,
+                   (v.video_path IS NOT NULL) AS has_video,
+                   (v.preview_gif_base64 IS NOT NULL) AS has_preview_gif, v.alert_ai_status AS ai_status
+            FROM yard_stats.visit_sightings vs
+            JOIN yard_stats.visits v ON v.id = vs.visit_id
+            WHERE {' AND '.join(clauses)}
+            """,
+            branch_params,
+        ))
+
+    for query, branch_params in branches:
+        params.extend(branch_params)
+    query = " UNION ALL ".join(q for q, _ in branches)
+    params.append(limit)
+    return _execute(
+        f"{query} ORDER BY distance ASC LIMIT %s",
+        params,
+        fetch=True,
+    )
+
+
 def fail_ai_event(event_id: int, max_attempts: int) -> dict:
     # Same retry-or-fail-with-cap CASE logic as n8n's old "Handle Failure (Retry or Fail)" node.
     rows = _execute(

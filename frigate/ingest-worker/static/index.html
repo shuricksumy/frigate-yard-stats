@@ -33,13 +33,15 @@
     <div class="view-toggle">
       <button type="button" :class="{ active: viewMode === 'visits' }" @click="switchView('visits')">Visits</button>
       <button type="button" :class="{ active: viewMode === 'events' }" @click="switchView('events')">Events</button>
+      <button type="button" :class="{ active: viewMode === 'search' }" @click="switchView('search')">Search</button>
     </div>
 
     <form class="filters" @submit.prevent="applyFilters()">
       <div class="filter-fields">
         <label class="search-field">
-          Search AI analysis
-          <input type="text" x-model="filters.q" placeholder="e.g. red toyota, plate ABC123">
+          <span x-text="viewMode === 'search' ? 'Ask about your yard' : 'Search AI analysis'"></span>
+          <input type="text" x-model="filters.q"
+                 :placeholder="viewMode === 'search' ? 'e.g. red pickup truck backing into the driveway' : 'e.g. red toyota, plate ABC123'">
         </label>
         <label x-show="!advancedSearch">
           Time range
@@ -107,9 +109,11 @@
     </form>
 
     <p class="status-line" x-show="lastUpdated" style="display:none" x-text="'Updated ' + (lastUpdated ? lastUpdated.toLocaleTimeString() : '')"></p>
+    <p class="error-banner" x-show="searchError" style="display:none" x-text="searchError"></p>
 
     <div class="spinner" x-show="loading" style="display:none">Loading…</div>
-    <p class="empty" x-show="!loading && currentList().length === 0" style="display:none" x-text="viewMode === 'visits' ? 'No visits in this window.' : 'No events in this window.'"></p>
+    <p class="empty" x-show="!loading && currentList().length === 0" style="display:none"
+       x-text="viewMode === 'visits' ? 'No visits in this window.' : viewMode === 'search' ? (searchAttempted ? 'No matching sightings found.' : 'Type a question above and hit Search.') : 'No events in this window.'"></p>
 
     <template x-if="viewMode === 'events'">
       <div class="grid" x-show="!loading">
@@ -150,7 +154,29 @@
       </div>
     </template>
 
-    <div class="pager" x-show="!loading && currentList().length > 0" style="display:none">
+    <template x-if="viewMode === 'search'">
+      <div class="grid" x-show="!loading">
+        <template x-for="result in searchResults" :key="result.kind + '-' + result.id">
+          <div class="card" :class="{ clickable: result.has_image || result.has_video }" @click="(result.has_image || result.has_video) && openSearchResult(result)">
+            <img x-show="result.has_image || result.has_video"
+                 :src="result.kind === 'visit' ? visitThumbnailUrl(result.id) : thumbnailUrl(result.id)"
+                 loading="lazy" alt="result thumbnail">
+            <div class="no-image" x-show="!result.has_image && !result.has_video">no media</div>
+            <div class="meta">
+              <div><strong x-text="result.object_label || result.objects || result.kind"></strong> — <span x-text="result.camera"></span></div>
+              <div class="ts" x-text="formatTs(result.start_ts)"></div>
+              <p class="search-result-description" x-text="result.description"></p>
+              <div class="badges">
+                <span class="badge" x-text="result.kind"></span>
+                <span class="badge" x-show="result.has_video">video</span>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </template>
+
+    <div class="pager" x-show="!loading && currentList().length > 0 && viewMode !== 'search'" style="display:none">
       <button @click="prevPage()" :disabled="offset === 0">Prev</button>
       <span x-text="currentPage() + ' / ' + totalPages()"></span>
       <button @click="nextPage()" :disabled="!hasNextPage()">Next</button>
@@ -178,6 +204,12 @@
       <template x-if="lightboxEvent && (lightboxMode === 'image' || (!lightboxEvent.has_video && lightboxMode !== 'preview'))">
         <img :src="lightboxImageUrl()" alt="event full image">
       </template>
+      <!-- Only shown after drilling into one of a visit's own "Connected events" -- not gated on
+           that event's own ai_status (unlike .lightbox-info below), since the way back should
+           still be available even if this particular connected event hasn't been analyzed yet. -->
+      <div class="lightbox-back-bar" x-show="lightboxParentVisit" style="display:none">
+        <button type="button" class="link-button" @click="backToVisit()">&larr; Back to alert</button>
+      </div>
       <div class="lightbox-info" x-show="lightboxEvent && (lightboxEvent.visitId || lightboxEvent.ai_status === 'done')" style="display:none">
         <p class="lightbox-info-loading" x-show="lightboxLoading">Loading AI analysis…</p>
         <template x-if="!lightboxLoading">
@@ -205,7 +237,7 @@
         <h4>Connected events (<span x-text="lightboxConnectedEvents.length"></span>)</h4>
         <div class="connected-events-strip">
           <template x-for="ev in lightboxConnectedEvents" :key="ev.id">
-            <div class="connected-event-card" @click="openLightbox(ev)">
+            <div class="connected-event-card" @click="openConnectedEvent(ev)">
               <img :src="thumbnailUrl(ev.id)" :alt="ev.objects" loading="lazy">
               <span class="connected-event-ts" x-text="formatTs(ev.start_ts)"></span>
               <span class="badge" :class="'ai-' + ev.ai_status" x-text="ev.ai_status"></span>

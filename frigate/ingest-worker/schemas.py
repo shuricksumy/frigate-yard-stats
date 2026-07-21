@@ -1,4 +1,5 @@
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel
 
@@ -163,6 +164,49 @@ class SemanticSearchResult(BaseModel):
 class FailResponse(BaseModel):
     ai_status: str
     ai_attempt_count: int
+
+
+class TextSearchRequest(BaseModel):
+    # Free text, not a vector -- unlike SemanticSearchRequest above (the n8n-facing contract,
+    # which already resolved its own embedding before calling that endpoint), this is the web UI
+    # Search tab's own entry point: ingest-worker embeds this text itself (POST /search, via
+    # ai_worker.embed_query_text) before searching, since a browser can't call the embedding
+    # backend directly.
+    query: str
+    start: datetime | None = None
+    end: datetime | None = None
+    # Convenience alternative to start/end, same "last N hours" preset the web UI's other tabs
+    # already use -- ignored if start/end are both given.
+    hours: float = 24
+    object_types: list[str] | None = None
+    # None (default) searches both sightings and visit_sightings, unioned and re-ranked together.
+    source: Literal["events", "visits"] | None = None
+    limit: int = 20
+
+
+class TextSearchResult(BaseModel):
+    # kind + id (not a single flat id) since raw_event ids and visit ids are independent
+    # sequences that can collide -- the web UI needs kind to know which lightbox to open.
+    kind: Literal["event", "visit"]
+    id: int
+    sighting_id: int
+    start_ts: datetime
+    camera: str | None
+    objects: str | None
+    object_label: str | None
+    description: str | None = None
+    distance: float
+    # Same fields EventSummary/VisitSummary already expose -- lets the web UI open a result
+    # straight into the existing lightbox with no follow-up fetch (there's no GET /visits/{id}
+    # single-item endpoint to fetch these for a visit-kind result on demand).
+    has_image: bool
+    has_video: bool
+    has_preview_gif: bool
+    ai_status: str
+
+
+class TextSearchResponse(BaseModel):
+    results: list[TextSearchResult]
 
 
 class ClaimResponse(BaseModel):

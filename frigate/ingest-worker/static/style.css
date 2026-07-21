@@ -196,6 +196,26 @@ button:disabled { opacity: 0.4; cursor: default; }
 
 .card .ts { color: var(--muted); font-size: 0.75rem; margin-top: 2px; }
 
+.search-result-description {
+  margin: 6px 0 0;
+  color: var(--text);
+  font-size: 0.8rem;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.error-banner {
+  color: #ff6b6b;
+  background: #2a1c1c;
+  border: 1px solid #4a2a2a;
+  border-radius: 6px;
+  padding: 8px 12px;
+  margin: 0 0 12px;
+  font-size: 0.85rem;
+}
+
 .badges { display: flex; gap: 6px; margin-top: 6px; flex-wrap: wrap; }
 
 .badge {
@@ -256,6 +276,17 @@ button:disabled { opacity: 0.4; cursor: default; }
   max-width: 95vw;
   max-height: 70vh;
   display: block;
+}
+
+.lightbox-back-bar {
+  background: var(--card);
+  padding: 8px 16px;
+  max-width: 95vw;
+  border-bottom: 1px solid var(--border);
+}
+
+.lightbox-back-bar .link-button {
+  font-size: 0.85rem;
 }
 
 .lightbox-info {

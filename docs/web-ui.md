@@ -11,14 +11,17 @@ The first time you open `/ui`, it asks for your API key (the same `API_KEY` valu
 It validates that key against the API once, then stores it in a cookie so you don't need to
 re-enter it — "Change API key" in the header logs out and clears that cookie.
 
-## Events vs Visits
+## Events, Visits, and Search
 
-A toggle at the top switches the whole page between two views of the same underlying data:
+A toggle at the top switches the whole page between three views:
 
 - **Events** — one card per Frigate detection (`raw_events`), the most granular view.
 - **Visits** — one card per Frigate review/alert (`visits`) — multiple detections Frigate's own
   tracker considers the same real-world activity (occlusion, re-ID, label flicker) collapsed into
   one card, with an "N events grouped" badge when it bundled more than one.
+- **Search** — ask a free-text question ("red pickup truck backing into the driveway") and get
+  back a ranked grid of the most semantically similar sightings, across both events and visits at
+  once. See "Search" below.
 
 Switching views resets the filter bar back to defaults — a filter that only makes sense in one
 view (see below) doesn't silently keep applying once you can't see it anymore.
@@ -38,6 +41,24 @@ nothing to show for them).
 
 Every filter except the two free-text boxes (Search, Event ID) applies the instant you change it
 — no separate "Search" click needed for a dropdown or date picker.
+
+## Search
+
+The Search tab reuses the same "Search AI analysis" text box — its label changes to "Ask about
+your yard" while this tab is active — but instead of an exact substring match, it embeds your
+query text server-side (`POST /search`, via `ingest-worker`'s configured embedding backend) and
+ranks sightings by semantic similarity (cosine distance), same idea as the `semantic_search`
+tool the n8n Q&A agent already uses, just reachable directly from the browser with no agent in
+the loop. Time range/From-To/Type still apply exactly as they do on the other two tabs; Event
+ID/AI status/"Only with media" don't apply here (hidden, same as on the Visits tab) since a
+search result already implies AI analysis exists.
+
+Results are a flat, ranked grid — most relevant first, no "page 2" concept — spanning both
+per-event sightings and per-visit alert-stage sightings together (there's no separate toggle for
+"just events" or "just visits" in the UI). Click a result to open the exact same lightbox the
+Events/Visits tabs use, whether it's an event or a visit under the hood. If the embedding backend
+is unreachable or misconfigured, an error banner explains why instead of silently showing an empty
+grid.
 
 ## Opening a card
 
@@ -88,7 +109,8 @@ A download button next to the close button grabs whichever of video/image is cur
 
 Prev/Next buttons below the grid step through results; the label between them shows
 `<page> / <total pages>` (e.g. `2 / 5`), computed from the total row count matching your current
-filters — not just "there might be more data" from a full page of results.
+filters — not just "there might be more data" from a full page of results. The Search tab has no
+pager — it's a fixed-size ranked top-N grid, not a browsable list.
 
 ## Auto-refresh
 

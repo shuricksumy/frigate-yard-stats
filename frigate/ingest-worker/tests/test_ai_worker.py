@@ -279,6 +279,35 @@ def test_process_claimed_event_embedding_failure_still_inserts_sighting(monkeypa
 
 # ---- run_embedding_backfill ----
 
+# ---- embed_query_text (web UI Search tab's own embed-then-search entry point) ----
+
+def test_embed_query_text_returns_embedding_on_success(monkeypatch):
+    vector = [0.1] + [0.0] * (config.EMBEDDING_DIMENSIONS - 1)
+    monkeypatch.setattr(ai_worker.requests, "post", lambda *a, **k: _Resp(_embed_response(vector)))
+    assert ai_worker.embed_query_text("a red truck with a ladder rack") == vector
+
+
+def test_embed_query_text_raises_on_empty_query():
+    with pytest.raises(ValueError):
+        ai_worker.embed_query_text("")
+    with pytest.raises(ValueError):
+        ai_worker.embed_query_text("   ")
+
+
+def test_embed_query_text_raises_on_wrong_dimensions(monkeypatch):
+    monkeypatch.setattr(ai_worker.requests, "post", lambda *a, **k: _Resp(_embed_response([0.1, 0.2])))
+    with pytest.raises(ValueError):
+        ai_worker.embed_query_text("a red truck")
+
+
+def test_embed_query_text_raises_when_backend_unreachable(monkeypatch):
+    def fail(*a, **k):
+        raise ConnectionError("no route to host")
+    monkeypatch.setattr(ai_worker.requests, "post", fail)
+    with pytest.raises(ConnectionError):
+        ai_worker.embed_query_text("a red truck")
+
+
 def test_run_embedding_backfill_requires_llama_proxy_base_url(monkeypatch):
     monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "")
     with pytest.raises(RuntimeError):

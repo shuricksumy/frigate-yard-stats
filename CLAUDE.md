@@ -196,11 +196,15 @@ with an empty `sightings`/`visit_sightings` table, same as a from-scratch instal
 `ingest-worker`'s FastAPI app has two tiers: `/health`, `/status`, `/crop/{id}`, `/retention/run`
 are unauthenticated admin/debug endpoints (unchanged since the original split). Everything else --
 `/events`, `/sightings`, `/stats/summary`, `/reports/generate`,
-`/ai-queue/claim` / `/ai-queue/{id}/fail`, and `/retention/purge` -- requires an `X-API-Key` header
+`/ai-queue/claim` / `/ai-queue/{id}/fail`, `/search`/`/search/semantic`, and `/retention/purge` --
+requires an `X-API-Key` header
 (`config.API_KEY`) since they expose queryable sighting data, mutate the
 AI-stage queue, or bulk-delete rows over the network. `ingest-worker` never calls an LLM to serve
-any of these — the write endpoints just execute the claim/insert/retry/delete mechanics; the VLM
-call and prompt still live entirely in n8n, which posts the result back.
+any of these -- the one exception is `POST /search` (see "Semantic search and the Q&A agent"
+below), which calls the embedding backend directly (never a chat/VLM call) since the web UI has no
+other way to turn free text into a vector; every other endpoint here just executes the
+claim/insert/retry/delete mechanics, with the VLM call and prompt still living entirely in n8n (or
+the internal AI stage), which posts the result back.
 
 `POST /retention/purge` is an ad-hoc counterpart to the scheduled `RETENTION_MONTHS` sweep for
 when you want to purge on a caller-chosen cutoff rather than waiting on or reconfiguring the
@@ -1581,6 +1585,62 @@ The Chat Model (`@n8n/n8n-nodes-langchain.lmChatOpenAi`) points at the same VLM 
 everywhere else in this project, this LangChain sub-node type requires a credential object to hold
 its base URL, it can't call a bare unauthenticated URL the way `Call Qwen (Attributes + Plate)` etc.
 do; the API Key field can be any placeholder value since `llama_slot_proxy` doesn't check it.
+
+### Web UI Search tab -- `POST /search`, `db.semantic_search_combined`
+
+A third tab alongside Events/Visits (`static/index.html`'s `view-toggle`, `viewMode === "search"`)
+gives the same semantic search the n8n Q&A agent's `semantic_search` tool already has, but reached
+directly from the browser with no agent/LLM synthesis step in between -- a ranked grid of results,
+not a written answer (a narrower, deliberately simpler feature than the Q&A agent: no natural-
+language date resolution, no follow-up questions, just "rank what's already been analyzed by how
+well it matches this text").
+
+`POST /search` (`schemas.TextSearchRequest`/`TextSearchResponse`) is a new, separate endpoint from
+n8n's existing `POST /search/semantic` contract, which is left completely untouched -- n8n's own
+Q&A sub-workflow already embeds its query text itself (via a dedicated tool-workflow call) before
+calling that endpoint with a vector, and changing that contract wasn't needed or wanted for this.
+`POST /search` instead takes plain free text (`ai_worker.embed_query_text`, a new function --
+raises on any failure, unlike the existing `_embed_text` used when completing a sighting, which
+swallows a failure and just stores `embedding=None`; a search request has nothing useful to return
+with no vector, so `api.py` turns that raise into a 502) and does the embed-then-search round trip
+in one call, since a browser can't reach the embedding backend directly the way n8n's own workflow
+does.
+
+`db.semantic_search_combined` (the function backing this, also new and separate from
+`semantic_search_sightings`, which keeps serving `/search/semantic` unchanged) is a `UNION ALL`
+across `sightings` and `visit_sightings` together, tagging each row `kind` ("event"/"visit") plus
+that row's own `id` (a raw_event id or visit id -- independent sequences that can collide, so
+`kind` is mandatory, never inferred) so the web UI knows which lightbox to open. An optional
+`source` param (`"events"`/`"visits"`) narrows to one table -- the web UI itself doesn't expose
+this, always searching both, per an explicit product decision that "anything relevant" beats
+picking one flow upfront.
+
+Each result also carries `has_image`/`has_video`/`has_preview_gif`/`ai_status` -- the same fields
+`EventSummary`/`VisitSummary` already expose -- computed directly in this query rather than
+requiring a follow-up fetch per clicked result. This was a deliberate design choice over the
+alternative (add a new `GET /visits/{visit_id}` single-item endpoint, since none currently exists,
+and have the frontend fetch full detail on click): computing these fields once, in the same query
+that already joins to the row, is strictly cheaper than a second network round-trip per click, and
+avoids growing the API surface for a need this query can already satisfy. For the visit branch,
+`has_image` mirrors `_build_visits_query`'s own `(has_thumb_crop OR event_has_image)` fallback
+exactly -- `(v.crop_image_base64 IS NOT NULL) OR` a correlated subquery for the representative
+(earliest-linked, same `get_representative_event_for_visit` definition) raw_event's own crop --
+rather than only checking the visit's own thumb-crop column: a visit whose `VISIT_THUMB_CROP_
+ENABLED` grid isn't ready (or is off entirely) still very likely has a servable thumbnail via that
+same fallback chain `GET /visits/{id}/thumbnail` already applies server-side, and a search result
+that hid a genuinely fetchable thumbnail behind `has_image: false` would silently disagree with
+what every other view of the same visit already shows.
+
+The web UI's Search tab (`static/app.js`'s `fetchSearchResults`/`openSearchResult`) reuses the
+existing filter bar rather than inventing a new one -- the same "Search AI analysis" text field
+(relabeled "Ask about your yard" while this tab is active) is the query text, and Time range/
+From-To/Type all carry over unchanged; Event ID/AI status/"Only with media" stay hidden (already
+gated to the Events tab only) since they're per-raw_event concepts with no equivalent here. There
+is no pagination -- this is a fixed-size ranked top-N grid (`limit`, no `offset`), not a browsable
+list, so the pager is hidden for this tab. Clicking a result routes into the exact same shared
+lightbox (`openLightbox`) Events/Visits already use, building the same `{id, visitId, has_video,
+has_image, has_preview_gif, ai_status}` shape `openVisitLightbox` already constructs for a plain
+`VisitSummary` -- no new lightbox code was needed, only a new way to construct its input.
 
 ### Admin dashboard (`/ui/admin`)
 

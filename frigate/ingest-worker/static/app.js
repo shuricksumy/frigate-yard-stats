@@ -28,6 +28,12 @@ function eventsApp() {
 
     events: [],
     visits: [],
+    // Semantic search results (POST /search) -- a ranked top-N list, not a paginated browse like
+    // events/visits, so there's no offset/totalCount concept for this one.
+    searchResults: [],
+    searchError: "",
+    // Distinguishes "haven't searched yet" from "searched, zero results" for the empty-state text.
+    searchAttempted: false,
     viewMode: "visits",
     loading: false,
     limit: 24,
@@ -71,6 +77,12 @@ function eventsApp() {
     // events" strip -- always empty for a plain event (no visitId to fetch by).
     lightboxConnectedEvents: [],
     lightboxLoading: false,
+    // Set when a connected event's own lightbox was opened from a visit's "Connected events"
+    // strip -- a plain EventSummary has no visitId of its own, so without remembering where we
+    // came from, drilling into one connected event stranded you there with no way back to the
+    // visit/alert view (openVisitLightbox's own shape: {id, representative_event_id, has_video,
+    // has_image, has_preview_gif, ai_status}). Null whenever the lightbox wasn't reached that way.
+    lightboxParentVisit: null,
 
     init() {
       const stored = getCookie(API_KEY_COOKIE);
@@ -123,6 +135,8 @@ function eventsApp() {
     async refresh() {
       if (this.viewMode === "visits") {
         await this.fetchVisits();
+      } else if (this.viewMode === "search") {
+        await this.fetchSearchResults();
       } else {
         await this.fetchEvents();
       }
@@ -137,11 +151,16 @@ function eventsApp() {
       // simple mode toggle already resets for (see toggleAdvancedSearch). A clean slate on every
       // tab switch is simpler than reasoning about which values are still meaningful in the new view.
       this.filters = this._defaultFilters();
+      this.searchResults = [];
+      this.searchAttempted = false;
+      this.searchError = "";
       this.refresh();
     },
 
     currentList() {
-      return this.viewMode === "visits" ? this.visits : this.events;
+      if (this.viewMode === "visits") return this.visits;
+      if (this.viewMode === "search") return this.searchResults;
+      return this.events;
     },
 
     currentPage() {
@@ -359,6 +378,82 @@ function eventsApp() {
       }
     },
 
+    // Semantic search over both sightings (events) and visit_sightings (alerts), server-embedded
+    // (POST /search -- the browser can't call the embedding backend directly). Reuses the same
+    // filter bar as Events/Visits (filters.q is the query text here, plus Time range/From-To/
+    // Type), but there's no pagination -- this is a ranked top-N grid, not a browsable list, so
+    // offset/totalCount don't apply and are left untouched.
+    async fetchSearchResults() {
+      const query = String(this.filters.q || "").trim();
+      this.searchAttempted = true;
+      this.searchError = "";
+      if (!query) {
+        // Nothing typed yet -- don't fire a request (and don't show "no results" for a search
+        // that never ran); switching tabs alone shouldn't trigger a network call either.
+        this.searchResults = [];
+        this.searchAttempted = false;
+        return;
+      }
+      this.loading = true;
+      try {
+        const body = { query, limit: this.limit };
+        if (this.filters.objectType && this.filters.objectType !== "all") {
+          body.object_types = [this.filters.objectType];
+        }
+        // Same From/To-overrides-preset precedence fetchEvents/fetchVisits already use.
+        if (this.filters.start || this.filters.end) {
+          if (this.filters.start) body.start = new Date(this.filters.start).toISOString();
+          if (this.filters.end) body.end = new Date(this.filters.end).toISOString();
+        } else {
+          body.hours = Number(this.filters.hours);
+        }
+
+        const resp = await fetch("/search", {
+          method: "POST",
+          headers: { "X-API-Key": this.apiKey, "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        if (resp.status === 401) {
+          this.logout();
+          return;
+        }
+        if (!resp.ok) {
+          const detail = await resp.json().catch(() => null);
+          throw new Error((detail && detail.detail) || `POST /search failed: ${resp.status}`);
+        }
+        const data = await resp.json();
+        this.searchResults = data.results;
+        this.lastUpdated = new Date();
+      } catch (err) {
+        console.error(err);
+        this.searchResults = [];
+        this.searchError = err.message || "Search failed.";
+      } finally {
+        this.loading = false;
+      }
+    },
+
+    // Routes a clicked search result into the same shared lightbox Events/Visits already use --
+    // same {id, visitId, has_video, has_image, has_preview_gif, ai_status} shape openVisitLightbox
+    // builds below, just sourced from the search result row instead of a VisitSummary/EventSummary
+    // (POST /search already returns these fields for exactly this reason -- see db.py's
+    // semantic_search_combined). A visit-kind result never has its own preview GIF field checked
+    // for events (that artifact doesn't exist at the event level).
+    openSearchResult(result) {
+      if (result.kind === "visit") {
+        this.openLightbox({
+          id: result.id, visitId: result.id,
+          has_video: result.has_video, has_image: result.has_image,
+          has_preview_gif: result.has_preview_gif, ai_status: result.ai_status,
+        });
+      } else {
+        this.openLightbox({
+          id: result.id, has_video: result.has_video, has_image: result.has_image,
+          has_preview_gif: false, ai_status: result.ai_status,
+        });
+      }
+    },
+
     openVisitLightbox(visit) {
       // Reuses the existing per-event lightbox on the visit's representative (earliest-linked)
       // raw_event for the image/AI-analysis side -- but a visit's own video (STORE_VIDEO_ALERTS)
@@ -372,6 +467,33 @@ function eventsApp() {
         has_preview_gif: visit.has_preview_gif,
         ai_status: visit.ai_status,
       });
+    },
+
+    // Opens a connected event's own lightbox (clicked from a visit's "Connected events" strip),
+    // remembering the visit we came from first -- a plain EventSummary has no visitId of its own,
+    // so without this the connected-events strip (and the whole visit context) was gone the
+    // moment you drilled into one, with no way back to the alert you started from. Stored in the
+    // same shape openVisitLightbox expects so "back" is just calling that again.
+    openConnectedEvent(ev) {
+      const current = this.lightboxEvent;
+      if (current && current.visitId) {
+        this.lightboxParentVisit = {
+          id: current.visitId,
+          representative_event_id: current.id,
+          has_video: current.has_video,
+          has_image: current.has_image,
+          has_preview_gif: current.has_preview_gif,
+          ai_status: current.ai_status,
+        };
+      }
+      this.openLightbox(ev);
+    },
+
+    backToVisit() {
+      const visit = this.lightboxParentVisit;
+      if (!visit) return;
+      this.lightboxParentVisit = null;
+      this.openVisitLightbox(visit);
     },
 
     thumbnailUrl(eventId, full = false) {
@@ -510,6 +632,7 @@ function eventsApp() {
       this.lightboxEvent = null;
       this.lightboxGroups = [];
       this.lightboxConnectedEvents = [];
+      this.lightboxParentVisit = null;
     },
 
     // A sighting is just {object_label, description} in this universal model -- no per-type

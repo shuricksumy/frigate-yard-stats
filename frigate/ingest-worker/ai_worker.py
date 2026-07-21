@@ -84,6 +84,29 @@ def _embed_text(text: str | None) -> list[float] | None:
         return None
 
 
+def embed_query_text(text: str) -> list[float]:
+    """Embeds arbitrary free-text (the web UI Search tab's own query, not a stored sighting) via
+    the same embedding backend _embed_text uses. Raises on any failure -- unlike _embed_text's
+    "fine, store the sighting without one" fallback, a search request has nothing useful to do
+    with a missing vector, so the caller (api.py's POST /search) turns this into a real error
+    response instead of silently returning empty results."""
+    if not text or not text.strip():
+        raise ValueError("query text must not be empty")
+    resp = requests.post(
+        f"{config.LLAMA_PROXY_BASE_URL}{config.LLAMA_PROXY_EMBED_PATH}",
+        json={"input": text},
+        timeout=config.AI_STAGE_EMBED_TIMEOUT_SECONDS,
+    )
+    resp.raise_for_status()
+    embedding = resp.json()["data"][0]["embedding"]
+    if len(embedding) != config.EMBEDDING_DIMENSIONS:
+        raise ValueError(
+            f"embedding backend returned {len(embedding)} dims, expected {config.EMBEDDING_DIMENSIONS} "
+            "(wrong model loaded at LLAMA_PROXY_EMBED_PATH?)"
+        )
+    return embedding
+
+
 def run_embedding_backfill(limit: int) -> dict:
     # POST /embeddings/backfill's confirm=true path -- fills in the embedding column for
     # sightings that existed before semantic search did (or came from a run that didn't attach
