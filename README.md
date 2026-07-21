@@ -6,10 +6,11 @@ license plate) and people passing through camera zones — local by default, wit
 per-object-type hosted provider (OpenAI/Claude) if you want one — and nothing here ever touches
 Frigate's own database.
 
-<video src="https://github.com/shuricksumy/frigate-yard-stats/raw/main/docs/images/web-ui-demo.mp4" controls muted title="Web report UI demo"></video>
+![Web report UI demo](docs/images/web-ui-demo.gif)
 
 *The demo above uses synthetic placeholder data (a throwaway local instance, no real camera
-footage) — just to show the UI itself in motion.*
+footage) — just to show the UI itself in motion. Same recording as an
+[MP4](docs/images/web-ui-demo.mp4), if you'd rather watch it with playback controls.*
 
 ## What it does
 
