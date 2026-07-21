@@ -733,6 +733,36 @@ to keep behaving identically after upgrading -- the env var is silently ignored 
 rather than assuming the old `.env` values still apply. Same applies to any of the technical tuning
 knobs above that were previously set to a non-default value in `.env`.
 
+**Bug found and fixed while migrating `store_video`/`store_video_alerts`/`visit_thumb_crop_enabled`
+off their env vars**: `db.insert_raw_event`/`db.record_visit` (which decide a freshly-ingested
+row's *initial* `video_status`/`thumb_crop_status` -- `'new'` vs `'skipped'`, see the queue-state-
+machine section above) were still reading the bare `config.STORE_VIDEO`/`config.STORE_VIDEO_ALERTS`/
+`config.VISIT_THUMB_CROP_ENABLED` constants directly, never resolving through `profile_config.py`.
+This gap existed from the very first per-object-type-overrides round (these three settings only
+ever affected which *worker thread* started and which rows a *claim* function could see, never the
+ingest-time initial value) but stayed invisible as long as a matching env var kept the global
+constant in sync with what a deployment actually wanted. Once the env var was removed entirely
+(this round), the constant became a permanently-hardcoded `False` with no way to override it at
+ingest time at all -- confirmed live in production: `profiles.yaml`'s `defaults: {store_video_alerts:
+true, visit_thumb_crop_enabled: true}` correctly started the matching worker threads and correctly
+scoped their claim queries, but every new visit still got `video_status='skipped'`/
+`thumb_crop_status='skipped'` at insert time regardless, so neither worker ever had anything to
+claim -- and since the alerts-flow Telegram summary is gated on thumb-crop reaching a *terminal*
+state (or, when thumb-crop won't be attempted at all, sent immediately -- see `mqtt_ingest.py`
+above), a visit stuck permanently at `'skipped'` never triggers either path, silently killing all
+alerts-flow Telegram notifications with no error anywhere. Fixed by adding plain per-label
+resolvers (`profile_config.store_video_enabled`/`store_video_alerts_enabled`/
+`visit_thumb_crop_enabled`) and threading `profile` into `insert_raw_event`/`record_visit`/
+`visit_thumb_crop_will_be_attempted` (all now optional params, defaulting to `None` for backward
+compatibility). `record_visit` resolves the visit's representative object type via a new
+`_get_representative_object_label_for_det_ids` helper -- the usual `get_representative_event_for_
+visit` can't be used yet at this point, since the visit row (and its `raw_events.visit_id` link)
+doesn't exist until later in the same function; this queries by `det_id` instead, same
+`ORDER BY start_ts ASC, id ASC LIMIT 1` convention. `mqtt_ingest.py`'s `_handle_review_message` was
+restructured to fetch the representative event once, right after `record_visit` succeeds, and
+reuse it for both the thumb-crop-defer decision and the Telegram mode resolution (previously two
+separate concerns that happened to both need the same lookup).
+
 ### Video storage, Telegram notifications, and the web report UI
 
 `STORE_VIDEO=true` turns on the third queue stage (`video_status`) and its poll loop thread

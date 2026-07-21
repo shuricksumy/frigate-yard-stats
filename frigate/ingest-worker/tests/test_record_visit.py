@@ -134,6 +134,73 @@ def test_record_visit_still_starts_new_when_frigate_omits_thumb_time(conn_ok, mo
         _cleanup_visit(visit_id)
 
 
+def test_record_visit_resolves_store_video_alerts_from_profile_defaults(conn_ok, monkeypatch):
+    # Regression test: store_video_alerts has no env var backing at all (see config.py) -- a
+    # deployment can only enable it via profiles.yaml. record_visit must resolve it through
+    # profile_config, not a bare config.STORE_VIDEO_ALERTS read (which is always the hardcoded
+    # False and can never see this profile-only override).
+    monkeypatch.setattr(config, "STORE_VIDEO_ALERTS", False)
+    profile = {"defaults": {"store_video_alerts": True}}
+    visit_id = db.record_visit(_review(det_ids=[]), profile)
+    try:
+        row = db._execute(
+            "SELECT video_status FROM yard_stats.visits WHERE id = %s", (visit_id,), fetch=True,
+        )[0]
+        assert row["video_status"] == "new"
+    finally:
+        _cleanup_visit(visit_id)
+
+
+def test_record_visit_resolves_visit_thumb_crop_enabled_from_profile_defaults(conn_ok, monkeypatch):
+    monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", False)
+    profile = {"defaults": {"visit_thumb_crop_enabled": True}}
+    visit_id = db.record_visit(_review(det_ids=[]), profile)
+    try:
+        row = db._execute(
+            "SELECT thumb_crop_status FROM yard_stats.visits WHERE id = %s", (visit_id,), fetch=True,
+        )[0]
+        assert row["thumb_crop_status"] == "new"
+    finally:
+        _cleanup_visit(visit_id)
+
+
+def test_record_visit_resolves_per_type_override_against_representative_det_id(conn_ok, monkeypatch):
+    # The representative type is the earliest-linked raw_event's own objects (by start_ts, id) --
+    # resolved here via det_ids, before the visit row (and its raw_events.visit_id link) exists.
+    monkeypatch.setattr(config, "STORE_VIDEO_ALERTS", True)
+    det_id_car = f"pytest-{uuid.uuid4()}"
+    raw_id = db._execute(
+        """
+        INSERT INTO yard_stats.raw_events
+            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot)
+        VALUES ('pytest-cam', 'pytest-zone', 'car', now(), now(), %s, true, true)
+        RETURNING id
+        """,
+        (det_id_car,), fetch=True,
+    )[0]["id"]
+    profile = {"object_types": {"car": {"store_video_alerts": False}}}
+    visit_id = None
+    try:
+        # Global default (True) would normally start 'new', but the representative event is a
+        # 'car', and car explicitly opts out -- must start 'skipped'.
+        visit_id = db.record_visit(_review(det_ids=[det_id_car]), profile)
+        row = db._execute(
+            "SELECT video_status FROM yard_stats.visits WHERE id = %s", (visit_id,), fetch=True,
+        )[0]
+        assert row["video_status"] == "skipped"
+    finally:
+        _cleanup_raw_events(raw_id)
+        _cleanup_visit(visit_id)
+
+
+def test_visit_thumb_crop_will_be_attempted_resolves_via_profile_config(monkeypatch):
+    monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", False)
+    profile = {"object_types": {"car": {"visit_thumb_crop_enabled": True}}}
+    assert db.visit_thumb_crop_will_be_attempted({}, profile, "car") is True
+    assert db.visit_thumb_crop_will_be_attempted({}, profile, "person") is False
+    assert db.visit_thumb_crop_will_be_attempted({}, None, None) is False
+
+
 def test_record_visit_does_not_touch_unrelated_raw_events(conn_ok):
     unrelated_det_id = f"pytest-{uuid.uuid4()}"
     unrelated_id = _insert_raw_event(unrelated_det_id)

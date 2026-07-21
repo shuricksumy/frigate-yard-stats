@@ -86,7 +86,7 @@ def _handle_event_message(msg):
         return
 
     try:
-        db.insert_raw_event(event)
+        db.insert_raw_event(event, _profile)
         logger.info(
             "Ingested raw_event camera=%s objects=%s det_id=%s",
             event["camera"], event["objects"], event["det_id"],
@@ -109,7 +109,7 @@ def _handle_review_message(msg):
         return
 
     try:
-        visit_id = db.record_visit(review)
+        visit_id = db.record_visit(review, _profile)
         logger.info(
             "Recorded visit id=%s camera=%s det_ids=%s",
             visit_id, review["camera"], review["det_ids"],
@@ -118,18 +118,23 @@ def _handle_review_message(msg):
         logger.exception("Failed to record visit for camera=%s", review.get("camera"))
         return
 
+    if visit_id is None:
+        return
+
+    # Resolved against the representative event's own single object label (not review["objects"],
+    # which can be a comma-joined multi-type list) -- same single-type-per-visit convention
+    # claim_alert_ai_batch already uses. Fetched once here and reused for both the thumb-crop
+    # defer decision below and the Telegram mode resolution, rather than two separate lookups.
+    representative = db.get_representative_event_for_visit(visit_id)
+    object_label = representative.get("objects") if representative else None
+
     # If a thumb-crop re-crop attempt is going to happen for this visit, defer the summary send
     # entirely to visit_thumb_worker -- it fires once the re-crop resolves (done -> the well-timed
     # high-res image, or failed -> falls back to the representative event's own crop), rather than
     # immediately here with whatever the representative event's crop looks like right now. Only
     # skips the immediate send when a deferred one is actually guaranteed to happen later.
-    if visit_id is not None and not db.visit_thumb_crop_will_be_attempted(review):
+    if not db.visit_thumb_crop_will_be_attempted(review, _profile, object_label):
         try:
-            representative = db.get_representative_event_for_visit(visit_id)
-            # Resolved against the representative event's own single object label (not
-            # review["objects"], which can be a comma-joined multi-type list) -- same
-            # single-type-per-visit convention claim_alert_ai_batch already uses.
-            object_label = representative.get("objects") if representative else None
             mode = profile_config.telegram_alerts_mode(_profile, object_label)
             if mode in ("image", "all"):
                 image_base64 = representative.get("crop_image_base64") if representative else None

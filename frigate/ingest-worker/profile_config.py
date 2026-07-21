@@ -93,6 +93,23 @@ def visit_preview_frame_percentages(profile: dict | None, object_label: str | No
     )
 
 
+def store_video_enabled(profile: dict | None, object_label: str | None) -> bool:
+    # Plain per-label resolution (type override -> defaults -> hardcoded fallback), for callers
+    # that already know the one row/type they're deciding for (e.g. insert_raw_event, choosing a
+    # freshly-ingested row's *initial* video_status) -- as opposed to store_video_claim_filter
+    # below, which builds an include/exclude filter for a claim query spanning many rows/types at
+    # once.
+    return _resolve(profile, object_label, "store_video", config.STORE_VIDEO)
+
+
+def store_video_alerts_enabled(profile: dict | None, object_label: str | None) -> bool:
+    return _resolve(profile, object_label, "store_video_alerts", config.STORE_VIDEO_ALERTS)
+
+
+def visit_thumb_crop_enabled(profile: dict | None, object_label: str | None) -> bool:
+    return _resolve(profile, object_label, "visit_thumb_crop_enabled", config.VISIT_THUMB_CROP_ENABLED)
+
+
 def any_ai_events_stage_enabled(profile: dict | None) -> bool:
     # Gates whether ai_worker's whole poll thread starts at all (main.py) -- true if the effective
     # base (profile-wide `defaults`, else config.py's hardcoded fallback) is on, or at least one

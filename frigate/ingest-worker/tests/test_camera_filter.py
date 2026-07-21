@@ -44,7 +44,7 @@ def _review_payload(camera: str) -> bytes:
 def test_event_skipped_when_camera_not_in_allow_list(monkeypatch):
     monkeypatch.setattr(config, "CAMERAS", ["outside"])
     calls = []
-    monkeypatch.setattr(mqtt_ingest.db, "insert_raw_event", lambda event: calls.append(event))
+    monkeypatch.setattr(mqtt_ingest.db, "insert_raw_event", lambda event, *a, **k: calls.append(event))
 
     mqtt_ingest._handle_event_message(_Msg(_event_payload("outside2")))
 
@@ -54,7 +54,7 @@ def test_event_skipped_when_camera_not_in_allow_list(monkeypatch):
 def test_event_processed_when_camera_in_allow_list(monkeypatch):
     monkeypatch.setattr(config, "CAMERAS", ["outside", "outside2"])
     calls = []
-    monkeypatch.setattr(mqtt_ingest.db, "insert_raw_event", lambda event: calls.append(event))
+    monkeypatch.setattr(mqtt_ingest.db, "insert_raw_event", lambda event, *a, **k: calls.append(event))
 
     mqtt_ingest._handle_event_message(_Msg(_event_payload("outside2")))
 
@@ -64,7 +64,7 @@ def test_event_processed_when_camera_in_allow_list(monkeypatch):
 def test_event_processed_when_allow_list_empty(monkeypatch):
     monkeypatch.setattr(config, "CAMERAS", [])
     calls = []
-    monkeypatch.setattr(mqtt_ingest.db, "insert_raw_event", lambda event: calls.append(event))
+    monkeypatch.setattr(mqtt_ingest.db, "insert_raw_event", lambda event, *a, **k: calls.append(event))
 
     mqtt_ingest._handle_event_message(_Msg(_event_payload("any-camera")))
 
@@ -74,7 +74,7 @@ def test_event_processed_when_allow_list_empty(monkeypatch):
 def test_review_skipped_when_camera_not_in_allow_list(monkeypatch):
     monkeypatch.setattr(config, "CAMERAS", ["outside"])
     calls = []
-    monkeypatch.setattr(mqtt_ingest.db, "record_visit", lambda review: calls.append(review) or 1)
+    monkeypatch.setattr(mqtt_ingest.db, "record_visit", lambda review, *a, **k: calls.append(review) or 1)
 
     mqtt_ingest._handle_review_message(_Msg(_review_payload("outside2")))
 
@@ -85,7 +85,9 @@ def test_review_processed_when_camera_in_allow_list(monkeypatch):
     monkeypatch.setattr(config, "CAMERAS", ["outside2"])
     monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "none")
     calls = []
-    monkeypatch.setattr(mqtt_ingest.db, "record_visit", lambda review: calls.append(review) or 1)
+    monkeypatch.setattr(mqtt_ingest.db, "record_visit", lambda review, *a, **k: calls.append(review) or 1)
+    monkeypatch.setattr(mqtt_ingest.db, "get_representative_event_for_visit", lambda visit_id: None)
+    monkeypatch.setattr(mqtt_ingest.db, "visit_thumb_crop_will_be_attempted", lambda *a, **k: False)
 
     mqtt_ingest._handle_review_message(_Msg(_review_payload("outside2")))
 
