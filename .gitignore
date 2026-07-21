@@ -21,3 +21,13 @@ frigate/mosquitto/data/*
 !frigate/mosquitto/data/.gitkeep
 frigate/mosquitto/log/*
 !frigate/mosquitto/log/.gitkeep
+
+# Ephemeral output from frigate/ingest-worker/demo/ (the docs/images/web-ui-demo.mp4 generator) --
+# its own venv and whatever a given run produces; the scripts/real_photos themselves are checked in
+# so the demo can be regenerated without redoing any of that setup.
+frigate/ingest-worker/demo/venv/
+frigate/ingest-worker/demo/recording/
+frigate/ingest-worker/demo/shots/
+frigate/ingest-worker/demo/video_storage/
+frigate/ingest-worker/demo/video_storage_alerts/
+frigate/ingest-worker/demo/*.mp4
