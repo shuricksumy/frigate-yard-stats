@@ -6,7 +6,9 @@ Requires a reachable Postgres with schema.sql applied -- see test_db_video_queue
 docstring for setup notes. Only run against a local/throwaway Postgres.
 """
 import os
+import time
 import uuid
+from datetime import datetime, timedelta, timezone
 
 os.environ.setdefault("MQTT_HOST", "localhost")
 os.environ.setdefault("POSTGRES_PASSWORD", "test")
@@ -102,6 +104,130 @@ def test_list_visits_excludes_unlinked_raw_events(conn_ok):
         assert not any(r["representative_event_id"] == raw_id for r in rows)
     finally:
         _cleanup(raw_id)
+
+
+def test_list_visits_camera_filter_excludes_other_cameras(conn_ok):
+    # Confirms camera actually narrows results (not just "this fixture only has one camera
+    # anyway") -- a visit on a different camera must never appear when filtering to this one.
+    camera_a = f"pytest-cam-a-{uuid.uuid4()}"
+    camera_b = f"pytest-cam-b-{uuid.uuid4()}"
+    det_id_a = f"pytest-{uuid.uuid4()}"
+    det_id_b = f"pytest-{uuid.uuid4()}"
+    raw_id_a = db._execute(
+        """
+        INSERT INTO yard_stats.raw_events
+            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot, crop_status, ai_status)
+        VALUES (%s, 'z', 'car', now(), now(), %s, true, true, 'done', 'done') RETURNING id
+        """,
+        (camera_a, det_id_a), fetch=True,
+    )[0]["id"]
+    raw_id_b = db._execute(
+        """
+        INSERT INTO yard_stats.raw_events
+            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot, crop_status, ai_status)
+        VALUES (%s, 'z', 'car', now(), now(), %s, true, true, 'done', 'done') RETURNING id
+        """,
+        (camera_b, det_id_b), fetch=True,
+    )[0]["id"]
+    visit_a = db.record_visit({
+        "camera": camera_a, "zone": "z", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id_a],
+    })
+    visit_b = db.record_visit({
+        "camera": camera_b, "zone": "z", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id_b],
+    })
+    try:
+        rows = db.list_visits(camera=camera_a, start=None, end=None, limit=50, offset=0)
+        ids = {r["id"] for r in rows}
+        assert visit_a in ids
+        assert visit_b not in ids
+    finally:
+        _cleanup(raw_id_a, visit_id=visit_a)
+        _cleanup(raw_id_b, visit_id=visit_b)
+
+
+def test_list_visits_start_end_time_window_filter(conn_ok):
+    camera = f"pytest-cam-window-{uuid.uuid4()}"
+    now = time.time()
+    det_id_old = f"pytest-{uuid.uuid4()}"
+    det_id_recent = f"pytest-{uuid.uuid4()}"
+    raw_id_old = db._execute(
+        """
+        INSERT INTO yard_stats.raw_events
+            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot, crop_status, ai_status)
+        VALUES (%s, 'z', 'car', now() - interval '2 hours', now() - interval '2 hours', %s,
+                true, true, 'done', 'done') RETURNING id
+        """,
+        (camera, det_id_old), fetch=True,
+    )[0]["id"]
+    raw_id_recent = db._execute(
+        """
+        INSERT INTO yard_stats.raw_events
+            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot, crop_status, ai_status)
+        VALUES (%s, 'z', 'car', now() - interval '1 hour', now() - interval '1 hour', %s,
+                true, true, 'done', 'done') RETURNING id
+        """,
+        (camera, det_id_recent), fetch=True,
+    )[0]["id"]
+    visit_old = db.record_visit({
+        "camera": camera, "zone": "z", "objects": "car",
+        "start_time": now - 7200, "end_time": now - 7190, "det_ids": [det_id_old],
+    })
+    visit_recent = db.record_visit({
+        "camera": camera, "zone": "z", "objects": "car",
+        "start_time": now - 3600, "end_time": now - 3590, "det_ids": [det_id_recent],
+    })
+    try:
+        window_start = datetime.now(timezone.utc) - timedelta(minutes=90)
+        window_end = datetime.now(timezone.utc) - timedelta(minutes=30)
+        rows = db.list_visits(start=window_start, end=window_end, camera=camera, limit=50, offset=0)
+        ids = {r["id"] for r in rows}
+        assert visit_recent in ids
+        assert visit_old not in ids
+    finally:
+        _cleanup(raw_id_old, visit_id=visit_old)
+        _cleanup(raw_id_recent, visit_id=visit_recent)
+
+
+def test_list_visits_combined_object_type_and_camera_filters(conn_ok):
+    camera_a = f"pytest-cam-combo-a-{uuid.uuid4()}"
+    camera_b = f"pytest-cam-combo-b-{uuid.uuid4()}"
+    det_id_car_a = f"pytest-{uuid.uuid4()}"
+    det_id_car_b = f"pytest-{uuid.uuid4()}"
+    det_id_person_a = f"pytest-{uuid.uuid4()}"
+    raw_ids = []
+    for camera, objects, det_id in [
+        (camera_a, "car", det_id_car_a), (camera_b, "car", det_id_car_b), (camera_a, "person", det_id_person_a),
+    ]:
+        raw_ids.append(db._execute(
+            """
+            INSERT INTO yard_stats.raw_events
+                (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot, crop_status, ai_status)
+            VALUES (%s, 'z', %s, now(), now(), %s, true, true, 'done', 'done') RETURNING id
+            """,
+            (camera, objects, det_id), fetch=True,
+        )[0]["id"])
+    visit_car_a = db.record_visit({
+        "camera": camera_a, "zone": "z", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id_car_a],
+    })
+    visit_car_b = db.record_visit({
+        "camera": camera_b, "zone": "z", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id_car_b],
+    })
+    visit_person_a = db.record_visit({
+        "camera": camera_a, "zone": "z", "objects": "person",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id_person_a],
+    })
+    try:
+        rows = db.list_visits(object_type="car", camera=camera_a, start=None, end=None, limit=50, offset=0)
+        ids = {r["id"] for r in rows}
+        assert ids == {visit_car_a}
+    finally:
+        _cleanup(*raw_ids, visit_id=visit_car_a)
+        _cleanup(visit_id=visit_car_b)
+        _cleanup(visit_id=visit_person_a)
 
 
 def test_get_visit_includes_has_video(conn_ok):

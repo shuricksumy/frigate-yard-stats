@@ -161,6 +161,38 @@ def test_alert_video_worker_run_once_passes_resolved_object_types_to_claim(monke
     assert captured == {"object_types": None, "exclude_object_types": ["person"]}
 
 
+def test_alert_video_worker_run_once_skips_claim_entirely_when_nothing_enabled(monkeypatch):
+    monkeypatch.setattr(config, "STORE_VIDEO_ALERTS", False)
+    monkeypatch.setattr(config, "VIDEO_PARALLEL_LIMIT", 5)
+    monkeypatch.setattr(alert_video_worker.db, "reap_stale_visit_video_processing", lambda: None)
+    monkeypatch.setattr(alert_video_worker.db, "count_visit_video_in_progress", lambda: 0)
+
+    def fail_if_called(*a, **k):
+        raise AssertionError("claim_visit_video_batch should not be called when nothing opts in")
+    monkeypatch.setattr(alert_video_worker.db, "claim_visit_video_batch", fail_if_called)
+
+    alert_video_worker.run_once(None)  # STORE_VIDEO_ALERTS false, no profile -- nothing enabled
+
+
+def test_visit_thumb_worker_run_once_passes_resolved_object_types_to_claim(monkeypatch):
+    monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", True)
+    monkeypatch.setattr(config, "VISIT_THUMB_CROP_PARALLEL_LIMIT", 5)
+    monkeypatch.setattr(visit_thumb_worker.db, "reap_stale_visit_thumb_crop_processing", lambda: None)
+    monkeypatch.setattr(visit_thumb_worker.db, "count_visit_thumb_crop_in_progress", lambda: 0)
+    captured = {}
+
+    def fake_claim(limit, object_types=None, exclude_object_types=None):
+        captured["object_types"] = object_types
+        captured["exclude_object_types"] = exclude_object_types
+        return []
+    monkeypatch.setattr(visit_thumb_worker.db, "claim_visit_thumb_crop_batch", fake_claim)
+
+    profile = {"object_types": {"dog": {"visit_thumb_crop_enabled": False}}}
+    visit_thumb_worker.run_once(profile)
+
+    assert captured == {"object_types": None, "exclude_object_types": ["dog"]}
+
+
 def test_visit_thumb_worker_run_once_skips_claim_when_nothing_enabled(monkeypatch):
     monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", False)
     monkeypatch.setattr(config, "VISIT_THUMB_CROP_PARALLEL_LIMIT", 5)
