@@ -328,9 +328,11 @@ plain case. Now that `claim_ai_batch`'s dedup is object-type-aware (see below) r
 collapsing a whole visit to one event regardless of type, plain `source=visits` (i.e.
 `visits_only=false`) is a strict superset of the old events-only mode -- every ungrouped raw_event
 still gets analyzed one-to-one via the fallback, and every visit-grouped one gets analyzed once
-per distinct object type -- so `n8n/metadata-processor.json` (now the only processing workflow)
-just uses plain `source=visits` and never sets `visits_only`. The param still exists for anyone who
-wants to go back to strictly alert-scoped analysis (never touch an ungrouped raw_event at all).
+per distinct object type -- this was the shape `n8n/metadata-processor.json` used back when it was
+n8n's only processing workflow (plain `source=visits`, never `visits_only`), before that file was
+deleted as stale (see "Internal AI stage" below); `ai_worker.py`, the only AI-stage implementation
+running today, doesn't set `source` at all (plain `source=events`). The param still exists for
+whichever caller wants strictly alert-scoped analysis (never touch an ungrouped raw_event at all).
 
 (Bug fixed in passing while building `source`: `claim_ai_batch`'s `RETURNING yard_stats.raw_events.*`
 never included the computed `has_video`/`has_image` fields `EventDetail` requires -- every call
@@ -409,14 +411,17 @@ only one of them, silently dropping the other. Since `only_visit_representative`
 superset of the old `source=events` mode -- every ungrouped raw_event still gets analyzed
 one-to-one via the fallback, every visit-grouped one gets analyzed once per distinct object type,
 and same-type re-tracked duplicates still collapse to one. There's no longer a reason to run two
-workflows or ever pick plain `source=events` -- `n8n/metadata-processor.json` is now the only
+workflows or ever pick plain `source=events` -- `n8n/metadata-processor.json` became the only
 processing workflow, using `source=visits` unconditionally; `metadata-processor-alerts.json` was
-removed.
+removed. `metadata-processor.json` itself has since been deleted too, once it was clear it needed a
+real rework (see "Internal AI stage" below and the note near the bottom of this section) rather
+than a quick fix to keep pace with the universal `/sightings` schema -- `ai_worker.py` is now the
+only AI-stage implementation in this project, in n8n or otherwise.
 
-### Internal AI stage (`ai_worker.py`) -- an alternative to `metadata-processor.json`
+### Internal AI stage (`ai_worker.py`) -- now the only AI-stage implementation
 
 `metadata-processor.json`'s own logic -- claim work, call the VLM, parse the response, insert the
-sighting -- is genuinely deterministic control flow; the only actual "AI" part is the VLM call
+sighting -- was genuinely deterministic control flow; the only actual "AI" part is the VLM call
 itself, which happens regardless of which language issues it. `ai_worker.py` is that same logic
 ported straight into `ingest-worker` as a real, testable Python poll-loop stage, following the
 exact same `process_claimed_event`/`run_once`/`run_forever` shape `crop_worker.py`/`video_worker.py`
@@ -434,12 +439,16 @@ folds reap-stale + count-in-progress + capacity + claim into one call (unlike cr
 functions), so `ai_worker.run_once` is simpler than `crop_worker.run_once` -- just one call plus a
 loop.
 
-**This is an alternative, not a replacement** -- `n8n/metadata-processor.json` is left untouched and
-inactive in n8n, not deleted, and every existing API endpoint (`/ai-queue/*`, `/sightings/*`,
-`/search/semantic`, etc.) is completely unchanged, so the n8n-driven flow can be re-enabled at any
-time. The two must not run against the same queue simultaneously in practice (both would claim
-`ai_status='new'`/`'retry'` rows -- safe from a correctness standpoint, `FOR UPDATE SKIP LOCKED`
-prevents a double-claim either way, but wasteful/confusing to run both at once) -- pick one.
+**This started as an alternative, not a replacement, but is now the only implementation** --
+`n8n/metadata-processor.json` was originally left untouched and inactive in n8n specifically so the
+n8n-driven flow could be re-enabled at any time; every relevant API endpoint (`/ai-queue/*`,
+`/sightings/*`, `/search/semantic`, etc.) still fully supports that mode today, unchanged. But the
+n8n file itself was never reworked for the universal `/sightings` schema (see the note near the
+bottom of this section) and had drifted into duplicate-import clutter on the live n8n instance with
+no upside over the maintained Python version, so it was deleted from this repo -- `ai_worker.py` is
+now the only AI-stage implementation, in n8n or otherwise. Reviving an n8n-driven AI stage from
+scratch is still possible (the API contract hasn't changed), it just isn't a matter of reactivating
+an existing file anymore.
 
 **Prompts and per-object-type model routing live in `frigate/profiles.yaml`, not env vars** --
 `docker-compose.yml` bind-mounts this file (repo root, alongside `docker-compose.yml` itself) over
@@ -1486,9 +1495,9 @@ attach one -- same dry-run-by-default shape `/retention/purge` already uses (`co
 `confirm=true` actually processes up to `limit` rows per table, call it repeatedly until
 both counts reach zero). Deliberately independent of `AI_EVENTS_STAGE_ENABLED`/`process_claimed_event` --
 it only ever re-embeds a sighting's own already-stored `description` (`db.get_sightings_missing_
-embedding`/`get_visit_sightings_missing_embedding`), never re-runs the VLM, so it works whether
-`metadata-processor.json` or the internal AI stage is your primary AI flow, or neither is currently
-running. Embeds `description` directly (no combination step needed -- it's already the one-line
+embedding`/`get_visit_sightings_missing_embedding`), never re-runs the VLM, so it works regardless
+of whether `ai_worker.py` (the only AI-stage implementation now) is currently running. Embeds
+`description` directly (no combination step needed -- it's already the one-line
 summary for every object type) via the same `ai_worker._embed_text` helper
 `process_claimed_event`'s own embed step already uses, so a backfilled row's embedding means the
 same thing as a freshly-computed one. Requires
@@ -1504,22 +1513,15 @@ somewhat newer than the nominal `RETENTION_MONTHS` cutoff, since the scheduled s
 slow cadence -- this reflects what's actually still in the database right now, not the configured
 policy alone.
 
-n8n's metadata-processor workflow calls the embedding slot with the VLM's `description` response
-directly, right before the final `POST /sightings` -- there's no separate "build a summary line"
-code node needed, since the raw model output already is the one-line description to embed, for
-any object type. An embedding-call failure falls back to `embedding: null` rather than losing an
-already-computed sighting (`onError: continueErrorOutput` wired straight into the Insert node
-either way), the same "never lose the sighting over an embedding hiccup" decision the internal AI
-stage makes in Python.
-
-**Note:** `n8n/metadata-processor.json` still reflects the old vehicle/person shape (separate
-`Call Qwen (Attributes + Plate)`/`Call VLM (Person)` branches, JSON-schema prompts, and
-`POST /sightings/vehicles|persons`) and has not yet been reworked for the universal `/sightings`
-API described in this document -- it needs its own follow-up pass (new prompts per
-`profiles.yaml`'s `event_prompt`s, one shared POST node instead of two) before it can run against
-this schema again. `ai_worker.py` (the internal AI stage, always in sync with this document since
-it lives in this same repo) is the reference implementation for the universal shape in the
-meantime.
+**Update:** `n8n/metadata-processor.json` was deleted from this repo -- it never received the
+follow-up pass it would have needed (new prompts per `profiles.yaml`'s `event_prompt`s, one shared
+POST node instead of two) and remained on the old vehicle/person shape (separate `Call Qwen
+(Attributes + Plate)`/`Call VLM (Person)` branches, JSON-schema prompts, `POST
+/sightings/vehicles|persons`), all of which the universal `/sightings` schema had already removed
+-- reactivating it as-is would have 500'd on its very first insert. Keeping a known-broken workflow
+file around had no upside and had contributed to n8n import clutter in practice (multiple stale
+re-imported copies of it were found and cleaned up from a live n8n instance). `ai_worker.py` remains
+the reference implementation for the universal shape, and is now the only one.
 
 **`n8n/yard-stats-qa.json`** was upgraded in place (same `Ask Webhook`/`Respond` shape any existing
 caller already uses) from a naive "dump the last 200 rows, ask once" workflow -- which had no time

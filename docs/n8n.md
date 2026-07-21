@@ -2,23 +2,29 @@
 
 [n8n](https://n8n.io) is a visual workflow-automation tool — you build a flow out of connected
 "nodes" (an HTTP call, an if/else branch, a bit of code, a scheduled trigger...) instead of writing
-a script from scratch. This project ships four ready-made workflows as plain JSON files under
-`n8n/` — you import them into your own n8n instance rather than writing anything from scratch.
-This page assumes you have a working n8n instance already (self-hosted or n8n Cloud) but have never
-imported a workflow before.
+a script from scratch. This project ships three ready-made workflows, plus one callable
+sub-workflow, as plain JSON files under `n8n/` — you import them into your own n8n instance rather
+than writing anything from scratch. This page assumes you have a working n8n instance already
+(self-hosted or n8n Cloud) but have never imported a workflow before.
 
-## The four workflows, in one sentence each
+**None of these are required for the pipeline to actually do anything useful.** The AI analysis
+stage itself — claiming cropped/grouped events, sending the image(s) to your local VLM, writing the
+result back — is handled internally by `ingest-worker`'s own `ai_worker.py` poll loop, not by an
+n8n workflow; see [configuration.md](configuration.md#internal-ai-stages) to turn it on
+(`ai_events_stage_enabled` in `profiles.yaml`). Everything on this page is optional, report-and-Q&A
+tooling on top of that.
+
+## The workflows, in one sentence each
 
 | File | What it does | Trigger |
 |---|---|---|
-| `metadata-processor.json` | The AI stage: claims cropped/grouped events, sends the image(s) to your local VLM, writes the result back | Every minute |
 | `daily-report.json` | Emails/Telegrams an HTML report of the day's analyzed events | Scheduled (7am default) |
 | `alerts-report.json` | Same idea, but grouped by visit (one row per real-world activity) instead of one row per raw event | Scheduled (7am default) |
 | `yard-stats-qa.json` | Answer a plain-English question ("any red cars today?") against recent sightings | Webhook (called on demand, not scheduled) |
+| `yard-stats-semantic-search-tool.json` | Sub-workflow `yard-stats-qa.json` calls internally for fuzzy/meaning-based search — not meant to run on its own | Called by `yard-stats-qa.json` |
 
-Only `metadata-processor.json` is required for the pipeline to actually do anything useful (without
-it, events sit forever with `ai_status='new'`, never analyzed). The report workflows and Q&A are
-genuinely optional — turn them on whenever you're ready.
+They're independent of each other — import and enable whichever you actually want, whenever you're
+ready.
 
 ## Step 1: Import
 
@@ -32,15 +38,16 @@ Every workflow has a few `REPLACE_WITH_...` values baked into node parameters (U
 n8n's search (Ctrl+F / Cmd+F inside the workflow editor) for `REPLACE_WITH_` is the fastest way to
 find every one that needs attention in a given workflow. What each one means:
 
-- **`REPLACE_WITH_INGEST_WORKER_HOST` / `REPLACE_WITH_INGEST_WORKER_PORT`** (all four workflows) —
+- **`REPLACE_WITH_INGEST_WORKER_HOST` / `REPLACE_WITH_INGEST_WORKER_PORT`** (all of these) —
   wherever `ingest-worker` is reachable from n8n. If n8n and `ingest-worker` are on the same Docker
   host and the same network, this can be the Docker service name (`ingest-worker`) and its internal
   port; otherwise use the host's real LAN IP and `INGEST_WORKER_API_PORT` from `.env` (default
   `8080`).
-- **`REPLACE_WITH_VLM_HOST` / `REPLACE_WITH_VLM_PORT`** (`metadata-processor.json`,
-  `yard-stats-qa.json`) — your own locally-hosted OpenAI-compatible VLM endpoint (e.g. a
-  `llama.cpp` server, [`llama_slot_proxy`](https://github.com/shuricksumy/llama-slot-proxy), or
-  similar). Not something this repo provides — bring your own.
+- **`REPLACE_WITH_VLM_HOST` / `REPLACE_WITH_VLM_PORT`** (`yard-stats-qa.json`'s Chat Model
+  credential, `yard-stats-semantic-search-tool.json`) — your own locally-hosted OpenAI-compatible
+  VLM endpoint (e.g. a `llama.cpp` server,
+  [`llama_slot_proxy`](https://github.com/shuricksumy/llama-slot-proxy), or similar). Not something
+  this repo provides — bring your own.
 - **`REPLACE_WITH_CHAT_ID`** (report workflows) — your Telegram chat ID, if you want the report
   sent there too (see [Telegram setup](configuration.md#telegram-notifications)).
 - **`REPLACE_WITH_FROM_ADDRESS` / `REPLACE_WITH_TO_ADDRESS`** (report workflows) — if you also want
@@ -74,18 +81,8 @@ Every workflow imports **disabled**. Before flipping it on:
 2. Check the output of each node as it runs (n8n highlights failures in red) — especially the
    first HTTP Request node into `ingest-worker`, since a wrong host/port or missing API key shows
    up immediately here.
-3. For `metadata-processor.json` specifically: run it once, then check
-   `http://<host>:8080/ui` (or `POST /sightings` via Swagger) to confirm
-   a real sighting actually got written with sensible-looking values, not just "the HTTP calls
-   didn't error." **Note:** this workflow still targets the old two-category (vehicle/person)
-   shape (`/sightings/vehicles`/`/sightings/persons`, JSON-schema prompts) and has not yet been
-   reworked for the universal `sightings` schema/API described in CLAUDE.md — it needs its own
-   update (one shared `POST /sightings` call, free-text prompts per `profiles.yaml`) before it can
-   run against a database created from the current `schema.sql`. The internal AI stage
-   (`ai_worker.py`/`AI_EVENTS_STAGE_ENABLED`) is the reference implementation for the universal
-   shape in the meantime — see [configuration.md](configuration.md#internal-ai-stages-alternative-to-n8ns-metadata-processorjson).
-4. Only once a manual run looks right, toggle the workflow **Active** (top-right in the workflow
-   editor) to let its trigger (schedule or, for the metadata processor, "every minute") take over.
+3. Only once a manual run looks right, toggle the workflow **Active** (top-right in the workflow
+   editor) to let its trigger (schedule, or a webhook for `yard-stats-qa.json`) take over.
 
 ## About `yard-stats-qa.json` specifically
 
@@ -96,11 +93,14 @@ request body/query, and it responds with an answer built from recent sightings. 
 be driven by whatever's convenient for you to trigger from, rather than assuming any particular
 chat client.
 
-## Tuning the AI queue from n8n, without touching `ingest-worker`
+## Tuning the AI queue, if you build your own n8n-based AI stage
 
-`metadata-processor.json`'s **Claim Next Batch (API)** node has a few query parameters you can
-freely edit without redeploying anything — `parallel_limit` (how many events to claim per run),
+There's no shipped n8n workflow for the AI stage anymore — `ai_worker.py` is the maintained
+implementation, tuned via `profiles.yaml`/`.env` (see
+[configuration.md](configuration.md#internal-ai-stages)). But `ingest-worker`'s
+`/ai-queue/claim` endpoint is unchanged and fully supports a custom n8n workflow calling it instead,
+the same way the old `metadata-processor.json` did: a few query parameters you can freely edit
+without redeploying anything — `parallel_limit` (how many events to claim per run),
 `stale_minutes` (how long before a stuck claim is reclaimed), `max_age_hours` (skip events older
 than this rather than spending capacity on backlog). See `CLAUDE.md`'s "Query/report/AI-queue API"
-section if you want the full reasoning behind each one — the short version is: these are meant to
-be tuned live in n8n as your traffic changes, not treated as fixed.
+section for the full reasoning behind each one if you go this route.

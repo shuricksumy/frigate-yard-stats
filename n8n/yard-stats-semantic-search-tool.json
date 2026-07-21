@@ -27,7 +27,7 @@
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4.2,
       "position": [450, 300],
-      "notes": "Same embedding slot/model (Qwen3-Embedding-0.6B-GGUF, 1024 dims) metadata-processor.json's Call Embedding Model (Vehicle)/(Person) nodes use -- the query text has to be embedded with the same model that wrote the stored sightings' vectors, or cosine distance between them is meaningless.",
+      "notes": "Same embedding slot/model (Qwen3-Embedding-0.6B-GGUF, 1024 dims) the AI stage's own embed step uses (ai_worker._embed_text, or n8n's equivalent embed-then-insert step if that flow is active) -- the query text has to be embedded with the same model that wrote the stored sightings' vectors, or cosine distance between them is meaningless.",
       "notesInFlow": true,
       "parameters": {
         "method": "POST",

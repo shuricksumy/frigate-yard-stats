@@ -8,10 +8,10 @@
 # copy baked into the image as the fallback default (used only if the bind mount is ever removed).
 #
 # Configures both internal AI stages -- ai_worker.py (ai_events_stage_enabled below) and
-# alert_ai_worker.py (ai_alerts_enabled below), alternatives to n8n/metadata-processor.json, not a
-# replacement for it: that workflow is left untouched in the repo (though it now expects the old
+# alert_ai_worker.py (ai_alerts_enabled below), the only AI-stage implementation in this project
+# now (n8n/metadata-processor.json was deleted as stale -- it never moved past the old
 # vehicle_sightings/person_sightings shape this project moved away from -- see CLAUDE.md's
-# "Universal sightings" section -- so it would need its own rework before being usable again).
+# "Universal sightings" / "Internal AI stage" sections).
 #
 # object_types is FLAT and universal -- one entry per Frigate object label (raw_events.objects),
 # each with its own prompt/model. There is no "sighting_type" concept in the code at all: every
@@ -50,9 +50,9 @@
 #   telegram_events_mode / telegram_alerts_mode -- none/image/video/all (see telegram.py). e.g. a
 #     `dog` entry could set telegram_events_mode: none to silence noisy dog-only notifications
 #     while cars/people still notify normally. Hardcoded fallback: "none" (both).
-#   ai_events_stage_enabled / ai_alerts_enabled -- true/false, alternatives to
-#     n8n/metadata-processor.json (see CLAUDE.md's "Internal AI stage" section). Setting either
-#     true for at least one type (or in `defaults`) is enough to start that stage's poll thread --
+#   ai_events_stage_enabled / ai_alerts_enabled -- true/false, whether this project's only AI-stage
+#     implementation analyzes this type (see CLAUDE.md's "Internal AI stage" section). Setting
+#     either true for at least one type (or in `defaults`) is enough to start that stage's poll thread --
 #     see profile_config.any_ai_events_stage_enabled/any_ai_alerts_enabled, used by main.py's
 #     thread-startup check. Hardcoded fallback: false (both, i.e. off).
 #   crop_disabled / crop_frame_offset_pct / crop_padding_pct / frigate_snapshot_enabled -- crop

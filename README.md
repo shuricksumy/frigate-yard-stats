@@ -20,12 +20,14 @@ footage) — just to show the UI itself in motion.*
   stores the result — no image analysis yet at this point. Optionally stores the clip itself
   (per-event and/or per-visit) and sends Telegram notifications (photo/video per event, or one
   summary + composite preview grid/GIF per visit).
-- A single n8n workflow sends the cropped image (or, for a visit, a composite grid of frames
-  sampled across its whole span) to a locally-hosted VLM: vehicles get color/body-type/make/plate
-  in one call; people get a short description. Frigate's own LPR read is kept alongside the VLM's
-  plate read as a cross-check.
+- An internal AI-stage poll loop (`ai_worker.py`, off by default) sends the cropped image (or, for
+  a visit, a composite grid of frames sampled across its whole span) to a locally-hosted VLM, using
+  whatever prompt `profiles.yaml` defines for that Frigate object type — a vehicle prompt asking
+  for color/body-type/plate, a person prompt asking for a clothing description, and so on. Frigate's
+  own LPR read is kept alongside whatever the VLM says as a cross-check.
 - A read/query/report/AI-queue API on `ingest-worker` (events, visits, sightings, aggregate stats,
-  HTML report generation, plus the AI-stage queue mechanics n8n calls into) and a natural-language
+  HTML report generation, plus the AI-stage queue mechanics the internal stage uses and n8n or any
+  other caller can use instead) and a natural-language
   Q&A workflow sit on top. The static web report UI shown above (`/ui`, no build step) browses the
   same data — Events or Visits view, filters, a media lightbox with video/image/preview-GIF toggle.
 - A configurable retention sweep deletes data (DB rows and any stored video files) past a set age
@@ -71,18 +73,22 @@ ingest-worker/  (Python, one container, no LLM calls)
      at /ui over that same API
    │  (crop_status = 'done')
    ▼
-n8n Metadata Processor workflow (AI stage only, no Frigate/crop/video/Telegram calls)
-   - claims a batch via /ai-queue/claim, calls the VLM(s), posts results to /sightings/*
+AI stage (ai_worker.py, an internal ingest-worker poll-loop thread, off by default -- or a custom
+          n8n workflow/script calling the same /ai-queue/* API instead)
+   - claims a batch, calls the VLM per profiles.yaml's prompt for that object type, writes the
+     sighting back
    │
    ▼
 Daily/alerts report + Q&A workflows (n8n) -- read-only, call ingest-worker's report/query API
 ```
 
 Three independent retry-with-backoff queue stages live on `raw_events` (crop, video, AI) and two
-more on `visits` (video, preview grid/GIF) — `ingest-worker` owns all of them mechanically; only
-the AI stage's policy (when to claim, how many attempts) is decided by n8n, via query params on
-`ingest-worker`'s API rather than raw SQL. See [`CLAUDE.md`](CLAUDE.md) for the full write-up of
-every stage, endpoint, and the production issues that shaped this design.
+more on `visits` (video, preview grid/GIF) — `ingest-worker` owns all of them mechanically,
+including the AI stage's own policy (parallel limit, stale/max-age cutoffs, all tunable in
+`profiles.yaml`/`.env`) when using the built-in `ai_worker.py`; an external caller driving the same
+`/ai-queue/*` API instead (e.g. a custom n8n workflow) would decide that policy itself via query
+params. See [`CLAUDE.md`](CLAUDE.md) for the full write-up of every stage, endpoint, and the
+production issues that shaped this design.
 
 ## Semantic search — finding things by meaning, not exact words
 
@@ -138,7 +144,7 @@ frigate/                        # main project folder -- the pipeline + Frigate'
   mosquitto/                      # optional local MQTT broker (--profile mqtt), for dev/testing
   backup-postgres-projects.sh
   frigate.conf                     # Frigate's own config, read by the "frigate" service/profile
-n8n/                             # importable workflow JSON (metadata processor, reports, Q&A)
+n8n/                             # importable workflow JSON (reports, Q&A -- AI analysis is internal, see ai_worker.py)
 docs/                            # plain-language guides -- see Documentation above
 ```
 
@@ -155,7 +161,8 @@ Mosquitto broker) for a from-scratch dev stack with no external broker dependenc
 - A locally-hosted OpenAI-compatible VLM endpoint (e.g. a `llama.cpp` server, or
   [`llama-slot-proxy`](https://github.com/shuricksumy/llama-slot-proxy) — see Related projects
   below) reachable over HTTP.
-- An n8n instance to import the workflow JSON into.
+- (Optional) An n8n instance, if you want the daily/alerts report emails or the Q&A webhook — not
+  required for the core pipeline, which analyzes events internally via `ai_worker.py`.
 - Docker + Docker Compose.
 
 ## Quick start
@@ -169,9 +176,11 @@ Mosquitto broker) for a from-scratch dev stack with no external broker dependenc
    any of this is new to you.
 3. Open `http://<host>:8080/ui` (or `/docs` for the raw API) to confirm it's ingesting and
    cropping real events — see [`docs/web-ui.md`](docs/web-ui.md) for a tour.
-4. Import the workflows under `n8n/` — at minimum `metadata-processor.json`, the AI analysis
-   stage. See [`docs/n8n.md`](docs/n8n.md) for placeholders, credentials, and testing before you
-   enable the schedule.
+4. Turn on AI analysis: set `ai_events_stage_enabled: true` under `defaults` (or per object type)
+   in `frigate/profiles.yaml`, and point `LLAMA_PROXY_BASE_URL` (`.env`) at your VLM host —
+   `ai_worker.py` then claims cropped events, calls the VLM, and writes each sighting back, no n8n
+   required. n8n is optional, for the daily/alerts report emails and the Q&A webhook — see
+   [`docs/n8n.md`](docs/n8n.md) if you want those.
 5. Separately, if you also need Frigate itself: same `frigate/.env` on the NVR host, then
    `docker compose --profile nvr up -d`. See [`docs/frigate.md`](docs/frigate.md) for the parts of
    `frigate.conf` this project actually depends on.
@@ -199,7 +208,7 @@ other (own containers, own Postgres schema — see `CLAUDE.md`), but designed to
 - [**llama-slot-proxy**](https://github.com/shuricksumy/llama-slot-proxy) — a multi-model
   `llama.cpp` slot proxy, one URL path segment per model (chat/VLM/embedding). This is the
   `LLAMA_PROXY_BASE_URL` this project's AI stage and n8n workflows call for VLM/OCR/embedding
-  inference — see [`docs/configuration.md`](docs/configuration.md#internal-ai-stage-alternative-to-n8ns-metadata-processorjson)
+  inference — see [`docs/configuration.md`](docs/configuration.md#internal-ai-stages)
   and `frigate/profiles.yaml`.
 - [**llama-service**](https://github.com/shuricksumy/llama-service) — the underlying local LLM
   serving setup this pipeline's VLM/embedding calls ultimately run on.

@@ -25,10 +25,11 @@ once — bring it up in stages so if something looks wrong, you know which piece
    Frigate recording retention settings).
 4. **Turn on Telegram** whenever you want notifications — independent of everything else.
 5. **Semantic search and the internal AI stages are both separate, later opt-ins** — neither is
-   needed to get the core pipeline or n8n's `metadata-processor.json` working. Turn on pgvector
-   embeddings once you're already running `metadata-processor.json` successfully; only consider
-   the internal AI stages (`ai_events_stage_enabled`, `ai_alerts_enabled`, both in
-   `profiles.yaml`) once you're comfortable letting them replace or supplement that n8n workflow.
+   needed to get the core pipeline running. The AI stage itself (`ai_events_stage_enabled`,
+   `ai_alerts_enabled`, both in `profiles.yaml`) is what actually analyzes events with a VLM and
+   writes `sightings` rows — turn it on once you're comfortable with the events/visits flow above.
+   Only turn on pgvector embeddings once the AI stage is already writing real sightings, since
+   there's nothing to embed until then.
 
 ## Required settings
 
@@ -283,8 +284,8 @@ Requires `postgres-projects` to run the `pgvector/pgvector:pg16` image (already 
 `docker-compose.yml`) rather than plain `postgres:16` — `schema.sql`'s `CREATE EXTENSION IF NOT
 EXISTS vector` needs that extension actually present in the image. No `ingest-worker` env var
 turns this on/off by itself — the universal `sightings`/`visit_sightings` tables gain a nullable
-`embedding` column either way; it just stays empty until something (n8n's `metadata-processor.json`,
-or the internal AI stage below) actually sends one via `POST /sightings`. `POST
+`embedding` column either way; it just stays empty until something (the internal AI stage below, or
+a custom n8n workflow) actually sends one via `POST /sightings`. `POST
 /search/semantic` is the read side — cosine-similarity search over whatever sightings do have an
 embedding, filtered by a time range and (optionally) which object labels to include. See CLAUDE.md's
 "Semantic search and the Q&A agent" section for the full design, and
@@ -297,16 +298,17 @@ once with no `confirm` to see how many rows are missing an embedding, then repea
 hit zero. Needs `LLAMA_PROXY_BASE_URL` set (see "Internal AI stage" below) even if you're not using
 that stage for anything else — it's the only thing this endpoint needs from that section.
 
-## Internal AI stages (alternative to n8n's metadata-processor.json)
+## Internal AI stages
 
 Two independent stages, both configured in `profiles.yaml` (not `.env` — see "Per-object-type
-overrides" below) and off by default unless enabled there — n8n's `metadata-processor.json` is the
-AI stage until you deliberately opt into one or both instead:
+overrides" below) and off by default unless enabled there — nothing analyzes events with a VLM at
+all until you turn at least one of these on (there's no n8n workflow shipped for this anymore, see
+[`n8n.md`](n8n.md)):
 
 - **`ai_events_stage_enabled`** — analyzes each event's own single-frame crop with
-  `profiles.yaml`'s `event_prompt`. Don't run alongside n8n's `metadata-processor.json` against
-  the same queue at once (see CLAUDE.md's "Internal AI stage" section for why that's wasteful,
-  though not unsafe).
+  `profiles.yaml`'s `event_prompt`. If you ever build your own n8n workflow against the same
+  `/ai-queue/claim` endpoint, don't run it alongside this at once against the same queue (safe
+  either way — `FOR UPDATE SKIP LOCKED` prevents a double-claim — just wasteful/confusing).
 - **`ai_alerts_enabled`** — analyzes a visit's own composite grid (4 frames sampled across
   its span) with `profiles.yaml`'s `alert_prompt`, storing results separately in
   `visit_sightings`. Requires `visit_thumb_crop_enabled` to be on for that type —
