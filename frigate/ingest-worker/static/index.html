@@ -51,6 +51,14 @@
             </template>
           </select>
         </label>
+        <label x-show="viewMode === 'search' && !advancedSearch">
+          Precision
+          <select x-model="filters.precision" @change="applyFilters()">
+            <template x-for="opt in searchPrecisionOptions" :key="opt.value">
+              <option :value="opt.value" x-text="opt.label"></option>
+            </template>
+          </select>
+        </label>
 
         <div class="advanced-filters" x-show="advancedSearch" style="display:none">
           <label x-show="viewMode === 'events'">
@@ -89,6 +97,11 @@
           <label class="checkbox-label" x-show="viewMode === 'events'">
             <input type="checkbox" x-model="filters.onlyWithMedia" @change="applyFilters()">
             Only with media
+          </label>
+          <label x-show="viewMode === 'search'" title="Exact cosine-distance cutoff, overrides the Precision preset above when set. Leave blank to use that preset instead.">
+            Precision (exact)
+            <input type="number" step="0.01" min="0" max="2" x-model="filters.maxDistanceOverride"
+                   placeholder="e.g. 0.45" @change="applyFilters()">
           </label>
         </div>
       </div>
@@ -168,6 +181,7 @@
               <p class="search-result-description" x-text="result.description"></p>
               <div class="badges">
                 <span class="badge" x-text="result.kind"></span>
+                <span class="badge match-badge" :title="'cosine distance ' + result.distance.toFixed(3)" x-text="matchPercent(result.distance) + '% match'"></span>
                 <span class="badge" x-show="result.has_video">video</span>
               </div>
             </div>

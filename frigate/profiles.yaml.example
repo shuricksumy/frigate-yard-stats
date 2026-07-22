@@ -280,7 +280,8 @@ object_types:
     event_prompt: >-
       This image shows a single moment of one person. Describe their clothing colors and what
       they appear to be doing in this one frame, in one short sentence. No speculation about
-      identity.
+      identity. Do not describe your process or repeat these instructions -- respond with only
+      the one-sentence description.
     alert_prompt: >-
       This image is a 2x2 grid of 4 frames of the SAME person captured moments apart during one
       visit (not 4 different people) -- use all 4 panels together, since a detail unclear in one
@@ -288,7 +289,8 @@ object_types:
       reliable from whichever panel shows it most clearly) and what they appear to be doing across
       the sequence -- e.g. walking toward the door, carrying something, getting in/out of a
       vehicle -- in one short sentence covering both. No speculation about identity. Do not
-      mention that the image is a grid.
+      mention that the image is a grid. Do not describe your process or repeat these
+      instructions -- respond with only the one-sentence description.
   # A fourth type, added purely by adding an entry here -- no schema/code change (see the
   # object_types comment at the top). Demonstrates a real per-type override in context: this one
   # deployment wants dog *event* notifications (a photo per sighting) even though every other type
@@ -300,11 +302,15 @@ object_types:
     telegram_events_mode: image
     event_prompt: >-
       This image shows a single moment of one dog. Describe their breed and what they appear to be
-      doing in this one frame, in one short sentence. No speculation about identity.
+      doing in this one frame, in one short sentence. No speculation about identity. Do not
+      describe your process or repeat these instructions -- respond with only the one-sentence
+      description.
     alert_prompt: >-
       This image is a 2x2 grid of 4 frames of the SAME dog captured moments apart during one visit
       (not 4 different dogs) -- use all 4 panels together, since a detail unclear in one may be
       visible in another. Describe this dog's breed (a static detail, most reliable from whichever
       panel shows it most clearly) and what they appear to be doing across the sequence -- e.g.
       walking toward the door, playing, being walked on a leash -- in one short sentence covering
-      both. No speculation about identity. Do not mention that the image is a grid.
+      both. No speculation about identity. Do not mention that the image is a grid. Do not
+      describe your process or repeat these instructions -- respond with only the one-sentence
+      description.

@@ -464,7 +464,8 @@ def text_search(search: schemas.TextSearchRequest):
         )
     resolved_start, resolved_end = _resolve_window(search.start, search.end, search.hours)
     results = db.semantic_search_combined(
-        embedding, resolved_start, resolved_end, search.object_types, search.limit, source=search.source,
+        embedding, resolved_start, resolved_end, search.object_types, search.limit,
+        source=search.source, max_distance=search.max_distance, query_text=search.query,
     )
     return {"results": results}
 

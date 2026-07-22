@@ -58,7 +58,17 @@ per-event sightings and per-visit alert-stage sightings together (there's no sep
 "just events" or "just visits" in the UI). Click a result to open the exact same lightbox the
 Events/Visits tabs use, whether it's an event or a visit under the hood. If the embedding backend
 is unreachable or misconfigured, an error banner explains why instead of silently showing an empty
-grid.
+grid. Each card shows a rough **match %** badge (hover for the exact cosine distance) — a
+human-friendly stand-in for how confident the match is, not a calibrated probability.
+
+A query with fewer genuinely relevant sightings than the page size can otherwise pad itself out
+with weak, barely-related filler once it runs out of real matches. The **Precision** dropdown
+(simple view) controls a relevance cutoff: **High precision** (default) drops anything past a
+fairly strict distance threshold, **Balanced** is more lenient, and **Show everything** disables
+the cutoff entirely (today's original behavior). A cutoff never hides a sighting that literally
+contains your query word, even past the threshold — so searching "dog" still surfaces a mostly
+unrelated sentence that happens to mention a dog in passing. Advanced mode swaps the dropdown for
+a **Precision (exact)** number field if you want to dial in the exact cutoff value yourself.
 
 ## Opening a card
 

@@ -6,6 +6,20 @@ const API_KEY_COOKIE = "api_key";
 const COOKIE_MAX_AGE_SECONDS = 10 * 365 * 24 * 60 * 60; // ~10 years -- "never" isn't representable
 const AUTO_REFRESH_SECONDS = 15;
 
+// Search tab's precision dropdown -- named presets over POST /search's own max_distance param
+// rather than exposing a raw cosine-distance number, since that's meaningless to a user. "High"
+// is the default: without any cutoff, a query with fewer genuinely-relevant sightings than the
+// requested limit still pads the result grid out with whatever's next-closest, which reads as
+// "search is broken" rather than "there just isn't more to find" (confirmed in practice -- a
+// small/general embedding model's false-positive distances can land within ~0.05 of true
+// matches, so "no cutoff" and "very lenient cutoff" look almost identical in the noisiest cases).
+// null means no filter at all (today's original, unfiltered behavior).
+const SEARCH_PRECISION_OPTIONS = [
+  { value: "high", label: "High precision", maxDistance: 0.45 },
+  { value: "balanced", label: "Balanced", maxDistance: 0.55 },
+  { value: "broad", label: "Show everything", maxDistance: null },
+];
+
 function getCookie(name) {
   const match = document.cookie.match(new RegExp("(?:^|; )" + name + "=([^;]*)"));
   return match ? decodeURIComponent(match[1]) : null;
@@ -47,6 +61,7 @@ function eventsApp() {
     // Quick time-range presets for the default view's "Time range" selector -- the advanced
     // panel's From/To date pickers override this when set (see fetchEvents/fetchVisits).
     hoursOptions: [1, 3, 6, 12, 24],
+    searchPrecisionOptions: SEARCH_PRECISION_OPTIONS,
 
     autoRefreshEnabled: true,
     lastUpdated: null,
@@ -54,15 +69,20 @@ function eventsApp() {
 
     filters: {
       objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
-      hours: 1, start: "", end: "",
+      hours: 1, start: "", end: "", precision: "high", maxDistanceOverride: "0.5",
     },
 
     // Shared by resetFilters/toggleAdvancedSearch/switchView -- every one of them resets to this
-    // same clean slate, just triggered by a different action.
-    _defaultFilters() {
+    // same clean slate, just triggered by a different action. Search defaults to a 24-hour window
+    // (matching POST /search's own default) rather than Events/Visits' 1-hour default -- a semantic
+    // search silently scoped to the last hour returned only the closest-available-but-irrelevant
+    // matches with no indication why (e.g. searching "dog" found no dog sighting in the last hour
+    // and fell back to ranking car/person sightings instead), which read as broken ranking rather
+    // than an invisible, overly narrow time filter.
+    _defaultFilters(mode) {
       return {
         objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
-        hours: 1, start: "", end: "",
+        hours: mode === "search" ? 24 : 1, start: "", end: "", precision: "high", maxDistanceOverride: "0.5",
       };
     },
 
@@ -150,7 +170,7 @@ function eventsApp() {
       // kept applying on the next fetch after switching -- same class of confusion the advanced/
       // simple mode toggle already resets for (see toggleAdvancedSearch). A clean slate on every
       // tab switch is simpler than reasoning about which values are still meaningful in the new view.
-      this.filters = this._defaultFilters();
+      this.filters = this._defaultFilters(mode);
       this.searchResults = [];
       this.searchAttempted = false;
       this.searchError = "";
@@ -245,7 +265,7 @@ function eventsApp() {
     },
 
     resetFilters() {
-      this.filters = this._defaultFilters();
+      this.filters = this._defaultFilters(this.viewMode);
       this.advancedSearch = false;
       this.applyFilters();
     },
@@ -257,7 +277,7 @@ function eventsApp() {
     // confusion entirely rather than only patching the one Time-range/From-To case.
     toggleAdvancedSearch() {
       this.advancedSearch = !this.advancedSearch;
-      this.filters = this._defaultFilters();
+      this.filters = this._defaultFilters(this.viewMode);
       this.applyFilters();
     },
 
@@ -400,6 +420,21 @@ function eventsApp() {
         if (this.filters.objectType && this.filters.objectType !== "all") {
           body.object_types = [this.filters.objectType];
         }
+        // Advanced mode's exact-value override wins over the simple Precision preset -- the preset
+        // is coarse on purpose (three named steps), but a user comparing results across borderline
+        // cases (e.g. a cutoff of 0.45 vs. 0.46) wants finer control than three buckets offer.
+        // Gated on advancedSearch itself (not just whether the field has a value) so the field's
+        // own default (0.5, prefilled the moment advanced mode opens) never silently overrides the
+        // simple/default search experience while the advanced panel isn't even shown.
+        const override = this.advancedSearch ? String(this.filters.maxDistanceOverride || "").trim() : "";
+        if (override !== "" && !Number.isNaN(Number(override))) {
+          body.max_distance = Number(override);
+        } else {
+          const precisionOption = SEARCH_PRECISION_OPTIONS.find((p) => p.value === this.filters.precision);
+          if (precisionOption && precisionOption.maxDistance !== null) {
+            body.max_distance = precisionOption.maxDistance;
+          }
+        }
         // Same From/To-overrides-preset precedence fetchEvents/fetchVisits already use.
         if (this.filters.start || this.filters.end) {
           if (this.filters.start) body.start = new Date(this.filters.start).toISOString();
@@ -431,6 +466,15 @@ function eventsApp() {
       } finally {
         this.loading = false;
       }
+    },
+
+    // Rough, human-friendly stand-in for cosine distance on a search result card -- not a
+    // calibrated probability, just 1-distance clamped to [0, 100] so a result reads as "closer to
+    // 100% = closer match" without exposing the raw distance number, which means nothing to a
+    // user unfamiliar with the embedding space. The full distance is still available via the
+    // badge's title tooltip for anyone who wants the exact number.
+    matchPercent(distance) {
+      return Math.max(0, Math.min(100, Math.round((1 - distance) * 100)));
     },
 
     // Routes a clicked search result into the same shared lightbox Events/Visits already use --

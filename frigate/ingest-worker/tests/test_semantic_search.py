@@ -264,6 +264,83 @@ def test_semantic_search_combined_excludes_rows_without_embedding(conn_ok):
         _cleanup_visit(visit_id)
 
 
+def _orthogonal_vec(seed: float) -> list[float]:
+    # Orthogonal to _vec(seed) (nonzero only in the second dimension) -- cosine distance from
+    # _vec(1.0) is exactly 1.0, vs. 0.0 for an identical vector, giving a clean threshold to test
+    # max_distance against without relying on any particular embedding's real-world distance.
+    return [0.0, seed] + [0.0] * (config.EMBEDDING_DIMENSIONS - 2)
+
+
+def test_semantic_search_combined_max_distance_excludes_weak_matches(conn_ok):
+    camera = f"pytest-combo-{uuid.uuid4()}"
+    close_event_id = _insert_event(camera=camera)
+    far_visit_id = _insert_visit(camera=camera)
+    try:
+        db.complete_sighting(close_event_id, "car", "red sedan", embedding=_vec(1.0))
+        db.complete_visit_sighting(far_visit_id, "car", "unrelated", embedding=_orthogonal_vec(1.0))
+        # No cutoff -- both come back, same as today's behavior.
+        results = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=50)
+        kinds_and_ids = {(r["kind"], r["id"]) for r in results}
+        assert ("event", close_event_id) in kinds_and_ids
+        assert ("visit", far_visit_id) in kinds_and_ids
+        # A cutoff strictly between the two distances (0.0 and 1.0) keeps the close match and
+        # drops the orthogonal one.
+        filtered = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=50, max_distance=0.5)
+        kinds_and_ids = {(r["kind"], r["id"]) for r in filtered}
+        assert ("event", close_event_id) in kinds_and_ids
+        assert ("visit", far_visit_id) not in kinds_and_ids
+    finally:
+        _cleanup_event(close_event_id)
+        _cleanup_visit(far_visit_id)
+
+
+def test_semantic_search_combined_max_distance_keeps_literal_keyword_match(conn_ok):
+    # A sighting can literally contain the query word yet still land outside a distance cutoff,
+    # since a general-purpose embedding weighs a sentence's dominant subject more than a short
+    # trailing detail (confirmed in production: a person-focused description mentioning "a small
+    # dog nearby" only in passing scored just past a 0.45 cutoff for query "dog"). The cutoff
+    # should never hide a literal keyword match regardless of its embedding distance.
+    camera = f"pytest-combo-{uuid.uuid4()}"
+    far_event_id = _insert_event(camera=camera)
+    try:
+        db.complete_sighting(
+            far_event_id, "person",
+            "An adult in grey clothing walks briskly while looking at a phone, with a small dog nearby.",
+            embedding=_orthogonal_vec(1.0),
+        )
+        # Without the query text, a strict cutoff excludes this distant-but-relevant sighting.
+        filtered = db.semantic_search_combined(_vec(1.0), object_types=["person"], limit=50, max_distance=0.5)
+        assert far_event_id not in {r["id"] for r in filtered}
+        # With the query text, the literal "dog" word match keeps it in, despite the same cutoff.
+        filtered = db.semantic_search_combined(
+            _vec(1.0), object_types=["person"], limit=50, max_distance=0.5, query_text="dog",
+        )
+        assert far_event_id in {r["id"] for r in filtered}
+    finally:
+        _cleanup_event(far_event_id)
+
+
+def test_semantic_search_combined_max_distance_keyword_fallback_is_whole_word_only(conn_ok):
+    # Confirmed live in production: query "cat" against a plain ILIKE '%cat%' fallback matched
+    # "indi-CAT-ion"/"lo-CAT-ion" inside completely unrelated car/person descriptions -- 24 results,
+    # none actually about a cat, every one already past its own distance cutoff. The fallback must
+    # require a whole word, not any substring occurrence.
+    camera = f"pytest-combo-{uuid.uuid4()}"
+    far_event_id = _insert_event(camera=camera)
+    try:
+        db.complete_sighting(
+            far_event_id, "person",
+            "A person in dark clothing standing near parked cars, with no indication of distress.",
+            embedding=_orthogonal_vec(1.0),
+        )
+        filtered = db.semantic_search_combined(
+            _vec(1.0), object_types=["person"], limit=50, max_distance=0.5, query_text="cat",
+        )
+        assert far_event_id not in {r["id"] for r in filtered}
+    finally:
+        _cleanup_event(far_event_id)
+
+
 def test_get_retention_info_returns_configured_months_and_oldest_ts(conn_ok):
     info = db.get_retention_info()
     assert info["retention_months"] == db.config.RETENTION_MONTHS

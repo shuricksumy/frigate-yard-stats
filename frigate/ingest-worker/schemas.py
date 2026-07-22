@@ -182,6 +182,22 @@ class TextSearchRequest(BaseModel):
     # None (default) searches both sightings and visit_sightings, unioned and re-ranked together.
     source: Literal["events", "visits"] | None = None
     limit: int = 20
+    # Cosine-distance cutoff (lower = stricter/more confident) -- without this, a query with fewer
+    # than `limit` genuinely relevant sightings still pads the response out to `limit` with
+    # whatever's next-closest, which can be barely-related filler once the embedding model's own
+    # discriminative power runs out (confirmed in practice: for a small/general embedding model,
+    # a true match and an unrelated one can land within ~0.05 of each other). None (default) keeps
+    # today's behavior -- no cutoff, always exactly `limit` results when that many exist.
+    # db.semantic_search_combined also always includes any sighting whose description contains
+    # `query` as a whole word (case-insensitive), even past this cutoff -- a sighting can mention
+    # the exact query word only as a minor/trailing detail in an otherwise-unrelated sentence,
+    # landing just outside a strict cutoff on distance alone despite the literal word being present
+    # (confirmed: "...an adult in a grey t-shirt... with a small dog nearby" scored 0.457 for query
+    # "dog", just past a 0.45 cutoff) -- a cutoff should never hide a literal keyword match. This is
+    # a whole-word match, not a plain substring one -- a plain substring match on a short query like
+    # "cat" would wrongly match "indication"/"location"/"vacation" (confirmed live: it returned 24
+    # completely unrelated results, none actually about a cat).
+    max_distance: float | None = None
 
 
 class TextSearchResult(BaseModel):

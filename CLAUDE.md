@@ -1713,6 +1713,80 @@ lightbox (`openLightbox`) Events/Visits already use, building the same `{id, vis
 has_image, has_preview_gif, ai_status}` shape `openVisitLightbox` already constructs for a plain
 `VisitSummary` -- no new lightbox code was needed, only a new way to construct its input.
 
+### Search relevance -- default time window, a `max_distance` cutoff, and a whole-word keyword fallback
+
+Three related bugs, found by directly comparing what the Search tab showed against a raw
+production `POST /search` call over SSH, not by inspection alone.
+
+**Bug 1 -- Search tab silently inherited the Events/Visits tabs' 1-hour default.** `static/app.js`'s
+`filters.hours` defaulted to `1` everywhere, including the Search tab, while `POST /search`'s own
+schema default is `hours: 24`. A query like "dog" with genuinely relevant sightings older than an
+hour would have them excluded by the UI's own default before the request was even sent, and the
+API (correctly) returned whatever was next-closest *within* that narrow window instead -- which
+read as "semantic search returns nonsense" rather than "an invisible 1-hour filter is active."
+Fixed by making `_defaultFilters(mode)` take the view mode: Search now defaults to `hours: 24`
+(matching the backend), Events/Visits keep `hours: 1` unchanged. Applied everywhere the filters get
+reset (`switchView`/`resetFilters`/`toggleAdvancedSearch`), not just initial load.
+
+**Bug 2 -- no relevance cutoff at all, so a weak query always pads out to `limit`.** Confirmed live:
+searching "dog" over 24h returned exactly `limit` (24) results, but only 8 of them actually
+mentioned a dog -- the embedding model (`Qwen3-Embedding-0.6B`, 1024-dim) doesn't separate "dog"
+from generic "person walking near parked cars" strongly: true matches landed at cosine distance
+~0.39-0.52, false positives at ~0.50-0.52, a heavily overlapping range for this small/general model.
+This isn't a ranking bug (results were correctly sorted by distance) -- it's that `POST /search`
+had no way to say "stop once matches get weak," so it always filled the response out to `limit`
+with whatever was next-closest, however irrelevant. Fixed with an optional `max_distance` param on
+`TextSearchRequest`/`db.semantic_search_combined` (rows past the cutoff are excluded, see
+`schemas.py` for the exact param doc) and a **Precision** dropdown on the Search tab's simple view
+(`High precision` = 0.45 default / `Balanced` = 0.55 / `Show everything` = no cutoff), plus a
+`Precision (exact)` `step="0.01"` numeric override in Advanced mode (defaults to `0.5`, only takes
+effect while the advanced panel is open -- gated on `advancedSearch` itself, not just whether the
+field has a value, so its own default can't silently override the simple dropdown when the panel
+isn't even shown). The simple Precision dropdown hides while Advanced mode is open, so there's
+exactly one active precision control at a time, not two disagreeing ones. Each result card shows a
+`matchPercent(distance)` badge (`round((1-distance)*100) + "% match"`, clamped to [0,100] -- a
+rough human-friendly stand-in, not a calibrated probability; the raw distance is still in the
+badge's tooltip).
+
+**Bug 3 -- the cutoff's own literal-keyword fallback used a plain substring match, not a whole
+word.** A cutoff can still exclude a sighting that literally contains the query word, just because
+the rest of the sentence is about something else (confirmed: "...an adult in a grey t-shirt...
+with a small dog nearby" scored 0.457, just past a 0.45 cutoff, despite "dog" being right there) --
+so `max_distance` filtering always ORs in `description ILIKE '%{query}%'` as a fallback,
+guaranteeing a literal keyword is never hidden by the cutoff regardless of embedding geometry. The
+first implementation of that fallback used a plain substring match, which was itself a bug:
+confirmed live that searching "cat" (no `cat` object type exists in `profiles.yaml` at all, so
+there's nothing genuinely cat-related in this dataset) returned 24 completely unrelated
+car/person/truck results, every one already past its own distance cutoff on merit -- all 24 matched
+via the substring fallback catching "cat" inside **indi-CAT-ion** and **lo-CAT-ion**. Fixed by
+switching the fallback to Postgres's `~*` case-insensitive regex with `\y` word-boundary anchors
+(`\ydog\y` matches "a dog on a leash" but not "underdog"/"doggo"), with the caller's query text
+passed through `re.escape()` before being embedded in the pattern -- still a bound parameter, never
+concatenated into the SQL string, so this is about correct regex semantics, not injection safety.
+Re-tested "cat" after the fix: 0 results, correctly.
+
+### Prompt-echo in `person`/`dog` sightings -- a missing anti-narration instruction
+
+Found the same way -- directly querying production `sightings`/`visit_sightings` for suspicious
+text, not from code inspection. ~3% of all sightings (25 of 862 at the time) had `description`
+starting with the literal prompt text itself ("The image shows a single moment of one person.
+Describe their clothing colors...") instead of an actual answer, and a further ~11 more recent rows
+had an otherwise-fine description with `profiles.yaml`'s own trailing guardrail clause
+("...No speculation about identity, exact age, or other personal characteristics beyond apparent
+child vs. adult.") echoed back verbatim by the model. Breakdown by object type: **100% `person`**
+(25/25 full-echo sightings, 4/5 of the milder trailing-echo ones) plus one anomalous `car`-labeled
+visit sighting (traced to a real mixed `car,person` visit -- the alert stage correctly used the
+representative, earliest car det_id's prompt/label, but the grid's later sampled frames genuinely
+showed the person who arrived ~26s in, which is why the model *mentioned* a person at all).
+Zero from `truck`/`dog` at the time this was found. Root cause: `car`/`truck`'s prompts both end
+with an explicit `"Do not describe your process."` instruction; `person`'s (and `dog`'s) prompts
+had no equivalent anti-narration instruction at all, ending only on the content instruction itself
+-- which the model apparently sometimes treats as something to recite back rather than silently
+follow. Fixed by appending `"Do not describe your process or repeat these instructions --
+respond with only the one-sentence description."` to `person`'s and `dog`'s `event_prompt`/
+`alert_prompt` in `profiles.yaml`/`profiles.yaml.example`, matching the instruction `car`/`truck`
+already had.
+
 ### Admin dashboard (`/ui/admin`)
 
 A second static page alongside the report UI (`/ui`), for operational health/maintenance rather
