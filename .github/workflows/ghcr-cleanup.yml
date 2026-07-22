@@ -1,11 +1,14 @@
-name: GHCR package cleanup (dry run)
+name: GHCR package cleanup
 
-# Manual-trigger only, dry-run only, for now. ingest-worker-image.yml pushes a `latest` tag and a
-# short-sha tag on every push to main, plus a version tag (e.g. v1.1) on a release tag push -- the
-# sha tags accumulate forever with nothing to clean them up. Review this run's "would delete" log
-# output in the Actions tab before flipping `dry-run` to `false` and adding a `schedule:` trigger.
+# ingest-worker-image.yml pushes a `latest` tag and a short-sha tag on every push to main, plus a
+# version tag (e.g. v1.1) on a release tag push -- the sha tags accumulate forever with nothing to
+# clean them up. Ran dry-run/manual-only first, reviewed the "would delete" output (221 old
+# digests, latest/release tags untouched), then went live here. Still runnable on demand via
+# workflow_dispatch alongside the schedule.
 on:
   workflow_dispatch: {}
+  schedule:
+    - cron: "17 3 * * 0" # Sundays 03:17 UTC
 
 permissions:
   packages: write
@@ -29,5 +32,5 @@ jobs:
           exclude-tags: '^latest$|^v[0-9]+$|^v[0-9]+\.[0-9]+$|^v[0-9]+\.[0-9]+\.[0-9]+$'
           use-regex: true
           delete-untagged: true
-          dry-run: true
+          dry-run: false
           log-level: info
