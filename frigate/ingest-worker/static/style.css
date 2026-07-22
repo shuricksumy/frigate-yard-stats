@@ -564,3 +564,21 @@ input:disabled, select:disabled {
   right: 4px;
   background: rgba(0, 0, 0, 0.7);
 }
+
+.app-footer {
+  margin-top: 24px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font-size: 0.75rem;
+  text-align: center;
+}
+
+.app-footer a {
+  color: var(--muted);
+  text-decoration: underline;
+}
+
+.app-footer a:hover {
+  color: var(--accent);
+}

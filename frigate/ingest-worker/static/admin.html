@@ -263,6 +263,11 @@
 
   </div>
 
+  <footer class="app-footer" x-show="versionInfo" style="display:none">
+    <span x-text="footerText()"></span>
+    <a :href="versionInfo && versionInfo.githubUrl" target="_blank" rel="noopener noreferrer">GitHub</a>
+  </footer>
+
   <script src="admin.js"></script>
 </body>
 </html>

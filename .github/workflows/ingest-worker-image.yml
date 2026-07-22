@@ -3,6 +3,12 @@ name: Build and push ingest-worker image
 on:
   push:
     branches: [main]
+    # A version tag (e.g. v1.1) is always pushed pointing at a commit already on main, after the
+    # matching code has already been pushed there -- rebuilding on the tag too bakes the actual
+    # release version into the image's APP_VERSION (see below), which a plain branch push alone
+    # can't know at build time. `paths` only meaningfully filters the branch trigger -- a brand
+    # new tag ref has no prior commit to diff against, so GitHub runs the job regardless.
+    tags: ["v*"]
     paths:
       - "frigate/ingest-worker/**"
       - ".github/workflows/ingest-worker-image.yml"
@@ -133,10 +139,25 @@ jobs:
         run: |
           IMAGE="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}"
           SHORT_SHA="${GITHUB_SHA::7}"
+          # A tag push (v1.1, ...) also gets its own image tag, so a deployment can pin to an
+          # exact release instead of only ":latest"/a bare commit sha. A plain branch push has no
+          # version to speak of -- APP_VERSION falls back to "dev", surfaced as-is in the web UI
+          # footer (config.APP_VERSION) rather than faked as a release it isn't.
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            APP_VERSION="${GITHUB_REF_NAME}"
+          else
+            APP_VERSION="dev"
+          fi
+          echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
+          echo "build_date=$(date -u +%m.%Y)" >> "$GITHUB_OUTPUT"
           {
             echo "tags<<TAGS_EOF"
             echo "${IMAGE}:latest"
             echo "${IMAGE}:${SHORT_SHA}"
+            if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+              echo "${IMAGE}:${APP_VERSION}"
+            fi
             echo "TAGS_EOF"
           } >> "$GITHUB_OUTPUT"
           {
@@ -144,6 +165,7 @@ jobs:
             echo "org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}"
             echo "org.opencontainers.image.revision=${{ github.sha }}"
             echo "org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "org.opencontainers.image.version=${APP_VERSION}"
             echo "LABELS_EOF"
           } >> "$GITHUB_OUTPUT"
 
@@ -159,5 +181,9 @@ jobs:
           platforms: linux/amd64,linux/arm64
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APP_VERSION=${{ steps.meta.outputs.app_version }}
+            APP_BUILD_SHA=${{ steps.meta.outputs.short_sha }}
+            APP_BUILD_DATE=${{ steps.meta.outputs.build_date }}
           cache-from: type=gha
           cache-to: type=gha,mode=max

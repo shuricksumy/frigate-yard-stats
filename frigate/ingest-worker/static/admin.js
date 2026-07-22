@@ -41,6 +41,10 @@ function adminApp() {
     loadError: "",
     lastRefreshed: null,
 
+    // Footer build/version info (GET /status, unauthenticated) -- fetched regardless of login
+    // state, since it's purely informational and /status needs no API key.
+    versionInfo: null,
+
     overview: null,
     diskUsage: null,
     objectTypes: [],
@@ -74,12 +78,38 @@ function adminApp() {
     fmtNum,
 
     init() {
+      this.fetchVersionInfo();
       const stored = getCookie(API_KEY_COOKIE);
       if (stored) {
         this.apiKey = stored;
         this.hasApiKey = true;
         this.refreshAll();
       }
+    },
+
+    // GET /status is unauthenticated (same tier as /health) -- the footer shows regardless of
+    // login state. Failure just leaves the footer blank rather than surfacing an error banner;
+    // this is cosmetic, not worth alarming over.
+    async fetchVersionInfo() {
+      try {
+        const resp = await fetch("/status");
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.versionInfo = {
+          version: data.version, buildSha: data.build_sha,
+          buildDate: data.build_date, githubUrl: data.github_url,
+        };
+      } catch (err) {
+        console.error(err);
+      }
+    },
+
+    // "Yard Stats | v1.1 (build: 74cd4c9) | 07.2026 |" -- the footer's own GitHub link is a
+    // separate real <a> in the template, not part of this string.
+    footerText() {
+      if (!this.versionInfo) return "";
+      const v = this.versionInfo;
+      return `Yard Stats | ${v.version} (build: ${v.buildSha}) | ${v.buildDate} |`;
     },
 
     async saveApiKey() {

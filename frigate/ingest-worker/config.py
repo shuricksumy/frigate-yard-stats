@@ -28,6 +28,17 @@ MQTT_REVIEWS_TOPIC = _env("MQTT_REVIEWS_TOPIC", "frigate/reviews")
 # camera Frigate reports is processed, today's exact behavior.
 CAMERAS = [c.strip() for c in _env("CAMERAS", "").split(",") if c.strip()]
 
+# App version/build metadata -- baked into the image at build time as plain ENV (see the
+# Dockerfile's ARG/ENV pair and .github/workflows/ingest-worker-image.yml's build-args), read here
+# as ordinary optional env vars with fallbacks so a plain `docker build` with no build-args (e.g.
+# local dev) still starts fine. Surfaced by GET /status and rendered as a small footer on both
+# static web UI pages (static/app.js's fetchVersionInfo) -- purely informational, not used by any
+# pipeline logic.
+APP_VERSION = _env("APP_VERSION", "dev")
+APP_BUILD_SHA = _env("APP_BUILD_SHA", "unknown")
+APP_BUILD_DATE = _env("APP_BUILD_DATE", "")
+GITHUB_REPO_URL = _env("GITHUB_REPO_URL", "https://github.com/shuricksumy/frigate-yard-stats")
+
 POSTGRES_HOST = _env("POSTGRES_HOST", "postgres-projects")
 POSTGRES_PORT = int(_env("POSTGRES_PORT", "5432"))
 POSTGRES_DB = _env("POSTGRES_DB", "home_automation")

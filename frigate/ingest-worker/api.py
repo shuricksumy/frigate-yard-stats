@@ -50,7 +50,16 @@ def health():
 def status():
     # retention/oldest_available_start_ts let a caller (the Q&A agent) tell "nothing happened in
     # that range" apart from "that range was already purged" -- see db.get_retention_info.
-    return {"breakdown": db.get_status_breakdown(), **db.get_retention_info()}
+    # version/build_sha/build_date/github_url are purely informational (the web UI's footer, see
+    # static/app.js's fetchVersionInfo) -- baked into the image at build time, see config.py.
+    return {
+        "breakdown": db.get_status_breakdown(),
+        **db.get_retention_info(),
+        "version": config.APP_VERSION,
+        "build_sha": config.APP_BUILD_SHA,
+        "build_date": config.APP_BUILD_DATE,
+        "github_url": config.GITHUB_REPO_URL,
+    }
 
 
 @app.post("/crop/{event_id}")
