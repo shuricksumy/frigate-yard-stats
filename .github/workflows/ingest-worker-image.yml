@@ -111,7 +111,7 @@ jobs:
         # Lets the amd64 GitHub-hosted runner cross-build the arm64 image too (e.g. for a
         # Raspberry Pi / other arm64 host running ingest-worker) via emulation -- Buildx alone
         # can only build for the runner's own native architecture without this.
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
