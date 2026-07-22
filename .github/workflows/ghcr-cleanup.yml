@@ -22,7 +22,11 @@ jobs:
           # Keep `latest` and any release tag (v1, v1.1, v1.1.0, ...); delete every other tag
           # (i.e. every short-sha build tag) plus orphaned untagged multi-arch layers.
           delete-tags: '.*'
-          exclude-tags: '^latest$|^v[0-9]+(\.[0-9]+)*$'
+          # Flat alternation instead of a quantified group with an internal quantifier
+          # (`(\.[0-9]+)*`) -- the latter trips the action's ReDoS heuristic (nested quantifiers)
+          # even though it isn't actually vulnerable; confirmed live (a real dry-run failed with
+          # "exclude-tags: regex pattern rejected as ReDoS-prone").
+          exclude-tags: '^latest$|^v[0-9]+$|^v[0-9]+\.[0-9]+$|^v[0-9]+\.[0-9]+\.[0-9]+$'
           use-regex: true
           delete-untagged: true
           dry-run: true
