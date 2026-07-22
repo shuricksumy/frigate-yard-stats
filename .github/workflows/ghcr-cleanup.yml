@@ -1,0 +1,29 @@
+name: GHCR package cleanup (dry run)
+
+# Manual-trigger only, dry-run only, for now. ingest-worker-image.yml pushes a `latest` tag and a
+# short-sha tag on every push to main, plus a version tag (e.g. v1.1) on a release tag push -- the
+# sha tags accumulate forever with nothing to clean them up. Review this run's "would delete" log
+# output in the Actions tab before flipping `dry-run` to `false` and adding a `schedule:` trigger.
+on:
+  workflow_dispatch: {}
+
+permissions:
+  packages: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete old ghcr.io package versions
+        uses: dataaxiom/ghcr-cleanup-action@v1.2.2
+        with:
+          owner: shuricksumy
+          package: 'frigate-yard-stats/ingest-worker'
+          # Keep `latest` and any release tag (v1, v1.1, v1.1.0, ...); delete every other tag
+          # (i.e. every short-sha build tag) plus orphaned untagged multi-arch layers.
+          delete-tags: '.*'
+          exclude-tags: '^latest$|^v[0-9]+(\.[0-9]+)*$'
+          use-regex: true
+          delete-untagged: true
+          dry-run: true
+          log-level: info
