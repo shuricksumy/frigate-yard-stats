@@ -1130,6 +1130,20 @@ button/Enter -- changing a dropdown or picking a date with no visible effect unt
 submit click read as those controls being broken, not just requiring an extra step. The two
 text inputs stay submit-only deliberately -- firing a request per keystroke would be wasteful and
 janky for something typed character-by-character, unlike a discrete dropdown/date selection.
+
+**Update: Camera promoted to the simple filter bar; Event ID removed from the web UI entirely.**
+`filters.camera` (backed by the new `GET /cameras`, see above) now sits in the simple/default
+filter row alongside Search/Time range, shown unconditionally (no `x-show` gating at all, same
+always-visible treatment Search AI analysis already had) rather than being one more field buried
+behind "Advanced filters" -- camera is common enough to filter by that hiding it behind a toggle
+added friction for no real benefit. Event ID's own `<label>`/`<input>` was removed from
+`index.html` outright (not just moved), along with `filters.eventId` and every reference to it in
+`static/app.js` (`_defaultFilters`, `applyFilters`' events-only auto-switch check, `fetchEvents`'
+former `if (eventId) {...} else {...}` branch, now just the unconditional `else` contents) --
+dead frontend state/branches otherwise, once the only thing that ever set `filters.eventId` no
+longer exists. `GET /events`'s own `event_id` query param is untouched (see below) -- this was a
+web-UI-only removal, not an API contract change; a caller that already knows a specific event id
+can still request it directly (`GET /events?event_id=...`), just not from this control.
 `GET /events` itself is filterable by
 `object_type`/`crop_status`/`ai_status`/`video_status`/`has_media`/`event_id`/`q`, defaults to the
 last 1 hour, media-only. Both `GET /events` and `GET /visits` set an `X-Total-Count` response

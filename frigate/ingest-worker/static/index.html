@@ -59,12 +59,17 @@
             </template>
           </select>
         </label>
+        <label>
+          Camera
+          <select x-model="filters.camera" @change="applyFilters()">
+            <option value="all">All</option>
+            <template x-for="cam in cameras" :key="cam">
+              <option :value="cam" x-text="cam"></option>
+            </template>
+          </select>
+        </label>
 
         <div class="advanced-filters" x-show="advancedSearch" style="display:none">
-          <label x-show="viewMode === 'events'">
-            Event ID
-            <input type="number" x-model="filters.eventId" placeholder="e.g. 1234">
-          </label>
           <label>
             From
             <input type="datetime-local" x-model="filters.start" @change="applyFilters()">
@@ -79,15 +84,6 @@
               <option value="all">All</option>
               <template x-for="type in objectTypes" :key="type">
                 <option :value="type" x-text="type.charAt(0).toUpperCase() + type.slice(1)"></option>
-              </template>
-            </select>
-          </label>
-          <label>
-            Camera
-            <select x-model="filters.camera" @change="applyFilters()">
-              <option value="all">All</option>
-              <template x-for="cam in cameras" :key="cam">
-                <option :value="cam" x-text="cam"></option>
               </template>
             </select>
           </label>

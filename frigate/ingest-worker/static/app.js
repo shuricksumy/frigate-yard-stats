@@ -73,7 +73,7 @@ function eventsApp() {
     _autoRefreshTimer: null,
 
     filters: {
-      objectType: "all", camera: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
+      objectType: "all", camera: "all", aiStatus: "all", onlyWithMedia: true, q: "",
       hours: 1, start: "", end: "", precision: "high", maxDistanceOverride: "0.5",
     },
 
@@ -86,7 +86,7 @@ function eventsApp() {
     // than an invisible, overly narrow time filter.
     _defaultFilters(mode) {
       return {
-        objectType: "all", camera: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
+        objectType: "all", camera: "all", aiStatus: "all", onlyWithMedia: true, q: "",
         hours: mode === "search" ? 24 : 1, start: "", end: "", precision: "high", maxDistanceOverride: "0.5",
       };
     },
@@ -296,13 +296,12 @@ function eventsApp() {
     },
 
     applyFilters() {
-      // Event ID/AI status are per-raw_event concepts fetchVisits() intentionally ignores (see
-      // there) and are hidden entirely while on the Visits tab (see index.html), but a value can
-      // still be left over from before a tab switch in edge cases -- auto-switching to Events
-      // when one is actually set makes Search take effect instead of silently doing nothing. q
-      // (Search AI analysis) is excluded here since GET /visits now supports it directly.
-      const eventId = String(this.filters.eventId || "").trim();
-      const usesEventsOnlyFilter = !!(eventId || (this.filters.aiStatus && this.filters.aiStatus !== "all"));
+      // AI status is a per-raw_event concept fetchVisits() intentionally ignores (see there) and
+      // is hidden entirely while on the Visits tab (see index.html), but a value can still be
+      // left over from before a tab switch in edge cases -- auto-switching to Events when one is
+      // actually set makes Search take effect instead of silently doing nothing. q (Search AI
+      // analysis) is excluded here since GET /visits now supports it directly.
+      const usesEventsOnlyFilter = !!(this.filters.aiStatus && this.filters.aiStatus !== "all");
       if (this.viewMode === "visits" && usesEventsOnlyFilter) {
         this.viewMode = "events";
       }
@@ -316,7 +315,7 @@ function eventsApp() {
       this.applyFilters();
     },
 
-    // Switching modes without resetting left stale advanced-only values (From/To, Event ID, ...)
+    // Switching modes without resetting left stale advanced-only values (From/To, Type, ...)
     // in effect but invisible once their fields hid again -- e.g. leaving From/To set after
     // going back to simple mode silently overrode the reappeared Time range preset with no
     // indication why. Resetting on every toggle (either direction) avoids that class of
@@ -340,40 +339,33 @@ function eventsApp() {
     async fetchEvents() {
       this.loading = true;
       try {
-        const eventId = String(this.filters.eventId || "").trim();
         const q = String(this.filters.q || "").trim();
         const params = new URLSearchParams({
           limit: String(this.limit),
           offset: String(this.offset),
         });
-        if (eventId) {
-          // Searching by a specific known id -- ignores every other filter (date window
-          // included, server-side) rather than trying to compose with them.
-          params.set("event_id", eventId);
+        params.set("has_media", String(!!this.filters.onlyWithMedia));
+        if (this.filters.objectType && this.filters.objectType !== "all") {
+          params.set("object_type", this.filters.objectType);
+        }
+        if (this.filters.camera && this.filters.camera !== "all") {
+          params.set("camera", this.filters.camera);
+        }
+        if (this.filters.aiStatus && this.filters.aiStatus !== "all") {
+          params.set("ai_status", this.filters.aiStatus);
+        }
+        if (q) {
+          params.set("q", q);
+        }
+        // The time window still applies alongside q -- a search only looks within the
+        // currently selected range, same as every other filter, rather than spanning your
+        // whole history regardless of what's selected.
+        if (this.filters.start || this.filters.end) {
+          // Advanced panel's custom From/To overrides the quick "Time range" preset when set.
+          if (this.filters.start) params.set("start", new Date(this.filters.start).toISOString());
+          if (this.filters.end) params.set("end", new Date(this.filters.end).toISOString());
         } else {
-          params.set("has_media", String(!!this.filters.onlyWithMedia));
-          if (this.filters.objectType && this.filters.objectType !== "all") {
-            params.set("object_type", this.filters.objectType);
-          }
-          if (this.filters.camera && this.filters.camera !== "all") {
-            params.set("camera", this.filters.camera);
-          }
-          if (this.filters.aiStatus && this.filters.aiStatus !== "all") {
-            params.set("ai_status", this.filters.aiStatus);
-          }
-          if (q) {
-            params.set("q", q);
-          }
-          // The time window still applies alongside q -- a search only looks within the
-          // currently selected range, same as every other filter, rather than spanning your
-          // whole history regardless of what's selected.
-          if (this.filters.start || this.filters.end) {
-            // Advanced panel's custom From/To overrides the quick "Time range" preset when set.
-            if (this.filters.start) params.set("start", new Date(this.filters.start).toISOString());
-            if (this.filters.end) params.set("end", new Date(this.filters.end).toISOString());
-          } else {
-            params.set("hours", String(this.filters.hours));
-          }
+          params.set("hours", String(this.filters.hours));
         }
 
         const resp = await fetch(`/events?${params.toString()}`, {
@@ -400,8 +392,8 @@ function eventsApp() {
     async fetchVisits() {
       // Comparison view alongside fetchEvents -- one card per Frigate review/alert segment
       // (visit) instead of one per raw_event, so duplicate det_ids from tracker re-ID/label
-      // flicker collapse into a single card. start/end/objectType/q carry over from the filter
-      // bar -- eventId/aiStatus/onlyWithMedia are per-raw_event concepts that don't compose
+      // flicker collapse into a single card. start/end/objectType/camera/q carry over from the
+      // filter bar -- aiStatus/onlyWithMedia are per-raw_event concepts that don't compose
       // cleanly with a grouped view, so this view intentionally ignores them rather than
       // half-applying them (and are hidden entirely in this view -- see index.html).
       this.loading = true;
