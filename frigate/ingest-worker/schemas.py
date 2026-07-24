@@ -179,6 +179,7 @@ class TextSearchRequest(BaseModel):
     # already use -- ignored if start/end are both given.
     hours: float = 24
     object_types: list[str] | None = None
+    camera: str | None = None
     # None (default) searches both sightings and visit_sightings, unioned and re-ranked together.
     source: Literal["events", "visits"] | None = None
     limit: int = 20

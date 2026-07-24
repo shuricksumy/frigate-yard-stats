@@ -223,6 +223,31 @@ def test_semantic_search_combined_orders_by_distance_across_both_tables(conn_ok)
         _cleanup_visit(far_visit_id)
 
 
+def test_semantic_search_combined_camera_filter(conn_ok):
+    camera_a = f"pytest-combo-a-{uuid.uuid4()}"
+    camera_b = f"pytest-combo-b-{uuid.uuid4()}"
+    event_a = _insert_event(camera=camera_a)
+    event_b = _insert_event(camera=camera_b)
+    visit_a = _insert_visit(camera=camera_a)
+    visit_b = _insert_visit(camera=camera_b)
+    try:
+        db.complete_sighting(event_a, "car", "red sedan", embedding=_vec(1.0))
+        db.complete_sighting(event_b, "car", "red sedan", embedding=_vec(1.0))
+        db.complete_visit_sighting(visit_a, "car", "red sedan", embedding=_vec(1.0))
+        db.complete_visit_sighting(visit_b, "car", "red sedan", embedding=_vec(1.0))
+        results = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=50, camera=camera_a)
+        kinds_and_ids = {(r["kind"], r["id"]) for r in results}
+        assert ("event", event_a) in kinds_and_ids
+        assert ("visit", visit_a) in kinds_and_ids
+        assert ("event", event_b) not in kinds_and_ids
+        assert ("visit", visit_b) not in kinds_and_ids
+    finally:
+        _cleanup_event(event_a)
+        _cleanup_event(event_b)
+        _cleanup_visit(visit_a)
+        _cleanup_visit(visit_b)
+
+
 def test_semantic_search_combined_respects_time_window(conn_ok):
     camera = f"pytest-combo-{uuid.uuid4()}"
     old_event_id = db._execute(

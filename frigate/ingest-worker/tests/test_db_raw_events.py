@@ -164,3 +164,18 @@ def test_ensure_schema_backfills_stale_ai_new_rows_with_skipped_crop(conn_ok):
         assert row["ai_status"] == "skipped"
     finally:
         db._execute("DELETE FROM yard_stats.raw_events WHERE det_id = %s", (event["det_id"],))
+
+
+def test_get_distinct_cameras_reflects_real_data(conn_ok):
+    # Deliberately queried live rather than sourced from a config value (unlike OBJECT_TYPES) --
+    # see db.get_distinct_cameras' own comment for why.
+    camera = f"pytest-cameras-{uuid.uuid4()}"
+    event = _event(has_snapshot=True)
+    event["camera"] = camera
+    db.insert_raw_event(event)
+    try:
+        cameras = db.get_distinct_cameras()
+        assert camera in cameras
+        assert cameras == sorted(cameras)
+    finally:
+        db._execute("DELETE FROM yard_stats.raw_events WHERE det_id = %s", (event["det_id"],))

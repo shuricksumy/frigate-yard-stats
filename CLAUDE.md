@@ -1021,6 +1021,17 @@ your model/config), so the web UI's Type filter dropdown is populated from this 
 instead of being hardcoded in the HTML; add a label to the env var and it shows up in the
 dropdown on next restart.
 
+`GET /cameras` (`db.get_distinct_cameras`, `SELECT DISTINCT camera FROM raw_events`) backs the web
+UI's Camera filter dropdown -- deliberately queried live rather than sourced from a config value
+the way `OBJECT_TYPES` is, since `config.CAMERAS` is an optional ingest-time allow-list that's
+usually unset (meaning "no filter," not "here is the list of cameras") and would otherwise give an
+empty/stale dropdown, or silently miss a newly added camera until someone remembered to update a
+env var. `camera` is now a plain equality filter alongside `object_type` on `GET /events`
+(`re.camera = %s`) and `GET /visits` (`v.cameras = %s` -- exact match is safe since visit grouping
+is per-camera only, see "Visit grouping" above) -- both already accepted this param before the web
+UI exposed it, so only the frontend and `POST /search`/`db.semantic_search_combined` (which didn't
+have a camera filter at all) needed changes to add it.
+
 `GET /events/{id}` also returns `sighting` (via
 `db.get_sighting_for_event`, one targeted indexed lookup against the single universal table) --
 `null` until `ai_status='done'`. Kept off the `GET /events` list response deliberately (same

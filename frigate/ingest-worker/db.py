@@ -342,6 +342,20 @@ def get_retention_info() -> dict:
     }
 
 
+def get_distinct_cameras() -> list[str]:
+    # Backs the web UI's Camera filter dropdown -- queried directly from raw_events rather than
+    # sourced from a config value (unlike OBJECT_TYPES, a manually-maintained env var) since
+    # config.CAMERAS is an optional ingest-time allow-list that's usually unset (meaning "no
+    # filter", not "here is the list of cameras") and would give an empty/stale dropdown on a
+    # deployment that never set it, or silently miss a newly added camera until someone remembers
+    # to update it. Querying real data instead means the dropdown always reflects reality.
+    rows = _execute(
+        "SELECT DISTINCT camera FROM yard_stats.raw_events WHERE camera IS NOT NULL ORDER BY camera",
+        fetch=True,
+    )
+    return [row["camera"] for row in rows]
+
+
 def count_sightings_missing_embedding() -> dict:
     # Dry-run counterpart for POST /embeddings/backfill, same shape as purge_older_than's own
     # always-count-first approach -- a sighting from before semantic search existed (or from any
@@ -1914,6 +1928,7 @@ def semantic_search_combined(
     source: str | None = None,
     max_distance: float | None = None,
     query_text: str | None = None,
+    camera: str | None = None,
 ) -> list[dict]:
     # Web UI "Search" tab's own combined lookup -- unlike semantic_search_sightings above (the
     # n8n-facing endpoint's underlying function, left untouched so that existing contract never
@@ -1949,6 +1964,9 @@ def semantic_search_combined(
         if object_types:
             clauses.append("s.object_label = ANY(%s)")
             branch_params.append(object_types)
+        if camera:
+            clauses.append("re.camera = %s")
+            branch_params.append(camera)
         branches.append((
             f"""
             SELECT 'event' AS kind, re.id AS id, s.id AS sighting_id, re.start_ts, re.camera,
@@ -1980,6 +1998,9 @@ def semantic_search_combined(
         if object_types:
             clauses.append("vs.object_label = ANY(%s)")
             branch_params.append(object_types)
+        if camera:
+            clauses.append("v.cameras = %s")
+            branch_params.append(camera)
         branches.append((
             f"""
             SELECT 'visit' AS kind, v.id AS id, vs.id AS sighting_id, v.start_ts, v.cameras AS camera,

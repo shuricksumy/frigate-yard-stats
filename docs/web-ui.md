@@ -35,9 +35,10 @@ The simple filter bar has:
 - **Time range** — a quick preset (last 1/3/6/12/24 hours).
 
 **Advanced filters** (toggle to reveal) adds From/To date pickers (override the Time range preset
-when set), Type (object label), and — Events view only — Event ID, AI status, and "Only with
-media" (checked by default: hides rows that don't have an image or video yet, since there's
-nothing to show for them).
+when set), Type (object label), Camera (populated live from whatever cameras actually have data,
+not a fixed config list), and — Events view only — Event ID, AI status, and "Only with media"
+(checked by default: hides rows that don't have an image or video yet, since there's nothing to
+show for them).
 
 Every filter except the two free-text boxes (Search, Event ID) applies the instant you change it
 — no separate "Search" click needed for a dropdown or date picker.
@@ -49,8 +50,8 @@ your yard" while this tab is active — but instead of an exact substring match,
 query text server-side (`POST /search`, via `ingest-worker`'s configured embedding backend) and
 ranks sightings by semantic similarity (cosine distance), same idea as the `semantic_search`
 tool the n8n Q&A agent already uses, just reachable directly from the browser with no agent in
-the loop. Time range/From-To/Type still apply exactly as they do on the other two tabs; Event
-ID/AI status/"Only with media" don't apply here (hidden, same as on the Visits tab) since a
+the loop. Time range/From-To/Type/Camera still apply exactly as they do on the other two tabs;
+Event ID/AI status/"Only with media" don't apply here (hidden, same as on the Visits tab) since a
 search result already implies AI analysis exists.
 
 Results are a flat, ranked grid — most relevant first, no "page 2" concept — spanning both

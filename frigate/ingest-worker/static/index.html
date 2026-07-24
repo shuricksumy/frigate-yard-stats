@@ -82,6 +82,15 @@
               </template>
             </select>
           </label>
+          <label>
+            Camera
+            <select x-model="filters.camera" @change="applyFilters()">
+              <option value="all">All</option>
+              <template x-for="cam in cameras" :key="cam">
+                <option :value="cam" x-text="cam"></option>
+              </template>
+            </select>
+          </label>
           <label x-show="viewMode === 'events'">
             AI status
             <select x-model="filters.aiStatus" @change="applyFilters()">

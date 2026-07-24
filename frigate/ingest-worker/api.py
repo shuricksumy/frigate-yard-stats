@@ -138,6 +138,14 @@ def get_object_types():
     return {"object_types": config.OBJECT_TYPES}
 
 
+@app.get("/cameras", tags=["events"], dependencies=[Depends(require_api_key)])
+def get_cameras():
+    """Distinct camera names actually present in raw_events -- unlike /object-types (a manually
+    maintained env var), this is queried live so the web UI's Camera filter dropdown always
+    reflects reality rather than needing a config bump whenever a camera is added/renamed."""
+    return {"cameras": db.get_distinct_cameras()}
+
+
 @app.get("/events", response_model=list[schemas.EventSummary], tags=["events"], dependencies=[Depends(require_api_key)])
 def get_events(
     response: Response,
@@ -476,6 +484,7 @@ def text_search(search: schemas.TextSearchRequest):
     results = db.semantic_search_combined(
         embedding, resolved_start, resolved_end, search.object_types, search.limit,
         source=search.source, max_distance=search.max_distance, query_text=search.query,
+        camera=search.camera,
     )
     return {"results": results}
 

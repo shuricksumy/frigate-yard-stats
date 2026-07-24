@@ -61,6 +61,7 @@ function eventsApp() {
     // "zero results" instead of guessing from currentList().length < limit.
     totalCount: null,
     objectTypes: [],
+    cameras: [],
     advancedSearch: false,
     // Quick time-range presets for the default view's "Time range" selector -- the advanced
     // panel's From/To date pickers override this when set (see fetchEvents/fetchVisits).
@@ -72,7 +73,7 @@ function eventsApp() {
     _autoRefreshTimer: null,
 
     filters: {
-      objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
+      objectType: "all", camera: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
       hours: 1, start: "", end: "", precision: "high", maxDistanceOverride: "0.5",
     },
 
@@ -85,7 +86,7 @@ function eventsApp() {
     // than an invisible, overly narrow time filter.
     _defaultFilters(mode) {
       return {
-        objectType: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
+        objectType: "all", camera: "all", aiStatus: "all", onlyWithMedia: true, eventId: "", q: "",
         hours: mode === "search" ? 24 : 1, start: "", end: "", precision: "high", maxDistanceOverride: "0.5",
       };
     },
@@ -115,6 +116,7 @@ function eventsApp() {
         this.apiKey = stored;
         this.hasApiKey = true;
         this.fetchObjectTypes();
+        this.fetchCameras();
         this.refresh();
         this.startAutoRefresh();
       }
@@ -242,6 +244,19 @@ function eventsApp() {
       }
     },
 
+    async fetchCameras() {
+      // Unlike Type (a manually-maintained env var), the Camera dropdown is populated from
+      // whatever cameras actually have data -- see db.get_distinct_cameras' own comment for why.
+      try {
+        const resp = await fetch("/cameras", { headers: { "X-API-Key": this.apiKey } });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        this.cameras = data.cameras || [];
+      } catch (err) {
+        console.error(err);
+      }
+    },
+
     async saveApiKey() {
       // Validate by actually calling the API rather than trusting the input blindly -- a wrong
       // key should surface immediately, not on the first silent 401 later.
@@ -258,6 +273,7 @@ function eventsApp() {
       this.hasApiKey = true;
       this.apiKeyInput = "";
       this.fetchObjectTypes();
+      this.fetchCameras();
       this.refresh();
       this.startAutoRefresh();
     },
@@ -339,6 +355,9 @@ function eventsApp() {
           if (this.filters.objectType && this.filters.objectType !== "all") {
             params.set("object_type", this.filters.objectType);
           }
+          if (this.filters.camera && this.filters.camera !== "all") {
+            params.set("camera", this.filters.camera);
+          }
           if (this.filters.aiStatus && this.filters.aiStatus !== "all") {
             params.set("ai_status", this.filters.aiStatus);
           }
@@ -395,6 +414,9 @@ function eventsApp() {
         if (this.filters.objectType && this.filters.objectType !== "all") {
           params.set("object_type", this.filters.objectType);
         }
+        if (this.filters.camera && this.filters.camera !== "all") {
+          params.set("camera", this.filters.camera);
+        }
         if (q) {
           params.set("q", q);
         }
@@ -449,6 +471,9 @@ function eventsApp() {
         const body = { query, limit: this.limit };
         if (this.filters.objectType && this.filters.objectType !== "all") {
           body.object_types = [this.filters.objectType];
+        }
+        if (this.filters.camera && this.filters.camera !== "all") {
+          body.camera = this.filters.camera;
         }
         // Advanced mode's exact-value override wins over the simple Precision preset -- the preset
         // is coarse on purpose (three named steps), but a user comparing results across borderline
