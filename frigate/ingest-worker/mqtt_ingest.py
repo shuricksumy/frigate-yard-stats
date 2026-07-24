@@ -16,6 +16,16 @@ logger = logging.getLogger(__name__)
 # and doesn't leave room for an extra parameter.
 _profile: dict | None = None
 
+# Latest frigate/stats snapshot (summarized, see summarize_stats) and frigate/available state --
+# live current-state only, never persisted to Postgres (there's no historical value in "what was
+# Frigate's CPU usage 3 days ago" the way there is for raw_events/visits). Plain module globals,
+# same pattern _profile already uses -- paho-mqtt callbacks all run on the same network loop
+# thread, so there's no concurrent-write race to guard against; a reader (api.py, from FastAPI's
+# own thread) only ever sees a fully-formed dict or None, never a partial write, since Python
+# attribute assignment for a plain variable is atomic.
+_latest_stats: dict | None = None
+_frigate_available: bool | None = None
+
 
 def parse_payload(raw_payload: bytes) -> dict:
     # Same fields as the (now superseded) raw-event-logger.json's "Parse Event Payload" node.
@@ -59,17 +69,74 @@ def parse_review_payload(raw_payload: bytes) -> dict:
     }
 
 
+def summarize_stats(raw: dict) -> dict:
+    # frigate/stats' raw payload also includes a cpu_usages entry per OS process Frigate's own
+    # container is running (s6-supervise, nginx, go2rtc, ...), which is irrelevant noise for our
+    # purposes and makes the payload much bigger than it needs to be for what the admin dashboard
+    # actually wants to show -- trim to just the genuinely useful subset: per-camera fps/detection
+    # health, detector (Coral/CPU) inference speed, Frigate's own overall process CPU/mem, and
+    # whatever GPU is configured (key name varies by hardware -- amd-vaapi, nvidia, etc. -- so this
+    # is passed through generically rather than hardcoding one vendor's key).
+    cameras = {
+        name: {
+            "camera_fps": c.get("camera_fps"),
+            "detection_fps": c.get("detection_fps"),
+            "detection_enabled": c.get("detection_enabled"),
+        }
+        for name, c in (raw.get("cameras") or {}).items()
+    }
+    detectors = {
+        name: {"inference_speed": d.get("inference_speed")}
+        for name, d in (raw.get("detectors") or {}).items()
+    }
+    frigate_process = (raw.get("cpu_usages") or {}).get("frigate.full_system") or {}
+    return {
+        "cameras": cameras,
+        "detectors": detectors,
+        "cpu_percent": frigate_process.get("cpu"),
+        "mem_percent": frigate_process.get("mem"),
+        "gpu_usages": raw.get("gpu_usages") or {},
+    }
+
+
 def _on_connect(client, userdata, flags, rc):
     logger.info("Connected to MQTT broker %s:%s (rc=%s)", config.MQTT_HOST, config.MQTT_PORT, rc)
     client.subscribe(config.MQTT_TOPIC)
     client.subscribe(config.MQTT_REVIEWS_TOPIC)
+    client.subscribe(config.MQTT_STATS_TOPIC)
+    client.subscribe(config.MQTT_AVAILABLE_TOPIC)
 
 
 def _on_message(client, userdata, msg):
     if msg.topic == config.MQTT_REVIEWS_TOPIC:
         _handle_review_message(msg)
         return
+    if msg.topic == config.MQTT_STATS_TOPIC:
+        _handle_stats_message(msg)
+        return
+    if msg.topic == config.MQTT_AVAILABLE_TOPIC:
+        _handle_available_message(msg)
+        return
     _handle_event_message(msg)
+
+
+def _handle_stats_message(msg):
+    global _latest_stats
+    try:
+        _latest_stats = summarize_stats(json.loads(msg.payload))
+    except Exception:
+        logger.exception("Failed to parse %s payload", config.MQTT_STATS_TOPIC)
+
+
+def _handle_available_message(msg):
+    # Plain text payload ("online"/"offline"), not JSON -- Frigate's own MQTT last-will/birth
+    # message convention.
+    global _frigate_available
+    _frigate_available = msg.payload.decode("utf-8", errors="replace").strip() == "online"
+
+
+def get_frigate_health() -> dict:
+    return {"available": _frigate_available, "stats": _latest_stats}
 
 
 def _handle_event_message(msg):

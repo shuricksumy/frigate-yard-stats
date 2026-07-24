@@ -20,6 +20,14 @@ MQTT_TOPIC = _env("MQTT_TOPIC", "frigate/events")
 # unpopulated) visits table / raw_events.visit_id, not to filter or replace anything in the
 # crop/video/ai queue pipeline -- see mqtt_ingest.py's review handler / db.record_visit.
 MQTT_REVIEWS_TOPIC = _env("MQTT_REVIEWS_TOPIC", "frigate/reviews")
+# Frigate's own system-health heartbeat (a periodic JSON blob, every frigate.conf's mqtt.
+# stats_interval seconds -- per-camera fps/detection_fps, detector inference speed, CPU/GPU usage)
+# and online/offline availability flag -- purely informational, surfaced via GET /status and the
+# admin dashboard (see mqtt_ingest.py's _handle_stats_message/_handle_available_message), never
+# used by any pipeline/queue logic. Kept in memory only (not persisted to Postgres) since this is
+# live current-state, not historical data worth storing.
+MQTT_STATS_TOPIC = _env("MQTT_STATS_TOPIC", "frigate/stats")
+MQTT_AVAILABLE_TOPIC = _env("MQTT_AVAILABLE_TOPIC", "frigate/available")
 
 # Optional camera allow-list, comma-separated Frigate camera names (e.g. "outside,outside2") --
 # applies to both the events flow (frigate/events) and the alerts flow (frigate/reviews), gating

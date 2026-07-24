@@ -64,6 +64,53 @@
       </div>
     </section>
 
+    <!-- ============ Frigate health ============ -->
+    <section class="admin-card" x-show="overview">
+      <h2>Frigate health</h2>
+      <p class="status-line">
+        Live current-state from Frigate's own MQTT heartbeat (frigate/stats + frigate/available) --
+        not stored in Postgres, just whatever ingest-worker last received. Blank until the next
+        stats tick after a restart.
+      </p>
+      <div class="admin-row">
+        <span class="row-label">Frigate connection</span>
+        <div class="row-badges">
+          <span class="flag" :class="frigateAvailableClass()" x-text="frigateAvailableText()"></span>
+        </div>
+      </div>
+      <table class="admin-table" x-show="overview && overview.frigate_health.stats">
+        <thead><tr><th>Camera</th><th class="num">Camera FPS</th><th class="num">Detection FPS</th><th>Detection</th></tr></thead>
+        <tbody>
+          <template x-for="[name, cam] in Object.entries((overview && overview.frigate_health.stats && overview.frigate_health.stats.cameras) || {})" :key="name">
+            <tr>
+              <td x-text="name"></td>
+              <td class="num" x-text="cam.camera_fps"></td>
+              <td class="num" x-text="cam.detection_fps"></td>
+              <td x-text="cam.detection_enabled ? 'on' : 'off'"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+      <div class="admin-row" x-show="overview && overview.frigate_health.stats">
+        <span class="row-label">Detectors</span>
+        <div class="row-badges">
+          <template x-for="[name, d] in Object.entries((overview && overview.frigate_health.stats && overview.frigate_health.stats.detectors) || {})" :key="name">
+            <span class="flag flag-on" x-text="name + ': ' + d.inference_speed + 'ms'"></span>
+          </template>
+        </div>
+      </div>
+      <div class="admin-row" x-show="overview && overview.frigate_health.stats">
+        <span class="row-label">Frigate process</span>
+        <div class="row-badges">
+          <span class="flag flag-on" x-text="'CPU: ' + (overview && overview.frigate_health.stats.cpu_percent) + '%'"></span>
+          <span class="flag flag-on" x-text="'Mem: ' + (overview && overview.frigate_health.stats.mem_percent) + '%'"></span>
+          <template x-for="[name, g] in Object.entries((overview && overview.frigate_health.stats && overview.frigate_health.stats.gpu_usages) || {})" :key="name">
+            <span class="flag flag-on" x-text="name + ' -- gpu: ' + g.gpu + ', mem: ' + g.mem"></span>
+          </template>
+        </div>
+      </div>
+    </section>
+
     <!-- ============ Counts ============ -->
     <section class="admin-card" x-show="overview">
       <h2>Counts</h2>

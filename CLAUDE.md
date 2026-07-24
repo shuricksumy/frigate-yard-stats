@@ -1868,6 +1868,29 @@ the authoritative whole-table sizes; this is for relative "which type is using t
 comparison, not a precise accounting. The dashboard's "By object type" section combines this with
 disk usage below into one row per type.
 
+**`frigate_health` on `GET /admin/overview`** -- Frigate's own system-health heartbeat over MQTT
+(`frigate/stats`, a periodic JSON blob every `frigate.conf`'s `mqtt.stats_interval` seconds, and
+`frigate/available`, an online/offline flag), surfaced on the admin dashboard's "Frigate health"
+card -- found by directly subscribing to `frigate/#` on a live broker to catalog what Frigate
+actually publishes beyond the `frigate/events`/`frigate/reviews` topics already consumed, since
+`frigate/stats` turned out to carry genuinely useful, currently-uncaptured signal (per-camera
+`camera_fps`/`detection_fps`, detector `inference_speed`, CPU/GPU usage) that would otherwise only
+surface indirectly, days later, as degraded/missed detections. `mqtt_ingest.py` subscribes to both
+topics alongside its existing two, keeping only the latest snapshot of each in memory via plain
+module-level globals (`_latest_stats`/`_frigate_available`, same pattern `_profile` already uses --
+paho-mqtt callbacks all run on one thread, so there's no concurrent-write race to guard against) --
+this is live current-state, not history worth persisting to Postgres the way `raw_events`/`visits`
+are. `mqtt_ingest.summarize_stats` trims the raw payload down before storing it: the raw blob also
+includes a `cpu_usages` entry per OS process inside Frigate's own container (`s6-supervise`,
+`nginx`, `go2rtc`, ...), irrelevant noise for this purpose, kept down to per-camera fps/detection
+state, detector inference speed, Frigate's own overall process CPU/mem
+(`cpu_usages["frigate.full_system"]`), and `gpu_usages` passed through generically (the vendor key
+varies by hardware -- `amd-vaapi`, `nvidia`, etc. -- so nothing here hardcodes one). `available` is
+three-state on the dashboard (`true`/`false`/`null`), not a plain boolean flag like the feature
+flags above it -- `null` means no `frigate/available` message has been received at all yet (e.g.
+right after an `ingest-worker` restart, before Frigate's next heartbeat), which reads differently
+from a confirmed `false` (Frigate genuinely reported itself offline).
+
 **`GET /admin/disk-usage`** is split out specifically because it *is* a real filesystem walk
 (`admin.dir_size_bytes`, `os.walk` summing real file sizes under `VIDEO_STORAGE_PATH`/
 `VIDEO_STORAGE_PATH_ALERTS`) -- kept separate so a large video backlog's scan time never blocks the

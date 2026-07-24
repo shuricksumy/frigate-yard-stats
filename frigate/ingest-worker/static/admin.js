@@ -209,6 +209,22 @@ function adminApp() {
       ];
     },
 
+    // Three states, not two -- `null` (never received a frigate/available message yet, e.g. right
+    // after an ingest-worker restart) reads differently from a confirmed "offline", which is why
+    // this isn't a plain boolean flag like the feature flags above.
+    frigateAvailableText() {
+      const available = this.overview && this.overview.frigate_health.available;
+      if (available === true) return "Frigate: online";
+      if (available === false) return "Frigate: offline";
+      return "Frigate: unknown (no heartbeat received yet)";
+    },
+    frigateAvailableClass() {
+      const available = this.overview && this.overview.frigate_health.available;
+      if (available === true) return "flag-on";
+      if (available === false) return "flag-off";
+      return "";
+    },
+
     // Note: these are global .env defaults -- any of them can be overridden per object type in
     // profiles.yaml (telegram_events_mode/telegram_alerts_mode/ai_events_stage_enabled/
     // ai_alerts_enabled), which this overview call has no visibility into (profiles.yaml isn't

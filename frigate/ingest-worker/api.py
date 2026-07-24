@@ -12,6 +12,7 @@ import config
 import crop
 import crop_worker
 import db
+import mqtt_ingest
 import report
 import schemas
 import video
@@ -503,6 +504,11 @@ def admin_overview():
         "row_counts": row_counts,
         "row_counts_by_object_type": db.get_row_counts_by_object_type(),
         "stage_counts": db.get_stage_counts(),
+        # Frigate's own system-health heartbeat (frigate/stats + frigate/available over MQTT) --
+        # live current-state kept in memory by mqtt_ingest, not a DB query. None/None if the MQTT
+        # connection hasn't received either message yet (e.g. right after a restart, before
+        # Frigate's next stats_interval tick).
+        "frigate_health": mqtt_ingest.get_frigate_health(),
         "embeddings": {
             "sightings_missing": missing_embeddings["sightings"],
             "sightings_total": row_counts["sightings"],
