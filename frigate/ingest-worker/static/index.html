@@ -51,20 +51,25 @@
             </template>
           </select>
         </label>
-        <label x-show="viewMode === 'search' && !advancedSearch">
-          Precision
-          <select x-model="filters.precision" @change="applyFilters()">
-            <template x-for="opt in searchPrecisionOptions" :key="opt.value">
-              <option :value="opt.value" x-text="opt.label"></option>
-            </template>
-          </select>
-        </label>
-        <label>
+        <!-- Camera appears twice -- both bound to the same filters.camera, so they stay in sync
+             automatically -- since its position differs between simple mode (right after Time
+             range) and advanced mode (after Type/AI status, before Precision (exact), see below);
+             a single element can't occupy two different flex positions depending on which mode is
+             showing. -->
+        <label x-show="!advancedSearch">
           Camera
           <select x-model="filters.camera" @change="applyFilters()">
             <option value="all">All</option>
             <template x-for="cam in cameras" :key="cam">
               <option :value="cam" x-text="cam"></option>
+            </template>
+          </select>
+        </label>
+        <label x-show="viewMode === 'search' && !advancedSearch">
+          Precision
+          <select x-model="filters.precision" @change="applyFilters()">
+            <template x-for="opt in searchPrecisionOptions" :key="opt.value">
+              <option :value="opt.value" x-text="opt.label"></option>
             </template>
           </select>
         </label>
@@ -99,9 +104,14 @@
               <option value="skipped">Skipped (no image possible)</option>
             </select>
           </label>
-          <label class="checkbox-label" x-show="viewMode === 'events'">
-            <input type="checkbox" x-model="filters.onlyWithMedia" @change="applyFilters()">
-            Only with media
+          <label>
+            Camera
+            <select x-model="filters.camera" @change="applyFilters()">
+              <option value="all">All</option>
+              <template x-for="cam in cameras" :key="cam">
+                <option :value="cam" x-text="cam"></option>
+              </template>
+            </select>
           </label>
           <label x-show="viewMode === 'search'" title="Exact cosine-distance cutoff, overrides the Precision preset above when set. Leave blank to use that preset instead.">
             Precision (exact)

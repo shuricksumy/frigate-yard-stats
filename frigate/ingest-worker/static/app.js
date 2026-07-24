@@ -73,7 +73,7 @@ function eventsApp() {
     _autoRefreshTimer: null,
 
     filters: {
-      objectType: "all", camera: "all", aiStatus: "all", onlyWithMedia: true, q: "",
+      objectType: "all", camera: "all", aiStatus: "all", q: "",
       hours: 1, start: "", end: "", precision: "high", maxDistanceOverride: "0.5",
     },
 
@@ -86,7 +86,7 @@ function eventsApp() {
     // than an invisible, overly narrow time filter.
     _defaultFilters(mode) {
       return {
-        objectType: "all", camera: "all", aiStatus: "all", onlyWithMedia: true, q: "",
+        objectType: "all", camera: "all", aiStatus: "all", q: "",
         hours: mode === "search" ? 24 : 1, start: "", end: "", precision: "high", maxDistanceOverride: "0.5",
       };
     },
@@ -344,7 +344,6 @@ function eventsApp() {
           limit: String(this.limit),
           offset: String(this.offset),
         });
-        params.set("has_media", String(!!this.filters.onlyWithMedia));
         if (this.filters.objectType && this.filters.objectType !== "all") {
           params.set("object_type", this.filters.objectType);
         }
@@ -393,9 +392,9 @@ function eventsApp() {
       // Comparison view alongside fetchEvents -- one card per Frigate review/alert segment
       // (visit) instead of one per raw_event, so duplicate det_ids from tracker re-ID/label
       // flicker collapse into a single card. start/end/objectType/camera/q carry over from the
-      // filter bar -- aiStatus/onlyWithMedia are per-raw_event concepts that don't compose
-      // cleanly with a grouped view, so this view intentionally ignores them rather than
-      // half-applying them (and are hidden entirely in this view -- see index.html).
+      // filter bar -- aiStatus is a per-raw_event concept that doesn't compose cleanly with a
+      // grouped view, so this view intentionally ignores it rather than half-applying it (and is
+      // hidden entirely in this view -- see index.html).
       this.loading = true;
       try {
         const q = String(this.filters.q || "").trim();

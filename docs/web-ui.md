@@ -36,9 +36,9 @@ The simple filter bar has:
 - **Camera** — populated live from whatever cameras actually have data, not a fixed config list.
 
 **Advanced filters** (toggle to reveal) adds From/To date pickers (override the Time range preset
-when set), Type (object label), and — Events view only — AI status and "Only with media" (checked
-by default: hides rows that don't have an image or video yet, since there's nothing to show for
-them).
+when set), Type (object label), and — Events view only — AI status. Camera moves down to sit
+after Type (and after AI status on the Events tab) while Advanced is open, rather than staying in
+its simple-mode spot.
 
 Every filter except the free-text Search box applies the instant you change it — no separate
 "Search" click needed for a dropdown or date picker.
@@ -51,8 +51,8 @@ query text server-side (`POST /search`, via `ingest-worker`'s configured embeddi
 ranks sightings by semantic similarity (cosine distance), same idea as the `semantic_search`
 tool the n8n Q&A agent already uses, just reachable directly from the browser with no agent in
 the loop. Time range/Camera/From-To/Type still apply exactly as they do on the other two tabs;
-AI status/"Only with media" don't apply here (hidden, same as on the Visits tab) since a
-search result already implies AI analysis exists.
+AI status doesn't apply here (hidden, same as on the Visits tab) since a search result already
+implies AI analysis exists.
 
 Results are a flat, ranked grid — most relevant first, no "page 2" concept — spanning both
 per-event sightings and per-visit alert-stage sightings together (there's no separate toggle for

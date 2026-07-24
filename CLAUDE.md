@@ -977,12 +977,16 @@ pointed at it.
 
 `GET /events` also defaults `has_media=true` -- rows with neither `crop_image_base64` nor
 `video_path` (not yet `crop_status='done'`, including `'skipped'` rows) are hidden by default
-since there's nothing to show for them; pass `has_media=false` to see every row regardless. The
-web UI's "Only with media" checkbox (checked by default) is this same param, not a client-side
-filter. In practice `video_path` is never set without `crop_image_base64` already being set too
-(`claim_video_batch` only ever claims `crop_status='done'` rows), so this is currently equivalent
-to crop-image-only -- but the check covers both so it stays correct if that invariant ever
-changes. `GET /events?event_id=<id>` exact-matches a single event and bypasses every other filter
+since there's nothing to show for them; pass `has_media=false` to see every row regardless.
+**Update: the web UI's own "Only with media" checkbox was removed** -- it always sent
+`has_media=true` (its checked-by-default, never-unchecked-in-practice state), so the toggle itself
+added a control for a choice nobody was making; the frontend now simply omits the `has_media`
+param and lets the backend's own default apply, same effective behavior with one less UI element.
+`has_media=false` is still fully supported for any other caller that wants it. In practice
+`video_path` is never set without `crop_image_base64` already being set too (`claim_video_batch`
+only ever claims `crop_status='done'` rows), so this default is currently equivalent to
+crop-image-only -- but the check covers both so it stays correct if that invariant ever changes.
+`GET /events?event_id=<id>` exact-matches a single event and bypasses every other filter
 (time window and `has_media` included) -- searching for one specific known event should find it
 regardless, not get filtered out by the defaults built for browsing a range.
 
