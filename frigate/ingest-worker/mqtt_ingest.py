@@ -85,6 +85,27 @@ def _handle_event_message(msg):
     if config.CAMERAS and event["camera"] not in config.CAMERAS:
         return
 
+    # has_snapshot=false on an "end" message is Frigate's own final, terminal answer for this
+    # det_id -- we only ever act on "end" (see above), never "new"/"update", so there's no race
+    # where a snapshot might still arrive later for the same det_id. A tracked-object lifecycle
+    # that never got one can never be cropped, stored on video, or AI-analyzed regardless of
+    # retries (db.insert_raw_event would immediately mark it crop_status/video_status/ai_status=
+    # 'skipped' for exactly this reason -- see its own comment) -- confirmed live in production
+    # this is the overwhelming majority of traffic on a busy camera (~98% of one camera's "car"
+    # detections, ~14,000 rows) with zero analytical value (each skipped row never gets an image,
+    # video, or AI description, ever) and confirmed via profile_config/Frigate tuning that it's
+    # tracker-confidence noise (borderline detections that don't sustain long enough to become a
+    # real event), not a timing gap retrying would fix. Filtering here means it's never written to
+    # Postgres at all, rather than inserted and immediately marked terminal -- a raw_events row
+    # with no snapshot has no image/video/AI value and was never queryable for anything a caller
+    # couldn't already get from Frigate's own event history directly.
+    if not event["has_snapshot"]:
+        logger.debug(
+            "Skipping raw_event with no snapshot camera=%s objects=%s det_id=%s",
+            event["camera"], event["objects"], event["det_id"],
+        )
+        return
+
     try:
         db.insert_raw_event(event, _profile)
         logger.info(

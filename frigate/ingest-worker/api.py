@@ -573,6 +573,24 @@ def admin_requeue_failed(
     return {"table": table, "stage": stage, "requeued": count}
 
 
+@app.post("/admin/queue/skip-failed", tags=["admin"], dependencies=[Depends(require_api_key)])
+def admin_skip_failed(
+    table: str = Query(..., description="'raw_events' or 'visits'"),
+    stage: str = Query(..., description="raw_events: 'crop'/'video'/'ai'. visits: 'video'/'thumb_crop'."),
+    days: int = Query(7, ge=1, description="Mark {stage}_status='failed' rows older than this many days as 'skipped' instead of retrying them."),
+):
+    """The other lever for a stuck 'failed' bucket, alongside requeue-failed above -- some
+    failures are permanent (bad media, a det_id Frigate no longer has) and just re-fail on the
+    very next retry, piling back into the same bucket. This marks anything that's been failed for
+    at least `days` as 'skipped' instead -- terminal, never retried again, without deleting the
+    row."""
+    try:
+        count = db.skip_failed_older_than(table, stage, days)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"table": table, "stage": stage, "days": days, "skipped": count}
+
+
 # Static web report UI (index.html/app.js/style.css/vendor/*) -- all local files, no CDN
 # requests. Calls back into GET /events, /events/{id}/thumbnail, /media/video/{id} above using an
 # API key the user enters once and stores in a cookie. Baked into the image by the Dockerfile

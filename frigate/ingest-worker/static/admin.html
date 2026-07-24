@@ -146,6 +146,14 @@
               :disabled="requeuing === (stage.table + stage.stage)">
               Requeue <span x-text="stage.counts.failed"></span> failed
             </button>
+            <span x-show="skipFailedResult[stage.table + stage.stage]" x-text="skipFailedResult[stage.table + stage.stage]"></span>
+            <button
+              x-show="(stage.counts.failed || 0) > 0"
+              title="Marks failed rows older than 7 days as 'skipped' instead of retrying them -- for failures that keep re-failing (bad media, a det_id Frigate no longer has), not transient ones."
+              @click="skipFailedOlderThan(stage.table, stage.stage, 7)"
+              :disabled="skippingFailed === (stage.table + stage.stage)">
+              Skip failed older than 7d
+            </button>
           </div>
         </div>
       </template>

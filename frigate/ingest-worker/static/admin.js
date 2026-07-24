@@ -60,6 +60,9 @@ function adminApp() {
     requeuing: null,
     requeueResult: {},
 
+    skippingFailed: null,
+    skipFailedResult: {},
+
     purgeDays: 60,
     purgeOnlyMedia: true,
     purgeObjectLabel: "",
@@ -318,6 +321,27 @@ function adminApp() {
         this.requeueResult = { ...this.requeueResult, [key]: "Failed: " + e.message };
       } finally {
         this.requeuing = null;
+      }
+    },
+
+    // The other lever for the same 'failed' bucket -- some failures are permanent (bad media, a
+    // det_id Frigate no longer has) and just re-fail on the very next requeue, piling back into
+    // the same bucket. This marks anything failed for 7+ days as 'skipped' instead: terminal,
+    // never retried again, without deleting the row.
+    async skipFailedOlderThan(table, stage, days) {
+      const key = table + stage;
+      this.skippingFailed = key;
+      try {
+        const r = await fetch(`/admin/queue/skip-failed?table=${table}&stage=${stage}&days=${days}`, {
+          method: "POST", headers: this._headers(),
+        });
+        const d = await r.json();
+        this.skipFailedResult = { ...this.skipFailedResult, [key]: `Skipped ${d.skipped}` };
+        await this.refreshAll();
+      } catch (e) {
+        this.skipFailedResult = { ...this.skipFailedResult, [key]: "Failed: " + e.message };
+      } finally {
+        this.skippingFailed = null;
       }
     },
 

@@ -177,6 +177,43 @@ def test_requeue_failed_is_noop_when_nothing_failed(conn_ok):
         _cleanup_event(event_id)
 
 
+# ---- db.skip_failed_older_than ----
+
+def test_skip_failed_older_than_rejects_unknown_combination():
+    with pytest.raises(ValueError):
+        db.skip_failed_older_than("bogus_table", "ai", 7)
+    with pytest.raises(ValueError):
+        db.skip_failed_older_than("raw_events", "bogus_stage", 7)
+
+
+def test_skip_failed_older_than_marks_old_failures_skipped(conn_ok):
+    event_id = _insert_event(camera="pytest-admin-skip-old", ai_status="failed")
+    try:
+        db._execute(
+            "UPDATE yard_stats.raw_events SET ai_status_changed_at = now() - interval '8 days' WHERE id = %s",
+            (event_id,),
+        )
+        count = db.skip_failed_older_than("raw_events", "ai", 7)
+        assert count >= 1
+        row = db.get_raw_event(event_id)
+        assert row["ai_status"] == "skipped"
+        assert row["ai_attempt_count"] == 3  # left as-is, unlike requeue_failed's reset to 0
+    finally:
+        _cleanup_event(event_id)
+
+
+def test_skip_failed_older_than_leaves_recent_failures_alone(conn_ok):
+    # Just failed (ai_status_changed_at defaults to now()) -- still within the 7-day window, so
+    # this is a still-worth-retrying failure, not a permanent one to give up on.
+    event_id = _insert_event(camera="pytest-admin-skip-recent", ai_status="failed")
+    try:
+        db.skip_failed_older_than("raw_events", "ai", 7)
+        row = db.get_raw_event(event_id)
+        assert row["ai_status"] == "failed"
+    finally:
+        _cleanup_event(event_id)
+
+
 # ---- db.get_db_size_info / get_vector_index_status / reindex_vector_indexes ----
 
 def test_get_db_size_info_returns_positive_total_and_known_tables(conn_ok):

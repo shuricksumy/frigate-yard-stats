@@ -124,8 +124,33 @@ too, it would sit at `ai_status='new'` forever, indistinguishable on the admin d
 genuinely waiting on capacity (confirmed live: this was the large majority -- 1048 of ~1140 -- of a
 reported `ai_status='new'` backlog on one production instance). Rows inserted before this existed
 are backfilled by a one-time-ish `UPDATE ... WHERE ai_status = 'new' AND crop_status = 'skipped'`
-in `schema.sql`, safe to leave in permanently since it's a no-op once caught up. `FOR UPDATE SKIP
-LOCKED` is what makes claiming
+in `schema.sql`, safe to leave in permanently since it's a no-op once caught up.
+
+**Update: `has_snapshot=false` events are no longer inserted into `raw_events` at all.**
+`mqtt_ingest._handle_event_message` only ever acts on the `"end"` message (never `"new"`/
+`"update"`), so `has_snapshot` is already Frigate's own final, terminal answer for that det_id by
+the time it's read -- there's no race where a snapshot could still arrive later for the same
+tracked-object lifecycle. Such a row can never be cropped/stored on video/AI-analyzed regardless of
+retries (this is exactly why it used to be marked `skipped` immediately -- see above), so inserting
+it at all was pure dead weight: confirmed live in production this was the overwhelming majority of
+one camera's MQTT traffic (~98% of its `car` detections, roughly 14,000 of the camera's ~16,000
+total tracked-object lifecycles) with zero analytical value -- a `skipped` row never gets an image,
+video, or AI description, ever, and is never re-queried by any claim function again once marked
+terminal. Root-caused to tracker-confidence noise, not a camera hardware/lighting problem alone:
+comparing the two cameras' `car` object filters directly, the noisier one's `threshold`/`min_score`/
+`min_ratio` were all looser (e.g. `min_score: 0.35` vs `0.45`) and its `motion.threshold` more
+sensitive, consistent with more borderline detection candidates being spawned that don't sustain
+confidence long enough to become a real confirmed event -- tightening those further was rejected as
+a fix on this deployment (one camera is genuinely more light-sensitive; tightening loses real
+events without eliminating the noise, confirmed still ~7,000/day skipped even at the camera's own
+stricter settings), so the noise is filtered at the application layer instead. This is filtering at
+ingest time in `mqtt_ingest.py`, not a change to `db.insert_raw_event` itself (still defensively
+marks `crop_status`/`video_status`/`ai_status='skipped'` for a `has_snapshot=false` row if ever
+called with one directly, e.g. by a test fixture) -- the skip-status machinery above still exists
+and still matters for the rows already in the database from before this change, and for any other
+caller that constructs a `raw_events` insert directly.
+
+`FOR UPDATE SKIP LOCKED` is what makes claiming
 race-safe against overlapping runs (multiple n8n executions, or this service's own poll loops) --
 but only when paired with a CTE, not a plain `WHERE id IN (SELECT ... LIMIT %s FOR UPDATE SKIP
 LOCKED)` subquery: confirmed in practice (reproduced directly in psql) that the subquery form,

@@ -250,6 +250,32 @@ def requeue_failed(table: str, stage: str) -> int:
     return len(rows)
 
 
+def skip_failed_older_than(table: str, stage: str, days: int) -> int:
+    # requeue_failed's reset-to-retry assumes the failure was transient -- for a row that's a
+    # genuinely permanent failure (corrupt/truncated media, a det_id Frigate no longer has, an
+    # image the VLM can never parse), that just re-fails on the very next attempt and piles back
+    # into the same 'failed' bucket, indistinguishable from a fresh, still-worth-retrying failure.
+    # This is the other lever for that bucket: instead of retrying, mark anything that's been
+    # sitting at 'failed' for at least `days` as 'skipped' -- the same terminal state a
+    # has_snapshot=false row already gets (see mqtt_ingest.py) -- so it stops being retried or
+    # counted as failed, without deleting the row itself. attempt_count is deliberately left as-is
+    # (unlike requeue_failed's reset to 0) since it's no longer meaningful once terminal, and
+    # keeping it is a small audit trail of how many attempts were made before giving up. Same
+    # table/stage whitelist as requeue_failed -- these would otherwise be caller-supplied strings.
+    target = _REQUEUE_TARGETS.get((table, stage))
+    if target is None:
+        raise ValueError(f"Unknown table/stage combination: {table}/{stage}")
+    sql_table, status_col, _attempt_col, changed_col = target
+    rows = _execute(
+        f"UPDATE {sql_table} SET {status_col} = 'skipped', {changed_col} = now() "
+        f"WHERE {status_col} = 'failed' AND {changed_col} < now() - make_interval(days => %s) "
+        f"RETURNING 1",
+        (days,),
+        fetch=True,
+    )
+    return len(rows)
+
+
 def get_db_size_info() -> dict:
     # Total DB size plus a per-table breakdown (yard_stats' own tables only) for the admin
     # dashboard's disk-usage section -- pg_total_relation_size includes indexes/TOAST, so this
