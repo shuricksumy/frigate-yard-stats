@@ -127,7 +127,7 @@ it can fall back to meaning-based search instead of requiring an exact keyword, 
 like *"cars seen last week"* still goes through the normal structured filters (time range,
 object type) since that maps cleanly to real fields.
 
-Under the hood this uses **pgvector** (a Postgres extension), not a separate vector database — the
+Under the hood, this uses **pgvector** (a Postgres extension), not a separate vector database — the
 embeddings live as one more column right alongside everything else in the same universal `sightings`/
 `visit_sightings` tables, so there's no extra service to run or keep in sync. The actual embedding
 model is, by default, one more slot on your locally-hosted VLM setup (e.g.
