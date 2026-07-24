@@ -1,3 +1,18 @@
+# This is the EXAMPLE/TEMPLATE copy -- committed to git, same idea as .env.example/
+# profiles.yaml.example. Copy this file to frigate.conf (same directory, alongside
+# docker-compose.yml) and fill in your own {FRIGATE_*} placeholders (or let docker-compose's own
+# .env substitute them, per .env.example's FRIGATE_* section) -- that copy is gitignored (never
+# committed), since it becomes real per-deployment config with real camera credentials in it, not
+# something to share. docker-compose.yml bind-mounts frigate.conf (not this file) into the
+# "frigate" service/profile.
+#
+# Note: this repo also keeps a second, separate frigate.conf -- a real, secrets-filled copy pulled
+# directly from a live Frigate instance's own /config/config.yaml (no {FRIGATE_*} placeholders at
+# all, since Frigate/docker-compose already substituted them at container start) -- so it can be
+# edited and restarted directly from Frigate's own web UI, which can't perform env-var
+# substitution itself. That copy is gitignored for the same reason as above, just doubly so given
+# it holds live credentials, not just structure.
+#
 # -------------------------------------------------
 # Global configuration
 # -------------------------------------------------
@@ -65,12 +80,21 @@ review:
       - truck
       - dog
 
-# LPR global configuration
+# LPR global configuration -- disabled by default on this deployment: confirmed live (100 recent
+# car events checked directly against Frigate's own API) that this never once resolved a plate to
+# sub_label despite actively running (0/100), and debug_save_plates left 13,000+ tiny debug files
+# on disk with no automatic cleanup for zero usable output. Sampled a few of those debug crops
+# directly -- some were genuinely legible to a human eye, so this isn't purely a camera-resolution
+# problem; Frigate's own OCR/confidence threshold is the bottleneck, and two reads of what looked
+# like the same plate moments apart disagreed on the digits. The VLM's own per-car prompt already
+# reads plates directly from the crop (unrelated to this feature, and confirmed actually working),
+# so nothing is lost by leaving this off -- flip enabled back to true (globally and per-camera
+# below) if your own cameras/lighting get better results than this deployment did.
 lpr:
-  enabled: true
+  enabled: false
   device: CPU # can also be GPU if available and correct Docker image is used
   detection_threshold: 0.7 # change if necessary
-  debug_save_plates: true
+  debug_save_plates: false
 
   known_plates:
     # Example only -- replace with your own known plates before deploying.
@@ -123,7 +147,7 @@ cameras:
       enabled: true
 
     lpr:
-      enabled: true
+      enabled: false
       enhancement: 3
 
     objects:
@@ -219,7 +243,7 @@ cameras:
       enabled: true
 
     lpr:
-      enabled: true
+      enabled: false
       enhancement: 3
 
     objects:

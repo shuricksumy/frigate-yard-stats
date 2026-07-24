@@ -10,6 +10,11 @@ postgres-projects/
 # never committed. frigate/profiles.yaml.example is the checked-in template/reference instead.
 frigate/profiles.yaml
 
+# Real per-deployment Frigate config -- same reasoning as .env/profiles.yaml above, never
+# committed (it holds real camera RTSP credentials/MQTT password once filled in or substituted).
+# frigate/frigate.conf.example is the checked-in template/reference instead.
+frigate/frigate.conf
+
 # Runtime data written by bind-mounted volumes -- keep the directories (via .gitkeep) but never
 # their contents: stored clips are semi-sensitive (see CLAUDE.md), and the mosquitto dirs are
 # just local broker state.
