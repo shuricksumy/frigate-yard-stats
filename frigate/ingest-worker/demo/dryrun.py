@@ -37,6 +37,13 @@ def main():
         page.screenshot(path=f"{SHOT_DIR}/4_event_lightbox.png")
         page.click(".modal .close")
 
+        print("camera options:", page.locator('select[x-model="filters.camera"]').first.locator("option").all_text_contents())
+        page.locator('select[x-model="filters.camera"]').first.select_option(label="driveway")
+        page.wait_for_selector(".grid .card")
+        page.screenshot(path=f"{SHOT_DIR}/3b_events_camera_filtered.png")
+        page.locator('select[x-model="filters.camera"]').first.select_option(label="All")
+        page.wait_for_selector(".grid .card")
+
         page.click('.view-toggle button:has-text("Visits")')
         page.wait_for_selector(".grid .card")
         page.click(".card:has-text(\"car\")")
@@ -69,6 +76,8 @@ def main():
         page.goto(f"{BASE}/ui/admin")
         page.wait_for_selector(".admin-card")
         page.wait_for_timeout(500)
+        print("frigate health card present:", page.locator('h2:has-text("Frigate health")').count())
+        print("frigate connection badge:", page.locator(".flag").first.text_content())
         page.screenshot(path=f"{SHOT_DIR}/10_admin.png", full_page=True)
 
         browser.close()

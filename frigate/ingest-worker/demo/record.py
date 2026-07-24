@@ -46,6 +46,15 @@ def main():
         page.click(".modal .close")
         pause(1.0)
 
+        # -- Camera filter -- simple filter bar's Camera dropdown (the first one in DOM order is
+        # always the visible one here, since this tour never opens Advanced filters).
+        page.locator('select[x-model="filters.camera"]').first.select_option(label="driveway")
+        page.wait_for_selector(".grid .card")
+        pause(2.5)
+        page.locator('select[x-model="filters.camera"]').first.select_option(label="All")
+        page.wait_for_selector(".grid .card")
+        pause(1.0)
+
         # -- Connected events / back-navigation on the visit with two grouped det_ids --
         page.click('.view-toggle button:has-text("Visits")')
         page.wait_for_selector(".grid .card")
@@ -75,17 +84,21 @@ def main():
         page.click(".modal .close")
         pause(1.0)
 
-        # -- Admin dashboard --
+        # -- Admin dashboard -- scrolled to each named section by heading text rather than a fixed
+        # pixel amount, so this stays correct regardless of how tall any one card is (e.g. after
+        # the Frigate health card was added between Health and Counts).
         page.goto(f"{BASE}/ui/admin")
         page.wait_for_selector(".admin-card")
         pause(2.0)
         page.click('button:has-text("Check now")')
         pause(2.0)
-        page.mouse.wheel(0, 500)
-        pause(2.0)
-        page.mouse.wheel(0, 700)
+        page.locator('h2:has-text("Frigate health")').scroll_into_view_if_needed()
+        pause(3.0)
+        page.locator('h2:has-text("Queue health")').scroll_into_view_if_needed()
+        pause(3.0)
+        page.locator('h2:has-text("Storage")').scroll_into_view_if_needed()
         pause(2.5)
-        page.mouse.wheel(0, 700)
+        page.locator('h2:has-text("Retention purge")').scroll_into_view_if_needed()
         pause(2.5)
 
         context.close()

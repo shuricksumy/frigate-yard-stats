@@ -24,6 +24,16 @@ python3 -m venv venv
 ./venv/bin/playwright install chromium
 ```
 
+Needs a real **Python 3.10+** (the ingest-worker code itself uses `X | None` union-type syntax,
+which raises a `TypeError` on 3.9) with a working SSL/certificate setup for `pip`/`playwright
+install` to reach PyPI. Confirmed live: a PlatformIO-bundled Python interpreter's default OpenSSL
+cafile pointed at a nonexistent CI-runner build path (`/Users/runner/work/...`), causing every
+`pip install` to fail with `SSLError: [X509: NO_CERTIFICATE_OR_CRL_FOUND]` -- not fixable by
+setting `SSL_CERT_FILE` to a valid `certifi` bundle either (the bundled OpenSSL itself appears
+broken, not just misconfigured). A plain Homebrew/python.org Python (e.g. `/opt/homebrew/bin/
+python3.13`) worked fine. If `pip`/`playwright install` hang or fail with an SSL/certificate error,
+recreate the venv with a different, standard Python before troubleshooting further.
+
 ## Regenerating the demo video
 
 All commands from `frigate/ingest-worker/demo/`, using the venv's Python (`./venv/bin/python`)
@@ -57,7 +67,8 @@ MQTT_HOST=localhost POSTGRES_HOST=localhost POSTGRES_PORT=55411 POSTGRES_PASSWOR
   LLAMA_PROXY_BASE_URL=http://127.0.0.1:8930 LLAMA_PROXY_EMBED_PATH=/v1/embeddings \
   OBJECT_TYPES=car,truck,person,dog ./venv/bin/python run_demo_server.py &
 
-# 5. Record (tours Visits/Events/connected-events-back-navigation/Search/Admin -- see record.py)
+# 5. Record (tours Visits/Events/Camera filter/connected-events-back-navigation/Search/Admin's
+#    Frigate health panel -- see record.py)
 ./venv/bin/python record.py
 
 # 6. Convert the recorded .webm to a compact H.264 mp4
@@ -87,3 +98,8 @@ pass, e.g. after changing `seed.py`'s data or `record.py`'s steps.
   why it exists in production at all).
 - If you add another real photo, check it for identifiable people/legible plates before using it
   (see `gen_real_frames.py`'s docstring) and record its source/license in `real_photos/SOURCES.md`.
+- `run_demo_server.py` simulates a real Frigate MQTT heartbeat (calls `mqtt_ingest._handle_stats_
+  message`/`_handle_available_message` directly with a fake but realistic payload) so the Admin
+  dashboard's "Frigate health" card shows populated data instead of "unknown" -- there's no real
+  MQTT broker/Frigate instance in this demo setup otherwise. Update that fake payload's camera
+  names if `seed.py`'s own camera names ever change, so the two stay consistent.
