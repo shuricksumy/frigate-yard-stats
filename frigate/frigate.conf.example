@@ -137,6 +137,11 @@ cameras:
 
     detect:
       enabled: true
+      # Matches this camera's detect-stream (out_sub) resolution -- Frigate's own bounding-box
+      # coordinates are normalized against whatever width/height is set here, so this must match
+      # the actual stream, not just be a reasonable guess.
+      width: 1280
+      height: 720
       #fps: 5
 
     live:
@@ -233,6 +238,10 @@ cameras:
 
     detect:
       enabled: true
+      # Matches this camera's detect-stream (out2_sub) resolution -- see the 'outside' camera's
+      # own detect: comment above for why this must match the real stream, not just be a guess.
+      width: 1280
+      height: 720
       #fps: 5
 
     live:

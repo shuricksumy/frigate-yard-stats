@@ -124,35 +124,32 @@
 #     least one type (or in `defaults`) is enough to start the stage's poll thread -- see
 #     profile_config.any_ai_events_stage_enabled, used by main.py's thread-startup check.
 #     Hardcoded fallback: false.
-#   crop_disabled / crop_frame_offset_pct / crop_padding_pct -- crop framing for this type's own
-#     event crop (always our own record-stream seek+crop -- see crop.crop_event). Resolved fresh
-#     for every event, since crop_worker already processes every type regardless -- no
-#     queue/thread implications, just how the crop is framed. e.g. a `car` entry could tune
-#     crop_padding_pct for tighter plate legibility while other types keep the default. Hardcoded
-#     fallback: crop_disabled=false, crop_frame_offset_pct=0.5, crop_padding_pct=0.2. Frigate never
-#     exposes a timestamp for its own best-frame choice anywhere in its API (confirmed directly --
-#     checked the event JSON, the snapshot's response headers, and its EXIF; the only place it's
-#     visible at all is the camera's own burned-in on-screen clock overlay, readable by eye, not
-#     extractable programmatically), so crop_frame_offset_pct is always a tuned approximation, not
-#     a sync to Frigate's exact choice.
 #   ai_image_max_dimension -- the long side (px) of the downscaled copy actually sent to the VLM
-#     and stored in Postgres (raw_events.crop_image_base64) -- a downscale of the same
-#     full-resolution crop crop.crop_event always builds. Per-type since a plate-heavy vehicle
-#     prompt may want more resolution than a person/dog prompt. Hardcoded fallback: 1280 (VLMs
-#     downsample beyond that internally anyway, so there's no analysis benefit to going higher
-#     unless your prompt specifically needs it).
-#   store_video / store_video_alerts / store_event_images -- true/false. Unlike the AI-stage flag
+#     and stored in Postgres (raw_events.crop_image_base64) -- a downscale of Frigate's own
+#     best-detection-score snapshot (crop.fetch_frigate_snapshot_base64; see CLAUDE.md's
+#     "Cropping" section), which crop.crop_event fetches directly rather than seeking a frame from
+#     the record-stream clip itself -- there's no region-crop/offset math left to configure per
+#     type (crop_disabled/crop_frame_offset_pct/crop_padding_pct, which used to live here, were
+#     removed for exactly this reason). Per-type since a plate-heavy vehicle prompt may want more
+#     resolution than a person/dog prompt. Hardcoded fallback: 1280 (VLMs downsample beyond that
+#     internally anyway, so there's no analysis benefit to going higher unless your prompt
+#     specifically needs it) -- it can only ever shrink Frigate's snapshot, never upscale it or
+#     change its aspect ratio, since the snapshot's actual resolution is fixed by the camera's own
+#     detect-stream width/height in frigate.conf.
+#   store_video / store_video_visits / store_event_images -- true/false. Unlike the AI-stage flag
 #     above, these apply to *any* Frigate label by default (not just ones with a profiles.yaml
 #     prompt entry), so a type can get its own entry here purely to carry one of these keys, with
-#     no chat_path/prompt at all. store_event_images persists the full-resolution crop
-#     crop.crop_event already built (see event_images.py) to disk under
+#     no chat_path/prompt at all. store_event_images persists Frigate's own snapshot (the same
+#     bytes crop.crop_event already fetched, see event_images.py) to disk under
 #     EVENT_IMAGES_STORAGE_PATH -- off by default (discarded after producing the AI-facing
 #     downscale), so the database/disk stay minimal unless you opt in; a plain per-row resolver
 #     (profile_config.store_event_images), not a poll-thread gate, since persisting is a
-#     synchronous side effect inside the existing crop stage. store_video/store_video_alerts DO
-#     gate a poll thread -- setting either true for at least one type (or in `defaults`) is enough
-#     to start it, see profile_config.any_store_video_enabled/any_store_video_alerts_enabled.
-#     Hardcoded fallback: false (all three).
+#     synchronous side effect inside the existing crop stage. store_video (per-event clips) and
+#     store_video_visits (per-visit clips -- renamed from store_video_alerts, a holdover name from
+#     the removed alert AI stage) DO gate a poll thread each -- setting either true for at least
+#     one type (or in `defaults`) is enough to start it, see
+#     profile_config.any_store_video_enabled/any_store_video_visits_enabled. Hardcoded fallback:
+#     false (all three).
 #
 # `defaults:` ALSO holds a second, unrelated category: plain technical tuning knobs with no
 # per-object-type meaning at all -- queue parallel limits, retry counts, timeouts, poll intervals,
@@ -172,8 +169,8 @@
 #     before an automatic sweep deletes it, and how often that sweep runs.
 #   video_parallel_limit (1) / video_initial_wait_seconds (10) / video_min_valid_bytes (1000) /
 #     video_max_attempts (5) / video_retry_wait_seconds (5) / video_max_age_hours (null, no limit)
-#     -- video-download queue tuning, shared by both the events (store_video) and alerts
-#     (store_video_alerts) flows.
+#     -- video-download queue tuning, shared by both the events (store_video) and visits
+#     (store_video_visits) flows.
 #   ai_stage_parallel_limit (2) / ai_stage_stale_minutes (5) / ai_stage_max_attempts (3) /
 #     ai_stage_max_age_hours (null, no limit) / ai_stage_poll_interval_seconds (5) -- internal
 #     AI-stage queue tuning.
@@ -195,12 +192,9 @@
 #   telegram_events_mode: none
 #   telegram_alerts_mode: none
 #   ai_events_stage_enabled: false
-#   crop_disabled: false
-#   crop_frame_offset_pct: 0.5
-#   crop_padding_pct: 0.2
 #   ai_image_max_dimension: 1280
 #   store_video: false
-#   store_video_alerts: false
+#   store_video_visits: false
 #   store_event_images: false
 #   # Plain technical tuning knobs -- defaults: ONLY, never per-type (see the block above).
 #   parallel_limit: 2
@@ -239,12 +233,9 @@ object_types:
     # telegram_events_mode: image
     # telegram_alerts_mode: all
     # ai_events_stage_enabled: true
-    # crop_disabled: false
-    # crop_frame_offset_pct: 0.5
-    # crop_padding_pct: 0.2
     # ai_image_max_dimension: 1280
     # store_video: true
-    # store_video_alerts: true
+    # store_video_visits: true
     # store_event_images: true
     event_prompt: >-
       This image shows a single moment from one vehicle sighting. In one or two short sentences,

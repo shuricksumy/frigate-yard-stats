@@ -62,7 +62,7 @@ def run_once(profile: dict | None = None) -> None:
     if available_capacity <= 0:
         return
 
-    object_types, exclude_object_types = profile_config.store_video_alerts_claim_filter(profile)
+    object_types, exclude_object_types = profile_config.store_video_visits_claim_filter(profile)
     if object_types == []:
         # Base disabled, nothing opted in per-type -- nothing for this stage to do at all.
         return

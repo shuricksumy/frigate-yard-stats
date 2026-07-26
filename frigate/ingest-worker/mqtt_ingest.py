@@ -228,7 +228,7 @@ def _handle_review_message(msg):
             if message_id is not None:
                 # Durable reply-threading target, same idea as raw_events.telegram_photo_message_id
                 # -- lets alert_video_worker's later video send reply onto this message once the
-                # visit's clip (STORE_VIDEO_ALERTS) finishes downloading.
+                # visit's clip (STORE_VIDEO_VISITS) finishes downloading.
                 db.set_visit_telegram_photo_message_id(visit_id, message_id)
     except Exception:
         # Never let a Telegram hiccup take down the MQTT message handler -- same belt-and-

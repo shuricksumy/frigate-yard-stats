@@ -20,16 +20,13 @@ def _crop_event_result():
 
 
 # ---- crop_worker.process_claimed_event resolves per-type crop settings ----
+# crop_disabled/crop_frame_offset_pct/crop_padding_pct used to be resolved and threaded through
+# here too, configuring a region-crop/seek from the record-stream clip -- removed entirely once
+# crop_event switched to using Frigate's own snapshot exclusively (see crop.py's own comment and
+# CLAUDE.md's "Cropping" section). ai_image_max_dimension is the only crop-related override left.
 
-def test_process_claimed_event_resolves_per_type_crop_settings(monkeypatch):
-    profile = {
-        "object_types": {
-            "car": {
-                "crop_disabled": True, "crop_frame_offset_pct": 0.9,
-                "crop_padding_pct": 0.05, "ai_image_max_dimension": 640,
-            },
-        },
-    }
+def test_process_claimed_event_resolves_per_type_ai_image_max_dimension(monkeypatch):
+    profile = {"object_types": {"car": {"ai_image_max_dimension": 640}}}
     captured = {}
 
     def fake_crop_event(row, **kwargs):
@@ -42,19 +39,11 @@ def test_process_claimed_event_resolves_per_type_crop_settings(monkeypatch):
     row = {"id": 1, "objects": "car", "crop_attempt_count": 1, "det_id": "d1"}
     crop_worker.process_claimed_event(row, profile)
 
-    assert captured == {
-        "ai_image_max_dimension": 640,
-        "crop_disabled": True,
-        "crop_frame_offset_pct": 0.9,
-        "crop_padding_pct": 0.05,
-    }
+    assert captured == {"ai_image_max_dimension": 640}
 
 
 def test_process_claimed_event_falls_back_to_global_config_with_no_profile(monkeypatch):
-    monkeypatch.setattr(config, "CROP_DISABLED", True)
     monkeypatch.setattr(config, "MAX_CROP_DIMENSION", 999)
-    monkeypatch.setattr(config, "CROP_FRAME_OFFSET_PCT", 0.3)
-    monkeypatch.setattr(config, "CROP_PADDING_PCT", 0.1)
     captured = {}
 
     def fake_crop_event(row, **kwargs):
@@ -67,12 +56,7 @@ def test_process_claimed_event_falls_back_to_global_config_with_no_profile(monke
     row = {"id": 1, "objects": "car", "crop_attempt_count": 1, "det_id": "d1"}
     crop_worker.process_claimed_event(row, None)
 
-    assert captured == {
-        "ai_image_max_dimension": 999,
-        "crop_disabled": True,
-        "crop_frame_offset_pct": 0.3,
-        "crop_padding_pct": 0.1,
-    }
+    assert captured == {"ai_image_max_dimension": 999}
 
 
 # ---- crop_worker.process_claimed_event's opt-in store_event_images side effect ----
@@ -171,7 +155,7 @@ def test_video_worker_run_once_skips_claim_entirely_when_nothing_enabled(monkeyp
 
 
 def test_alert_video_worker_run_once_passes_resolved_object_types_to_claim(monkeypatch):
-    monkeypatch.setattr(config, "STORE_VIDEO_ALERTS", True)
+    monkeypatch.setattr(config, "STORE_VIDEO_VISITS", True)
     monkeypatch.setattr(config, "VIDEO_PARALLEL_LIMIT", 5)
     monkeypatch.setattr(alert_video_worker.db, "reap_stale_visit_video_processing", lambda: None)
     monkeypatch.setattr(alert_video_worker.db, "count_visit_video_in_progress", lambda: 0)
@@ -183,14 +167,14 @@ def test_alert_video_worker_run_once_passes_resolved_object_types_to_claim(monke
         return []
     monkeypatch.setattr(alert_video_worker.db, "claim_visit_video_batch", fake_claim)
 
-    profile = {"object_types": {"person": {"store_video_alerts": False}}}
+    profile = {"object_types": {"person": {"store_video_visits": False}}}
     alert_video_worker.run_once(profile)
 
     assert captured == {"object_types": None, "exclude_object_types": ["person"]}
 
 
 def test_alert_video_worker_run_once_skips_claim_entirely_when_nothing_enabled(monkeypatch):
-    monkeypatch.setattr(config, "STORE_VIDEO_ALERTS", False)
+    monkeypatch.setattr(config, "STORE_VIDEO_VISITS", False)
     monkeypatch.setattr(config, "VIDEO_PARALLEL_LIMIT", 5)
     monkeypatch.setattr(alert_video_worker.db, "reap_stale_visit_video_processing", lambda: None)
     monkeypatch.setattr(alert_video_worker.db, "count_visit_video_in_progress", lambda: 0)
@@ -199,4 +183,4 @@ def test_alert_video_worker_run_once_skips_claim_entirely_when_nothing_enabled(m
         raise AssertionError("claim_visit_video_batch should not be called when nothing opts in")
     monkeypatch.setattr(alert_video_worker.db, "claim_visit_video_batch", fail_if_called)
 
-    alert_video_worker.run_once(None)  # STORE_VIDEO_ALERTS false, no profile -- nothing enabled
+    alert_video_worker.run_once(None)  # STORE_VIDEO_VISITS false, no profile -- nothing enabled

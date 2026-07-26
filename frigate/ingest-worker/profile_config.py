@@ -16,12 +16,18 @@ rather than raising.
 
 Two families of settings:
   - Plain per-row settings (telegram_events_mode/telegram_alerts_mode/ai_events_stage_enabled/
-    crop_disabled/crop_frame_offset_pct/crop_padding_pct/ai_image_max_dimension/
-    store_event_images) -- resolved fresh for whatever row is currently being processed, since the
-    worker that owns that row already claims every type regardless (crop_worker) or already knows
-    which types to ask an existing object_types-aware claim function for (ai_worker).
-  - store_video/store_video_alerts -- these gate whether their whole poll
-    thread starts at all (main.py) *and* which rows their claim function is even allowed to look at
+    ai_image_max_dimension/store_event_images) -- resolved fresh for whatever row is currently
+    being processed, since the worker that owns that row already claims every type regardless
+    (crop_worker) or already knows which types to ask an existing object_types-aware claim
+    function for (ai_worker). (crop_disabled/crop_frame_offset_pct/crop_padding_pct used to live
+    here too, configuring a region-crop/seek computed from the record-stream clip -- removed
+    entirely once crop_event switched to using Frigate's own snapshot exclusively, which has no
+    region-crop math left to configure; see crop.py's own comment and CLAUDE.md's "Cropping"
+    section.)
+  - store_video/store_video_visits (renamed from store_video_alerts -- "alerts" was a holdover
+    name from the removed alert AI stage; this has always gated per-VISIT video storage) -- these
+    gate whether their whole poll thread starts at all (main.py) *and* which rows their claim
+    function is even allowed to look at
     (claim_video_batch/claim_visit_video_batch), since unlike the AI
     stage these apply to any Frigate label by default, not just ones with a profiles.yaml prompt
     entry. Their *_claim_filter functions return an include-or-exclude label list (never a plain
@@ -54,6 +60,26 @@ def _resolve(profile: dict | None, object_label: str | None, key: str, global_de
     return global_default
 
 
+def flag_summary(profile: dict | None, key: str, global_default) -> dict:
+    # Used by the admin dashboard (/admin/overview) to show a per-object-type-resolvable setting's
+    # actual effective value -- previously that endpoint only ever showed config.py's hardcoded
+    # fallback constant, never parsing profiles.yaml at all, which meant a deployment with e.g.
+    # `defaults: {ai_events_stage_enabled: true}` still saw "off" on the dashboard (confirmed live:
+    # a production instance with several of these genuinely on showed every one as off/none).
+    # Resolved with object_label=None -- the "effective base" every type falls back to unless it
+    # sets its own override -- plus which tier that came from (`defaults:` vs the hardcoded
+    # fallback; there's no "type" tier here since no specific type is being asked about) and which
+    # object types (if any) override it to a *different* value, so a real per-type split doesn't
+    # silently collapse into one summary number.
+    value = _resolve(profile, None, key, global_default)
+    source = "defaults" if key in _defaults_config(profile) else "hardcoded"
+    overridden_for = sorted(
+        label for label, type_cfg in (profile or {}).get("object_types", {}).items()
+        if key in (type_cfg or {}) and type_cfg[key] != value
+    )
+    return {"value": value, "source": source, "overridden_for": overridden_for}
+
+
 def telegram_events_mode(profile: dict | None, object_label: str | None) -> str:
     return _resolve(profile, object_label, "telegram_events_mode", config.TELEGRAM_EVENTS_MODE)
 
@@ -66,18 +92,6 @@ def ai_events_stage_enabled(profile: dict | None, object_label: str | None) -> b
     return _resolve(profile, object_label, "ai_events_stage_enabled", config.AI_EVENTS_STAGE_ENABLED)
 
 
-def crop_disabled(profile: dict | None, object_label: str | None) -> bool:
-    return _resolve(profile, object_label, "crop_disabled", config.CROP_DISABLED)
-
-
-def crop_frame_offset_pct(profile: dict | None, object_label: str | None) -> float:
-    return _resolve(profile, object_label, "crop_frame_offset_pct", config.CROP_FRAME_OFFSET_PCT)
-
-
-def crop_padding_pct(profile: dict | None, object_label: str | None) -> float:
-    return _resolve(profile, object_label, "crop_padding_pct", config.CROP_PADDING_PCT)
-
-
 def ai_image_max_dimension(profile: dict | None, object_label: str | None) -> int:
     # The AI-facing (and DB-stored) image size -- a downscale of the same full-resolution crop
     # crop.crop_event always builds. Per-object-type resolvable since a plate-heavy vehicle prompt
@@ -87,9 +101,9 @@ def ai_image_max_dimension(profile: dict | None, object_label: str | None) -> in
 
 
 def store_event_images(profile: dict | None, object_label: str | None) -> bool:
-    # Plain per-row resolution, same shape as crop_disabled -- gates a synchronous side effect
-    # inside the existing crop_worker thread (persisting the full-resolution crop to disk), not a
-    # separate poll thread/claim query.
+    # Plain per-row resolution, same shape as ai_image_max_dimension above -- gates a synchronous
+    # side effect inside the existing crop_worker thread (persisting the full-resolution crop to
+    # disk), not a separate poll thread/claim query.
     return _resolve(profile, object_label, "store_event_images", config.STORE_EVENT_IMAGES)
 
 
@@ -102,8 +116,10 @@ def store_video_enabled(profile: dict | None, object_label: str | None) -> bool:
     return _resolve(profile, object_label, "store_video", config.STORE_VIDEO)
 
 
-def store_video_alerts_enabled(profile: dict | None, object_label: str | None) -> bool:
-    return _resolve(profile, object_label, "store_video_alerts", config.STORE_VIDEO_ALERTS)
+def store_video_visits_enabled(profile: dict | None, object_label: str | None) -> bool:
+    # Renamed from store_video_alerts_enabled/store_video_alerts -- "alerts" was a holdover name
+    # from the removed alert AI stage; this has always gated per-VISIT video storage.
+    return _resolve(profile, object_label, "store_video_visits", config.STORE_VIDEO_VISITS)
 
 
 def any_ai_events_stage_enabled(profile: dict | None) -> bool:
@@ -150,8 +166,8 @@ def store_video_claim_filter(profile: dict | None) -> tuple[list[str] | None, li
     return _claim_filter(profile, "store_video", config.STORE_VIDEO)
 
 
-def store_video_alerts_claim_filter(profile: dict | None) -> tuple[list[str] | None, list[str] | None]:
-    return _claim_filter(profile, "store_video_alerts", config.STORE_VIDEO_ALERTS)
+def store_video_visits_claim_filter(profile: dict | None) -> tuple[list[str] | None, list[str] | None]:
+    return _claim_filter(profile, "store_video_visits", config.STORE_VIDEO_VISITS)
 
 
 def _any_enabled(object_types: list[str] | None) -> bool:
@@ -166,6 +182,6 @@ def any_store_video_enabled(profile: dict | None) -> bool:
     return _any_enabled(object_types)
 
 
-def any_store_video_alerts_enabled(profile: dict | None) -> bool:
-    object_types, _ = store_video_alerts_claim_filter(profile)
+def any_store_video_visits_enabled(profile: dict | None) -> bool:
+    object_types, _ = store_video_visits_claim_filter(profile)
     return _any_enabled(object_types)

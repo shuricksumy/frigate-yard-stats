@@ -13,10 +13,21 @@ import crop
 import crop_worker
 import db
 import mqtt_ingest
+import profile_config
 import report
 import schemas
 import video
 from auth import require_api_key, require_api_key_header_or_query
+
+# Set once by main.py right after profiles.yaml is loaded (same pattern mqtt_ingest.py's own
+# module-level _profile already uses) -- lets /admin/overview resolve real per-deployment
+# profiles.yaml settings instead of only ever showing config.py's hardcoded fallback constants.
+_profile: dict | None = None
+
+
+def set_profile(profile: dict | None) -> None:
+    global _profile
+    _profile = profile
 
 app = FastAPI(
     title="ingest-worker",
@@ -365,8 +376,8 @@ def get_event_video(event_id: int):
 
 @app.get("/media/video/visit/{visit_id}", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
 def get_visit_video(visit_id: int):
-    """Alerts-flow counterpart to GET /media/video/{event_id} -- a visit's own clip
-    (STORE_VIDEO_ALERTS/alert_video_worker.py) lives under VIDEO_STORAGE_PATH_ALERTS, a completely
+    """Visits-flow counterpart to GET /media/video/{event_id} -- a visit's own clip
+    (STORE_VIDEO_VISITS/alert_video_worker.py) lives under VIDEO_STORAGE_PATH_ALERTS, a completely
     separate storage location from any raw_event's video_path, so it needs its own endpoint rather
     than overloading the event one with two different id spaces."""
     row = db.get_visit(visit_id)
@@ -517,7 +528,15 @@ def admin_overview():
     per-stage queue status breakdown, embedding coverage, DB size, vector index health, retention
     info, and the feature-flag switches currently on. Deliberately excludes anything that's a real
     network/filesystem call (see /admin/disk-usage, /admin/embedding-backend/check) so this stays
-    cheap enough to load on every dashboard visit."""
+    cheap enough to load on every dashboard visit.
+
+    feature_flags resolves each setting through profile_config.py against the loaded profiles.yaml
+    (object_label=None, i.e. the effective base every type falls back to unless it overrides it),
+    not just config.py's hardcoded fallback -- confirmed live that the previous, config.py-only
+    version showed every flag as off/none on a production instance whose profiles.yaml actually had
+    several of them on via `defaults:`. Each entry also reports which tier it came from
+    (`defaults` vs `hardcoded`) and which object types (if any) override it to a different value,
+    so a real per-type split isn't silently hidden behind one summary value."""
     missing_embeddings = db.count_sightings_missing_embedding()
     row_counts = db.get_table_row_counts()
     return {
@@ -543,13 +562,22 @@ def admin_overview():
         "vector_index": db.get_vector_index_status(),
         "retention": db.get_retention_info(),
         "feature_flags": {
-            "ai_events_stage_enabled": config.AI_EVENTS_STAGE_ENABLED,
-            "store_video": config.STORE_VIDEO,
-            "store_video_alerts": config.STORE_VIDEO_ALERTS,
-            "store_event_images": config.STORE_EVENT_IMAGES,
-            "crop_disabled": config.CROP_DISABLED,
-            "telegram_events_mode": config.TELEGRAM_EVENTS_MODE,
-            "telegram_alerts_mode": config.TELEGRAM_ALERTS_MODE,
+            "ai_events_stage_enabled": profile_config.flag_summary(
+                _profile, "ai_events_stage_enabled", config.AI_EVENTS_STAGE_ENABLED,
+            ),
+            "store_video": profile_config.flag_summary(_profile, "store_video", config.STORE_VIDEO),
+            "store_video_visits": profile_config.flag_summary(
+                _profile, "store_video_visits", config.STORE_VIDEO_VISITS,
+            ),
+            "store_event_images": profile_config.flag_summary(
+                _profile, "store_event_images", config.STORE_EVENT_IMAGES,
+            ),
+            "telegram_events_mode": profile_config.flag_summary(
+                _profile, "telegram_events_mode", config.TELEGRAM_EVENTS_MODE,
+            ),
+            "telegram_alerts_mode": profile_config.flag_summary(
+                _profile, "telegram_alerts_mode", config.TELEGRAM_ALERTS_MODE,
+            ),
         },
     }
 

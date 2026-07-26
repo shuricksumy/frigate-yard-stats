@@ -109,7 +109,7 @@ def test_insert_raw_event_resolves_store_video_from_profile_defaults(conn_ok, mo
     # can only enable it via profiles.yaml. insert_raw_event must resolve it through
     # profile_config, not a bare config.STORE_VIDEO read (which is always the hardcoded False and
     # can never see this profile-only override) -- confirmed live in production: a deployment with
-    # store_video_alerts: true in profiles.yaml's defaults: still got video_status='skipped' on
+    # store_video_visits: true in profiles.yaml's defaults: still got video_status='skipped' on
     # every new visit until this was fixed.
     monkeypatch.setattr(config, "STORE_VIDEO", False)
     profile = {"defaults": {"store_video": True}}

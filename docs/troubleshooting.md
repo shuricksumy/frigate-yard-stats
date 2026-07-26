@@ -46,11 +46,13 @@ n8n_projects -d home_automation`) when the API-level view isn't enough.
 - A row stuck on `crop_status = 'skipped'` forever is usually correct, not a bug — Frigate can emit
   a full event lifecycle for an object it never actually persisted a snapshot for; there's nothing
   to crop for these no matter how long you wait.
-- If crops look wrong for just *one* object type (full frame instead of cropped, or vice versa;
-  wrong offset/framing; wrong resolution), or wrong across the board, check `profiles.yaml` —
-  `crop_disabled`/`crop_frame_offset_pct`/`crop_padding_pct`/`ai_image_max_dimension` are configured
-  entirely there (a type's own `object_types.<label>` entry, or a profile-wide `defaults:` section),
-  not in `.env` at all, so there's nothing to check on the `.env` side for these four.
+- The stored/displayed/analyzed image is always Frigate's own best-detection-score snapshot
+  (`GET /api/events/<id>/snapshot.jpg`) — if it looks wrong (different moment than Frigate's own
+  Explore UI shows for that event, wrong resolution), the issue is on Frigate's side (its detect
+  stream, or the event hasn't settled yet), not something to tune in `ingest-worker`. If the image
+  is too small/large for your VLM, check `ai_image_max_dimension` in `profiles.yaml` (a type's own
+  `object_types.<label>` entry, or a profile-wide `defaults:` section, not `.env`) — it only ever
+  shrinks the snapshot, never upscales it.
 
 ## Events are cropped but never analyzed (`ai_status` stuck on `new`)
 
@@ -71,7 +73,7 @@ This stage is owned by n8n, not `ingest-worker` — see [`n8n.md`](n8n.md):
 
 ## Video never gets stored
 
-- Confirm `store_video` (per-event) or `store_video_alerts` (per-visit) actually resolves to `true`
+- Confirm `store_video` (per-event) or `store_video_visits` (per-visit) actually resolves to `true`
   for that object type in `profiles.yaml` (a type's own entry, or a profile-wide `defaults:`
   section) — these are configured entirely in `profiles.yaml`, not `.env` — and that you restarted
   the container after editing it (`docker compose restart ingest-worker`, not `up -d` — see

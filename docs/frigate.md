@@ -23,12 +23,15 @@ inputs:
 
 - **`detect`** — a low-resolution, low-bandwidth stream Frigate's AI actually looks at to find
   objects. Doesn't need to look good, just needs to be fast and cheap to process continuously.
-- **`record`** — the full-resolution stream that gets saved and is what `ingest-worker` actually
-  crops/downloads clips from. This project needs this to be genuinely full resolution (this repo's
-  own cameras run at 3840x2160) — a plate or small notable feature is illegible if you crop a
-  region out of the same low-res stream the detector uses. Set `RECORD_WIDTH`/`RECORD_HEIGHT` in
-  `.env` to match your own cameras' real record-stream resolution (check with `ffmpeg -i
-  rtsp://<your-camera-record-stream>` if you're not sure).
+  This is also the stream Frigate's own event snapshot (`GET /api/events/<id>/snapshot.jpg`) comes
+  from — `ingest-worker`'s `crop.crop_event` fetches that snapshot directly rather than cropping
+  its own region out of either stream (see CLAUDE.md's "Cropping" section), so this stream's
+  resolution (set via each camera's `detect: {width, height}` in `frigate.conf`) is what actually
+  determines the stored/analyzed image's resolution.
+- **`record`** — the full-resolution stream that gets saved and is what `ingest-worker` downloads
+  clips from (`STORE_VIDEO`/`STORE_VIDEO_VISITS`). This project needs this to be genuinely full
+  resolution (this repo's own cameras run at 3840x2160) for legible playback, independent of
+  whatever the crop/analysis path above uses.
 
 ## Recording retention — this genuinely matters, not just a tuning knob
 
@@ -63,24 +66,28 @@ own retention window:
   its own cleanup pass gets to it — it isn't a "keep everything, just briefly" buffer the way the
   name might suggest.
 
-**Why you should care**: this project's `STORE_VIDEO_ALERTS` flow asks Frigate for a clip covering
+**Why you should care**: this project's `STORE_VIDEO_VISITS` flow asks Frigate for a clip covering
 an *arbitrary time range* (a whole visit's span), not a specific already-tagged event. If part of
 that range was never anything but `continuous`-tagged (e.g. a parked car sitting still for a
 stretch, not moving enough to re-trigger motion), Frigate may have almost nothing left for that
 portion within seconds of it happening — confirmed directly in production, not a hypothetical.
 This project used to have a second feature with the identical problem (a visit-level preview image
-built from this same whole-span request, worked around with several successive fixes — see
-`CLAUDE.md`'s "Visit preview" section for that history) but it has since been replaced: the alert
-AI stage now gathers its images via each linked event's own per-event crop instead (see below), so
-it no longer depends on this endpoint or its retention quirks at all. `STORE_VIDEO_ALERTS` itself
-is still subject to this — if you want more headroom for that flow specifically, raising
-`continuous.days` to `1` or more gives Frigate an actual short-lived rolling buffer to serve those
-requests from, at the cost of extra disk usage for the full record stream.
+built from this same whole-span request, worked around with several successive fixes, then a
+separate alert AI stage that gathered its own per-event crops instead — see `CLAUDE.md`'s "Visit
+preview" and "Alert AI stage" sections for that history) but both have since been removed entirely.
+`STORE_VIDEO_VISITS` is the only thing left that depends on this whole-span endpoint — if you want
+more headroom for it specifically, raising `continuous.days` to `1` or more gives Frigate an actual
+short-lived rolling buffer to serve those requests from, at the cost of extra disk usage for the
+full record stream.
 
-The single-event crop (`raw_events.crop_image_base64`, every event gets one — and the alert AI
-stage's own high-res per-event crops, gathered the same way) doesn't have this problem — it always
-reads from Frigate's own per-event clip endpoint (`/api/events/<id>/clip.mp4`), which is tied to
-that event's own `alerts`/`detections` retention, not the generic continuous-recording endpoint.
+The single-event crop (`raw_events.crop_image_base64`, every event gets one) doesn't have this
+problem at all — it isn't a clip/frame grab from the record stream in the first place. `crop.
+crop_event` fetches Frigate's own already-rendered best-detection-score snapshot
+(`GET /api/events/<id>/snapshot.jpg`, from the `detect` stream — see "Two streams per camera"
+above), the same image Frigate's own Explore UI shows for that event, and downscales it for the
+AI-facing/DB-stored copy. `STORE_VIDEO` (the per-event *video clip*, independent of the crop) does
+read from Frigate's per-event clip endpoint (`/api/events/<id>/clip.mp4`), which is tied to that
+event's own `alerts`/`detections` retention, not the generic continuous-recording endpoint above.
 
 ## Zones and `required_zones`
 
@@ -172,6 +179,6 @@ long things typically sit still on your property.
 
 None of the above is something this project changes for you — it's Frigate's own config, and this
 project only ever *listens* (`frigate/events`, `frigate/reviews` over MQTT) and *reads* (Frigate's
-REST API, for the actual clip bytes). See [`configuration.md`](configuration.md) for how this
-project's own settings (crop framing, video storage, the alert AI stage) relate to what Frigate
+REST API, for the snapshot/clip bytes). See [`configuration.md`](configuration.md) for how this
+project's own settings (crop sizing, video storage, the internal AI stage) relate to what Frigate
 gives it.

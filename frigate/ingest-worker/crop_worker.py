@@ -24,9 +24,6 @@ def process_claimed_event(row: dict, profile: dict | None = None) -> None:
         object_label = row.get("objects")
         result = crop.crop_event(
             row,
-            crop_disabled=profile_config.crop_disabled(profile, object_label),
-            crop_frame_offset_pct=profile_config.crop_frame_offset_pct(profile, object_label),
-            crop_padding_pct=profile_config.crop_padding_pct(profile, object_label),
             ai_image_max_dimension=profile_config.ai_image_max_dimension(profile, object_label),
         )
         db.mark_crop_done(event_id, result["crop_image_base64"], result["sub_label"], result["score"])

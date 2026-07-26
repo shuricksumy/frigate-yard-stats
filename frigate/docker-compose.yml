@@ -64,17 +64,12 @@ services:
       POSTGRES_USER: n8n_projects
       POSTGRES_PASSWORD: ${POSTGRES_PROJECTS_PASSWORD}
       FRIGATE_API_BASE: ${FRIGATE_API_BASE}
-      # Full-res record-stream resolution -- confirmed via `ffmpeg -i rtsp://127.0.0.1:8554/out`
-      # on the Frigate host (both outside/outside2 record streams are 3840x2160).
-      RECORD_WIDTH: ${RECORD_WIDTH:-3840}
-      RECORD_HEIGHT: ${RECORD_HEIGHT:-2160}
       # Crop tuning, queue tuning, retention, video storage, Telegram, and the internal AI stage
       # are ALL configured in profiles.yaml now, not here -- see that file's own comments and
       # CLAUDE.md's "Per-object-type overrides" section. Two categories moved there:
-      # per-object-type settings (crop_disabled/crop_frame_offset_pct/crop_padding_pct/
-      # ai_image_max_dimension, store_video/store_video_alerts/store_event_images,
-      # telegram_events_mode/telegram_alerts_mode/ai_events_stage_enabled, provider/model/
-      # chat_path), each resolved fresh per row/type; and plain
+      # per-object-type settings (ai_image_max_dimension, store_video/store_video_visits/
+      # store_event_images, telegram_events_mode/telegram_alerts_mode/ai_events_stage_enabled,
+      # provider/model/chat_path), each resolved fresh per row/type; and plain
       # technical tuning knobs with no per-type meaning at all (parallel_limit/stale_minutes/
       # max_attempts/crop_initial_wait_seconds/thumbnail_max_dimension/poll_interval_seconds,
       # retention_months/retention_check_interval_seconds, the video_*/ai_stage_* queue-tuning
@@ -126,7 +121,7 @@ services:
       # Bind mount for stored clips -- only used when STORE_VIDEO=true, but always mounted so
       # toggling the flag doesn't require a compose file change, just a restart.
       - ${VIDEO_STORAGE_HOST_PATH:-./video-storage}:/data/video
-      # Separate bind mount for the alerts/visits flow (STORE_VIDEO_ALERTS) -- its own directory,
+      # Separate bind mount for the visits flow (STORE_VIDEO_VISITS) -- its own directory,
       # not a subfolder of the one above, so the two flows' storage is genuinely independent.
       - ${VIDEO_STORAGE_ALERTS_HOST_PATH:-./video-storage-alerts}:/data/video-alerts
       # Bind mount for the events stage's own full-resolution crop (STORE_EVENT_IMAGES) -- only
@@ -169,7 +164,7 @@ services:
   # mosquitto above. Worth turning on once TELEGRAM_EVENTS_MODE/TELEGRAM_ALERTS_MODE actually
   # sends real traffic: it drops the public-internet round trip (ingest-worker reaches it over
   # the Docker network instead of api.telegram.org) and raises Telegram's own upload cap from
-  # 50MB to 2000MB -- this project's STORE_VIDEO/STORE_VIDEO_ALERTS clips, recorded at 4K, can
+  # 50MB to 2000MB -- this project's STORE_VIDEO/STORE_VIDEO_VISITS clips, recorded at 4K, can
   # realistically exceed the cloud API's 50MB limit and silently fail to send. Requires your own
   # api_id/api_hash from https://my.telegram.org (Telegram account, not the bot token -- a
   # separate credential the Local Bot API server needs to talk to Telegram's MTProto backend

@@ -114,13 +114,13 @@ def test_record_visit_tolerates_missing_thumb_time(conn_ok):
         _cleanup_visit(visit_id)
 
 
-def test_record_visit_resolves_store_video_alerts_from_profile_defaults(conn_ok, monkeypatch):
-    # Regression test: store_video_alerts has no env var backing at all (see config.py) -- a
+def test_record_visit_resolves_store_video_visits_from_profile_defaults(conn_ok, monkeypatch):
+    # Regression test: store_video_visits has no env var backing at all (see config.py) -- a
     # deployment can only enable it via profiles.yaml. record_visit must resolve it through
-    # profile_config, not a bare config.STORE_VIDEO_ALERTS read (which is always the hardcoded
+    # profile_config, not a bare config.STORE_VIDEO_VISITS read (which is always the hardcoded
     # False and can never see this profile-only override).
-    monkeypatch.setattr(config, "STORE_VIDEO_ALERTS", False)
-    profile = {"defaults": {"store_video_alerts": True}}
+    monkeypatch.setattr(config, "STORE_VIDEO_VISITS", False)
+    profile = {"defaults": {"store_video_visits": True}}
     visit_id = db.record_visit(_review(det_ids=[]), profile)
     try:
         row = db._execute(
@@ -134,7 +134,7 @@ def test_record_visit_resolves_store_video_alerts_from_profile_defaults(conn_ok,
 def test_record_visit_resolves_per_type_override_against_representative_det_id(conn_ok, monkeypatch):
     # The representative type is the earliest-linked raw_event's own objects (by start_ts, id) --
     # resolved here via det_ids, before the visit row (and its raw_events.visit_id link) exists.
-    monkeypatch.setattr(config, "STORE_VIDEO_ALERTS", True)
+    monkeypatch.setattr(config, "STORE_VIDEO_VISITS", True)
     det_id_car = f"pytest-{uuid.uuid4()}"
     raw_id = db._execute(
         """
@@ -145,7 +145,7 @@ def test_record_visit_resolves_per_type_override_against_representative_det_id(c
         """,
         (det_id_car,), fetch=True,
     )[0]["id"]
-    profile = {"object_types": {"car": {"store_video_alerts": False}}}
+    profile = {"object_types": {"car": {"store_video_visits": False}}}
     visit_id = None
     try:
         # Global default (True) would normally start 'new', but the representative event is a

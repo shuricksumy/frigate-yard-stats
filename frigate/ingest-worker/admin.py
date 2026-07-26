@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 def dir_size_bytes(path: str) -> dict:
     # Walks the tree summing real file sizes -- used for the admin dashboard's disk-usage section
     # (VIDEO_STORAGE_PATH/VIDEO_STORAGE_PATH_ALERTS). A path that doesn't exist (e.g.
-    # VIDEO_STORAGE_PATH_ALERTS when STORE_VIDEO_ALERTS has never been turned on) is reported as
+    # VIDEO_STORAGE_PATH_ALERTS when STORE_VIDEO_VISITS has never been turned on) is reported as
     # zero rather than an error -- an unused optional storage location isn't a fault.
     if not path or not os.path.isdir(path):
         return {"path": path, "exists": False, "bytes": 0, "file_count": 0}

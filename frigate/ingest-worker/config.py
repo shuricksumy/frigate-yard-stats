@@ -55,13 +55,6 @@ POSTGRES_PASSWORD = _env("POSTGRES_PASSWORD")
 
 FRIGATE_API_BASE = _env("FRIGATE_API_BASE")  # e.g. http://<frigate-host-ip>:5000
 
-# Full-res record-stream resolution -- confirmed via `ffmpeg -i rtsp://127.0.0.1:8554/out`
-# on the Frigate host (both outside/outside2 record streams are 3840x2160). Stays a plain env var
-# (unlike the queue-tuning/technical settings below) -- this describes your camera hardware's
-# actual resolution, not a tunable behavior knob.
-RECORD_WIDTH = int(_env("RECORD_WIDTH", "3840"))
-RECORD_HEIGHT = int(_env("RECORD_HEIGHT", "2160"))
-
 # -------------------------------------------------
 # Everything from here down to EMBEDDING_DIMENSIONS (excluding paths/tokens/URLs/ports, which stay
 # plain env vars) is a technical tuning knob -- queue parallel limits, retry counts, timeouts,
@@ -82,31 +75,19 @@ MAX_ATTEMPTS = 3
 # events tripping the clip-duration fallback in crop.py).
 CROP_INITIAL_WAIT_SECONDS = 5.0
 # Last-resort fallback for the AI-facing (and DB-stored) image size -- NOT in _PROFILE_DEFAULTS_MAP
-# below, since (like CROP_PADDING_PCT/CROP_DISABLED/CROP_FRAME_OFFSET_PCT) this is genuinely
-# per-object-type resolvable (see profile_config.ai_image_max_dimension) rather than a global-only
-# technical knob -- a plate-heavy vehicle prompt may want more resolution than a person/dog prompt.
-# The full-resolution crop written to disk (STORE_EVENT_IMAGES) is never capped by this at all.
+# below, since this is genuinely per-object-type resolvable (see
+# profile_config.ai_image_max_dimension) rather than a global-only technical knob -- a plate-heavy
+# vehicle prompt may want more resolution than a person/dog prompt. The full-resolution crop
+# written to disk (STORE_EVENT_IMAGES) is never capped by this at all.
 MAX_CROP_DIMENSION = 1280
-# -------------------------------------------------
-# CROP_PADDING_PCT/CROP_DISABLED/CROP_FRAME_OFFSET_PCT/MAX_CROP_DIMENSION above are per-object-type
-# settings (a car needs different crop framing than a person) -- see profile_config.py's resolvers
-# (crop_disabled/crop_frame_offset_pct/crop_padding_pct/ai_image_max_dimension), which check a
-# type's own object_types.<label> entry before falling back to `defaults:`. The literals below are
-# only the last-resort fallback once neither of those sets a value either.
-# -------------------------------------------------
-# CROP_PADDING_PCT/CROP_DISABLED/CROP_FRAME_OFFSET_PCT are currently UNUSED by crop.crop_event --
-# crop_event uses ONLY Frigate's own best-detection-score snapshot now (crop.
-# fetch_frigate_snapshot_base64), never a region-crop/seek computed from these values (see
-# crop_event's own comment and CLAUDE.md's "Cropping" section for why: a seeked frame can land on a
-# materially different, less representative moment than Frigate's own choice, and there's no way to
-# sync our own seek to it -- Frigate never exposes that timestamp anywhere in its API). Left in
-# place (still resolvable per-object-type via profile_config.py, still threaded through to
-# crop_event's signature) since the underlying record-stream seek+crop primitives
-# (crop.crop_and_scale/_build_vf_filter) remain in the codebase, tested, in case a future
-# deployment wants that path back for a specific type -- but no current code path applies them.
-CROP_PADDING_PCT = 0.2
-CROP_DISABLED = False
-CROP_FRAME_OFFSET_PCT = 0.5
+# CROP_PADDING_PCT/CROP_DISABLED/CROP_FRAME_OFFSET_PCT (and the record-stream seek+crop primitives
+# they used to configure -- crop.crop_and_scale/_build_vf_filter/compute_full_res_box/
+# compute_frame_offset_seconds) have been removed entirely: crop.crop_event uses ONLY Frigate's own
+# best-detection-score snapshot now (crop.fetch_frigate_snapshot_base64), which has no region-crop
+# math left to configure. See crop_event's own comment and CLAUDE.md's "Cropping" section for why a
+# seeked frame was rejected in favor of Frigate's own choice (a seek can land on a materially
+# different, less representative moment, and there's no way to sync our own seek to Frigate's exact
+# choice -- it never exposes that timestamp anywhere in its API).
 # A second, much smaller copy of the same crop -- for report/preview UIs that would otherwise
 # embed the full MAX_CROP_DIMENSION image inline per row (multiplied across every sighting, that's
 # what blew up a 2-hour daily report to 42MB and pushed up n8n's memory while building/emailing
@@ -134,8 +115,7 @@ API_KEY = _env("API_KEY")
 
 # -------------------------------------------------
 # Video storage (third queue stage: video_status) -- see video.py / video_worker.py.
-# STORE_VIDEO/STORE_VIDEO_ALERTS below are deliberately NOT env vars, same reasoning as the crop
-# settings above -- configure them via
+# STORE_VIDEO/STORE_VIDEO_VISITS below are deliberately NOT env vars -- configure them via
 # profiles.yaml (a `defaults:` section for a global change, object_types.<label> for one type) --
 # see profile_config.py. The literals below are only the last-resort fallback when profiles.yaml
 # doesn't set a `defaults:` value for that key either -- matches this project's original defaults.
@@ -168,18 +148,22 @@ VIDEO_RETRY_WAIT_SECONDS = 5.0
 # very likely already gone. None (the fallback default) means no age limit.
 VIDEO_MAX_AGE_HOURS = None
 
-# Independent video-storage switch for the alerts/visits flow (frigate/reviews) -- separate from
+# Independent video-storage switch for the visits flow (frigate/reviews) -- separate from
 # STORE_VIDEO above, which only ever gates the events flow (frigate/events, per-raw_event clips).
-# Both flows share the same VIDEO_PARALLEL_LIMIT/VIDEO_INITIAL_WAIT_SECONDS/VIDEO_MIN_VALID_BYTES/
-# VIDEO_MAX_ATTEMPTS/VIDEO_RETRY_WAIT_SECONDS/VIDEO_MAX_AGE_HOURS tuning above (mechanically
-# identical download/validation logic, just against visits instead of raw_events) -- only the
-# on/off switch is separate, so you can toggle each flow independently without doubling every
-# tuning knob. See alert_video_worker.py.
-STORE_VIDEO_ALERTS = False
+# Renamed from STORE_VIDEO_ALERTS -- "alerts" was a holdover name from the removed alert AI stage;
+# this flag has always gated per-VISIT video storage, not anything alert-specific, so the name was
+# genuinely confusing next to the events-flow STORE_VIDEO above. Both flows share the same
+# VIDEO_PARALLEL_LIMIT/VIDEO_INITIAL_WAIT_SECONDS/VIDEO_MIN_VALID_BYTES/VIDEO_MAX_ATTEMPTS/
+# VIDEO_RETRY_WAIT_SECONDS/VIDEO_MAX_AGE_HOURS tuning above (mechanically identical
+# download/validation logic, just against visits instead of raw_events) -- only the on/off switch
+# is separate, so you can toggle each flow independently without doubling every tuning knob. See
+# alert_video_worker.py (module name unchanged -- not part of this rename).
+STORE_VIDEO_VISITS = False
 # A genuinely separate storage location from VIDEO_STORAGE_PATH (own mount point, own bind mount
-# in docker-compose.yml via VIDEO_STORAGE_ALERTS_HOST_PATH) rather than a subfolder of it -- lets
-# the two flows' disk usage/retention be measured and managed independently, e.g. pointing alerts
-# clips at different storage entirely. Files are laid out as
+# in docker-compose.yml via VIDEO_STORAGE_ALERTS_HOST_PATH -- env var/path names unchanged, not
+# part of this rename) rather than a subfolder of it -- lets the two flows' disk usage/retention be
+# measured and managed independently, e.g. pointing visit clips at different storage entirely.
+# Files are laid out as
 # {VIDEO_STORAGE_PATH_ALERTS}/{YYYY}/{MM}/{DD}/visit-{object_type}-{visit_id}-{start_ts_epoch}-
 # {start_ts_iso}.mp4 (see video.store_visit_clip).
 VIDEO_STORAGE_PATH_ALERTS = _env("VIDEO_STORAGE_PATH_ALERTS", "/data/video-alerts")
@@ -188,10 +172,10 @@ VIDEO_STORAGE_PATH_ALERTS = _env("VIDEO_STORAGE_PATH_ALERTS", "/data/video-alert
 # Opt-in filesystem persistence of the full-resolution crop crop.crop_event already builds for
 # every event (the AI-facing copy in crop_image_base64 is always a downscale of this same crop) --
 # off by default, so the full-res copy is simply discarded unless this is turned on. Deliberately
-# NOT an env var, same reasoning as STORE_VIDEO/CROP_DISABLED -- resolved per-object-type via
-# profile_config.store_event_images (a plain per-row resolver like crop_disabled, not a
-# claim-filter/thread-gating setting -- persisting is a synchronous side effect inside the existing
-# crop_worker thread, not a separate poll loop/queue stage). See event_images.py.
+# NOT an env var, same reasoning as STORE_VIDEO -- resolved per-object-type via
+# profile_config.store_event_images (a plain per-row resolver, not a claim-filter/thread-gating
+# setting -- persisting is a synchronous side effect inside the existing crop_worker thread, not a
+# separate poll loop/queue stage). See event_images.py.
 # -------------------------------------------------
 STORE_EVENT_IMAGES = False
 # Mount point inside the container -- pair with a bind mount in docker-compose.yml
@@ -222,7 +206,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # (github.com/tdlib/telegram-bot-api, the optional telegram-bot-api Compose service/profile in
 # docker-compose.yml) instead, for lower latency (LAN/Docker-network hop instead of the public
 # internet) and a much higher upload cap (2000MB vs. the cloud API's 50MB, which this project's
-# 4K-record-stream video clips -- STORE_VIDEO/STORE_VIDEO_ALERTS -- can realistically exceed).
+# 4K-record-stream video clips -- STORE_VIDEO/STORE_VIDEO_VISITS -- can realistically exceed).
 # Same request shape either way (still POSTs to /bot<token>/<method>), so telegram.py needs no
 # other change. Trailing slash stripped so callers can always do f"{base}/bot...".
 TELEGRAM_API_BASE_URL = _env("TELEGRAM_API_BASE_URL", "https://api.telegram.org").rstrip("/")
@@ -326,7 +310,7 @@ EMBEDDING_DIMENSIONS = int(_env("EMBEDDING_DIMENSIONS", "1024"))
 
 # Maps this module's technical-tuning constants (see the block above PARALLEL_LIMIT) to their
 # profiles.yaml `defaults:` key -- used by apply_profile_defaults() below. Deliberately excludes
-# every per-object-type-resolvable setting (crop_disabled, store_video, telegram_events_mode,
+# every per-object-type-resolvable setting (store_video, telegram_events_mode, ai_image_max_dimension,
 # etc.) -- those are resolved fresh per-call by profile_config.py instead, since they can vary by
 # Frigate object type; the settings below apply once, globally, with no such per-type meaning.
 _PROFILE_DEFAULTS_MAP = {

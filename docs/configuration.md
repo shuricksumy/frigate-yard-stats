@@ -17,7 +17,7 @@ once — bring it up in stages so if something looks wrong, you know which piece
    `http://<host>:8080/ui` or via `/events` in Swagger.
 2. **Turn on video storage** (`store_video` in `profiles.yaml`) once step 1 looks right, if you
    want stored clips alongside the crops.
-3. **Turn on the visits flow** (`store_video_alerts` in `profiles.yaml`) once you're comfortable
+3. **Turn on the visits flow** (`store_video_visits` in `profiles.yaml`) once you're comfortable
    with the events flow — this groups multiple detections into one real-world "visit" (its own
    stored video) and is a separate, independently-toggleable layer on top.
 4. **Turn on Telegram** whenever you want notifications — independent of everything else.
@@ -54,25 +54,24 @@ CLAUDE.md's "Cropping" section for the regression (a brief period where every ev
 seek-based record-stream frame instead, unintentionally landing on a different, less representative
 moment than Frigate's own choice) and why it was reverted.
 
-- `RECORD_WIDTH` / `RECORD_HEIGHT` — your cameras' actual full-resolution record-stream size (see
-  [`frigate.md`](frigate.md)'s "detect vs record" section). Kept as plain `.env` settings even
-  though the crop path below no longer uses them for bounding-box scaling — still read by other
-  parts of this project (e.g. the visit video flows).
 - `ai_image_max_dimension` (default `1280`, in `profiles.yaml`) — the long side of the downscaled
   copy actually sent to the VLM and stored in Postgres (`raw_events.crop_image_base64`) — a
-  downscale of Frigate's own snapshot, no second network fetch. VLMs downsample beyond this
-  internally anyway, so a bigger value only adds load, not analysis quality — a plate-heavy vehicle
-  prompt may still want more resolution than a person/dog prompt, which is why this is
-  per-object-type rather than one shared global cap. `store_event_images` (see "Event-analysis
-  image storage" below) persists the unscaled snapshot bytes to disk instead — Frigate's snapshot
-  has no separate higher-resolution version to fetch.
-- `crop_padding_pct` / `crop_frame_offset_pct` / `crop_disabled` (in `profiles.yaml`) — still
-  accepted, per-object-type-resolvable settings, kept for signature compatibility, but **currently
-  have no effect**: there's no region-crop/seek math applied on top of an image Frigate itself
-  already framed and rendered. They're left in place (rather than removed outright) in case a
-  future deployment wants the underlying record-stream seek+crop path back for a specific type —
-  the primitives (`crop.crop_and_scale`, etc.) remain in `crop.py`, still tested directly, just not
-  invoked by `crop_event` today.
+  downscale of Frigate's own snapshot, no second network fetch. It can only ever shrink the
+  snapshot, never upscale it or change its aspect ratio — the snapshot's actual resolution is fixed
+  by the camera's own `detect: {width, height}` setting in `frigate.conf` (see
+  [`frigate.md`](frigate.md)'s "detect vs record" section), not by this setting. VLMs downsample
+  beyond this internally anyway, so a bigger value only adds load, not analysis quality — a
+  plate-heavy vehicle prompt may still want more resolution than a person/dog prompt, which is why
+  this is per-object-type rather than one shared global cap. `store_event_images` (see
+  "Event-analysis image storage" below) persists the unscaled snapshot bytes to disk instead —
+  Frigate's snapshot has no separate higher-resolution version to fetch.
+
+`crop_padding_pct`/`crop_frame_offset_pct`/`crop_disabled` and `RECORD_WIDTH`/`RECORD_HEIGHT` used
+to live here too, configuring a region-crop/seek from the record-stream clip and the bounding-box
+math that fed it — all have since been **removed entirely**, not just made inert, once `crop_event`
+switched to using Frigate's own snapshot exclusively (there's no region-crop math left to
+configure at all). If your `profiles.yaml` or `.env` still sets any of these from before this
+change, they're silently ignored now — safe to delete, not an error.
 
 `ai_image_max_dimension` can be set globally via `profiles.yaml`'s `defaults:` section, or per
 object type — see "Per-object-type overrides" below for how the tiers work.
@@ -105,7 +104,7 @@ section or per type:
 
 - `store_video` — downloads and keeps the clip for every individual event, alongside its crop.
   Stored under `VIDEO_STORAGE_HOST_PATH` (default `./video-storage` on the host).
-- `store_video_alerts` — same idea, but one clip per *visit* (a whole grouped real-world activity)
+- `store_video_visits` — same idea, but one clip per *visit* (a whole grouped real-world activity)
   instead of per raw event. Stored completely separately, under `VIDEO_STORAGE_ALERTS_HOST_PATH`
   (default `./video-storage-alerts`), so you can measure/manage the two flows' disk usage
   independently.
@@ -117,7 +116,7 @@ the defaults account for Frigate needing a few seconds to finish writing a clip 
 downloadable, and skip a clip that's very likely already rolled off Frigate's recording buffer
 rather than retrying forever.
 
-`store_video`/`store_video_alerts` can each be set globally via `defaults:`, or per object type —
+`store_video`/`store_video_visits` can each be set globally via `defaults:`, or per object type —
 e.g. skip storing clips for `person` while `car` still gets them. Setting either `true` for at
 least one type is enough to start that stage's poll thread even if nothing else enables it (same
 precedent the AI stages below use).
@@ -145,13 +144,13 @@ attributed to a real camera name there; it'll show up bucketed under that year i
 ## Event-analysis image storage
 
 `store_event_images` (default `false`, in `profiles.yaml` — same per-object-type override
-mechanism as `store_video`/`store_video_alerts` above, see "Per-object-type overrides" below)
+mechanism as `store_video`/`store_video_visits` above, see "Per-object-type overrides" below)
 persists the events stage's own full-resolution crop (a downscaled copy of the same crop,
 `ai_image_max_dimension`-capped, is always kept in Postgres regardless — see "Crop tuning" above)
 to disk under `EVENT_IMAGES_STORAGE_HOST_PATH` (default `./event-images` on the host) — same "only
 the path lives in Postgres" shape video storage already uses. Off by default: the full-resolution
 copy is discarded after producing the AI-facing downscale unless you opt in. Unlike `store_video`/
-`store_video_alerts`, turning this on doesn't start a separate poll thread — it's a synchronous
+`store_video_visits`, turning this on doesn't start a separate poll thread — it's a synchronous
 step inside the existing crop-stage thread, so there's no extra queue/capacity tuning to configure.
 
 Files land under `{EVENT_IMAGES_STORAGE_PATH}/{camera}/{YYYY}/{MM}/{DD}/{object_type}-{event_id}-
@@ -178,7 +177,7 @@ overrides" below):
   photo that was never sent; `all` sends both (the video as a reply to the earlier photo).
 - `telegram_alerts_mode` — per-*visit* notifications instead. `image` sends one summary message
   per visit immediately (the representative event's own crop as a photo, or text-only if that
-  crop isn't ready yet); `video` sends the visit's own clip (`store_video_alerts`) as a reply to
+  crop isn't ready yet); `video` sends the visit's own clip (`store_video_visits`) as a reply to
   that summary; `all` sends both.
 
 `image` and `video` are independent halves within each mode, not a ladder — setting `video` alone
@@ -244,8 +243,8 @@ currently being processed:
 
 - `telegram_events_mode` / `telegram_alerts_mode`
 - `ai_events_stage_enabled`
-- `crop_disabled` / `crop_frame_offset_pct` / `crop_padding_pct` / `ai_image_max_dimension`
-- `store_video` / `store_video_alerts` / `store_event_images`
+- `ai_image_max_dimension`
+- `store_video` / `store_video_visits` / `store_event_images`
 - `provider` / `model` / `chat_path` (VLM routing — see "Hosted VLM providers" below)
 
 Two tiers, checked in this order:
@@ -282,7 +281,7 @@ defaults:
 object_types:
   car:
     store_video: true        # ...except cars
-    crop_padding_pct: 0.3
+    ai_image_max_dimension: 1600
   person:
     telegram_events_mode: none
 ```

@@ -557,7 +557,7 @@ function eventsApp() {
 
     openVisitLightbox(visit) {
       // Reuses the existing per-event lightbox on the visit's representative (earliest-linked)
-      // raw_event for the image/AI-analysis side -- but a visit's own video (STORE_VIDEO_ALERTS)
+      // raw_event for the image/AI-analysis side -- but a visit's own video (STORE_VIDEO_VISITS)
       // is a completely separate file from anything on that raw_event, so visitId is carried
       // alongside id and lightboxVideoUrl() picks the right endpoint based on which is set.
       this.openLightbox({

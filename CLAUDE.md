@@ -66,7 +66,7 @@ ingest-worker/  (Python, one container, no LLM calls)
        yet) -> GET Frigate's clip.mp4 endpoint -> store to VIDEO_STORAGE_PATH, path only in Postgres
        -> mark video_status done/retry/failed -> fire-and-forget Telegram video, replying to the
        stored photo message_id if present
-   - Alert-video-stage poll loop (own thread, only started if STORE_VIDEO_ALERTS=true), same shape
+   - Alert-video-stage poll loop (own thread, only started if STORE_VIDEO_VISITS=true), same shape
      again but against visits instead of raw_events -- one clip per visit's whole span, independent
      of the events flow above
    - Also applies schema.sql on every startup (idempotent) and runs retention cleanup on a slow
@@ -590,7 +590,7 @@ embedding response.
 
 This project used to have a second internal AI stage, `alert_ai_worker.py` (`AI_ALERTS_ENABLED`),
 alongside the events stage (`ai_worker.py`). **It has since been removed entirely** -- a visit's
-"alert" is now its own stored video (`STORE_VIDEO_ALERTS`) plus its individually-analyzed connected
+"alert" is now its own stored video (`STORE_VIDEO_VISITS`) plus its individually-analyzed connected
 events (each event's own `sightings` row, from the ordinary events stage), not a second
 gathered-image VLM call over a separately-analyzed visit-level artifact. The history below is kept
 because it explains several real production bugs and a schema-migration precedent this project
@@ -730,12 +730,13 @@ OpenAI-compatible chat-completions API, model selection entirely via `chat_path`
 segment per slot), no `model` field in the body at all. That single-provider assumption was lifted
 into a **per-object-type provider dispatch**: `ai_worker._chat_request(type_config, prompt, images,
 timeout)` (`images: list[str]` -- widened from a single image back when the now-removed alert
-stage needed to send several high-res crops in one call; the only caller today, the events stage,
-always passes a one-element list) reads `type_config["provider"]` (`profiles.yaml`, same tier the
-always-per-type `chat_path`/`event_prompt`/`timeout_seconds` already live at -- **not**
-`profile_config.py`'s two-tier `defaults:`-then-hardcoded-fallback resolver, since there's no
-sensible profile-wide default for "which cloud account" the way there is for e.g.
-`crop_padding_pct`) and dispatches to one of three private request builders:
+stage needed to send several high-res crops in one call; the events stage always passes a
+one-element list, the visit-summary stage always passes an empty one -- see "Visit summary stage"
+below) reads `type_config["provider"]` (`profiles.yaml`, same tier the always-per-type
+`chat_path`/`event_prompt`/`timeout_seconds` already live at -- **not** `profile_config.py`'s
+two-tier `defaults:`-then-hardcoded-fallback resolver, since there's no sensible profile-wide
+default for "which cloud account" the way there is for e.g. `ai_image_max_dimension`) and
+dispatches to one of three private request builders:
 `_llama_proxy_chat_request` (today's original behavior, unchanged for the single-image case, and
 still the default when `provider` is omitted entirely -- an existing deployment's `profiles.yaml`
 needs no edit), `_openai_chat_request`, or `_anthropic_chat_request`. OpenAI/Anthropic build one
@@ -818,15 +819,18 @@ key, hardcoded_default)` helper that walks the two tiers.
 Two families of overridable settings:
 
 - **Plain per-row settings**, resolved fresh for whatever row is currently being processed:
-  `telegram_events_mode`, `telegram_alerts_mode`, `ai_events_stage_enabled`, plus `crop_disabled`,
-  `crop_frame_offset_pct`, `crop_padding_pct`, `ai_image_max_dimension` (the crop-family settings
-  `crop.py`'s `crop_event`/`crop_and_scale` accept as optional overrides instead of only ever
-  reading `config.CROP_DISABLED`/etc. directly -- `None` still means "use the global config
-  value", so every other caller is unaffected), and `store_event_images`. None of these have any
-  claim-time/thread implications -- `crop_worker.py` already processes every object type
-  regardless, so resolving per-row is enough.
-- **`store_video` / `store_video_alerts`** -- these gate a whole poll thread (`main.py`, via
-  `profile_config.any_store_video_enabled`/`any_store_video_alerts_enabled`, same "per-type
+  `telegram_events_mode`, `telegram_alerts_mode`, `ai_events_stage_enabled`, `ai_image_max_dimension`,
+  and `store_event_images`. None of these have any claim-time/thread implications --
+  `crop_worker.py` already processes every object type regardless, so resolving per-row is enough.
+  (`crop_disabled`/`crop_frame_offset_pct`/`crop_padding_pct` used to live in this same family too,
+  accepted as optional overrides on `crop.py`'s `crop_event`/`crop_and_scale` -- removed entirely,
+  along with `crop_and_scale`/`_build_vf_filter`/`compute_full_res_box`/
+  `compute_frame_offset_seconds` themselves, once `crop_event` switched to using Frigate's own
+  snapshot exclusively; see "Cropping" below.)
+- **`store_video` / `store_video_visits`** (the latter renamed from `store_video_alerts` -- "alerts"
+  was a holdover name from the removed alert AI stage; this flag has always gated per-VISIT video
+  storage) -- these gate a whole poll thread (`main.py`, via
+  `profile_config.any_store_video_enabled`/`any_store_video_visits_enabled`, same "per-type
   override can start it even when the global default is off" precedent the AI-stage flag already
   established) *and* narrow which rows their claim function is even allowed to look at
   (`claim_video_batch`/`claim_visit_video_batch`, each taking optional
@@ -893,11 +897,12 @@ because every reader of these constants elsewhere in the codebase (`crop_worker.
 access rather than `from config import SOME_SETTING` (confirmed via grep -- the latter would freeze
 a stale copy at import time and silently ignore the override), so overwriting the attribute once at
 startup is sufficient for the new value to reach every caller with no signature threading needed
-anywhere. `EMBEDDING_DIMENSIONS` and `RECORD_WIDTH`/`RECORD_HEIGHT` deliberately stay plain env
-vars and were not swept into this migration: the former because `db.ensure_schema()` reads it
-*before* `profiles.yaml` is even loaded in `main.py` and changing it has real DB-migration
-implications (a backfill), the latter because they describe camera hardware, not a tunable
-behavior.
+anywhere. `EMBEDDING_DIMENSIONS` deliberately stays a plain env var and was not swept into this
+migration -- `db.ensure_schema()` reads it *before* `profiles.yaml` is even loaded in `main.py` and
+changing it has real DB-migration implications (a backfill). (`RECORD_WIDTH`/`RECORD_HEIGHT` used
+to be a similar camera-hardware-describing env var pair here too -- removed entirely, not migrated,
+once their only reader -- the record-stream bounding-box scaling math `crop_event` used before
+switching to Frigate's own snapshot exclusively -- was itself removed; see "Cropping" below.)
 
 **Migrating from the env-var era**: an existing deployment with, say, `STORE_VIDEO=true` in `.env`
 needs that moved into `profiles.yaml`'s `defaults:` section (`defaults: {store_video: true, ...}`)
@@ -907,20 +912,20 @@ to keep behaving identically after upgrading -- the env var is silently ignored 
 rather than assuming the old `.env` values still apply. Same applies to any of the technical tuning
 knobs above that were previously set to a non-default value in `.env`.
 
-**Bug found and fixed while migrating `store_video`/`store_video_alerts` off their env vars**:
+**Bug found and fixed while migrating `store_video`/`store_video_visits` off their env vars**:
 `db.insert_raw_event`/`db.record_visit` (which decide a freshly-ingested row's *initial*
 `video_status` -- `'new'` vs `'skipped'`, see the queue-state-machine section above) were still
-reading the bare `config.STORE_VIDEO`/`config.STORE_VIDEO_ALERTS` constants directly, never
+reading the bare `config.STORE_VIDEO`/`config.STORE_VIDEO_VISITS` constants directly, never
 resolving through `profile_config.py`. This gap existed from the very first per-object-type-
 overrides round (these settings only ever affected which *worker thread* started and which rows a
 *claim* function could see, never the ingest-time initial value) but stayed invisible as long as a
 matching env var kept the global constant in sync with what a deployment actually wanted. Once the
 env var was removed entirely (this round), the constant became a permanently-hardcoded `False`
 with no way to override it at ingest time at all -- confirmed live in production: `profiles.yaml`'s
-`defaults: {store_video_alerts: true}` correctly started the matching worker thread and correctly
+`defaults: {store_video_visits: true}` correctly started the matching worker thread and correctly
 scoped its claim query, but every new visit still got `video_status='skipped'` at insert time
 regardless, so the worker never had anything to claim. Fixed by adding plain per-label resolvers
-(`profile_config.store_video_enabled`/`store_video_alerts_enabled`) and threading `profile` into
+(`profile_config.store_video_enabled`/`store_video_visits_enabled`) and threading `profile` into
 `insert_raw_event`/`record_visit` (both optional params, defaulting to `None` for backward
 compatibility). `record_visit` resolves the visit's representative object type via a new
 `_get_representative_object_label_for_det_ids` helper -- the usual `get_representative_event_for_
@@ -982,7 +987,7 @@ ladder -- `video` does not imply `image` is also sent, only `all` sends both. Bo
 wrapped so a Telegram failure (bad token, rate limit, network blip) can never take down the crop
 or video poll loop.
 
-`STORE_VIDEO_ALERTS=true` turns on a fourth, independent video queue -- same `new` -> `processing`
+`STORE_VIDEO_VISITS=true` turns on a fourth, independent video queue -- same `new` -> `processing`
 -> `retry`/`failed` -> `done`/`skipped` shape, but on `visits` instead of `raw_events`
 (`alert_video_worker.py`, its own poll thread, only started when the flag is on). One clip per
 visit's whole `start_ts`->`end_ts` span (not per det_id) is fetched from the same Frigate
@@ -1009,17 +1014,17 @@ fired once from `mqtt_ingest._handle_review_message` right after `db.record_visi
 from a poll loop) -- uses the visit's representative event's `crop_image_base64` as a photo if the
 crop stage has already finished it by the time the review closes, falls back to a text-only
 `sendMessage` otherwise, since crop timing isn't guaranteed to have caught up yet. `video` sends
-the visit's own stored clip (see `STORE_VIDEO_ALERTS` below) as a reply to that summary once
+the visit's own stored clip (see `STORE_VIDEO_VISITS` below) as a reply to that summary once
 downloaded; `all` sends both, `none` neither. Independent of `TELEGRAM_EVENTS_MODE` above (the
 existing per-raw_event photo/video messages) -- any combination of the two can be set at once,
 specifically so you can compare which notification granularity is more useful for your traffic
 rather than committing to one upfront.
 
-If `STORE_VIDEO_ALERTS` is also on and `TELEGRAM_ALERTS_MODE` includes `video`, the visit's video
+If `STORE_VIDEO_VISITS` is also on and `TELEGRAM_ALERTS_MODE` includes `video`, the visit's video
 is sent as a reply to that same summary message once `alert_video_worker` finishes downloading it
 (`telegram.send_visit_video`, reply-threaded via `visits.telegram_photo_message_id` -- durable
 across a restart, same idea as `raw_events.telegram_photo_message_id`) -- mirroring how the events
-flow's video reply threads onto its earlier photo. `STORE_VIDEO_ALERTS` and `TELEGRAM_ALERTS_MODE`
+flow's video reply threads onto its earlier photo. `STORE_VIDEO_VISITS` and `TELEGRAM_ALERTS_MODE`
 are otherwise fully independent (one can be on
 without the other; a visit clip download failure/retry never blocks or delays the summary
 message, and vice versa) -- this reply-threading is the one place they connect.
@@ -1036,13 +1041,13 @@ so this is purely additive, but can instead point at a self-hosted Local Bot API
 `http://telegram-bot-api:8081`. Same request/response shape either way (still one POST per
 `<method>`), so this is the only change `telegram.py` needed.
 
-Two independent reasons to turn it on, both about `STORE_VIDEO`/`STORE_VIDEO_ALERTS` clips
+Two independent reasons to turn it on, both about `STORE_VIDEO`/`STORE_VIDEO_VISITS` clips
 specifically, since those are by far the largest payloads this project ever sends to Telegram
 (a cropped JPEG or composite-grid/GIF is comparatively tiny): lower latency (the request never
 leaves the Docker network/LAN, unlike a round trip to `api.telegram.org` over the public
 internet), and a much higher upload cap -- Telegram's cloud Bot API caps a bot's own file uploads
 at 50MB, while the Local Bot API server raises that to 2000MB. This project's clips come from a
-3840x2160 record stream, so a `STORE_VIDEO_ALERTS` clip spanning a longer visit can realistically
+3840x2160 record stream, so a `STORE_VIDEO_VISITS` clip spanning a longer visit can realistically
 exceed 50MB and simply fail to send (`_post_video`'s `except Exception` swallows it as a logged
 warning, same as any other Telegram failure -- there's no separate signal distinguishing
 "too large" from "network blip" today). The Local Bot API server needs its own `api_id`/`api_hash`
@@ -1148,7 +1153,7 @@ independently rather than filtering the CTE's per-row join, which would also wro
 bypassing them, so a search only looks within the currently selected range.
 
 `has_video`/`video_status` on `GET /visits` describe the *visit's own* video
-(`STORE_VIDEO_ALERTS`/`alert_video_worker.py`), not the representative raw_event's -- those are
+(`STORE_VIDEO_VISITS`/`alert_video_worker.py`), not the representative raw_event's -- those are
 two entirely separate video flows/storage locations (`VIDEO_STORAGE_PATH_ALERTS` vs.
 `VIDEO_STORAGE_PATH`). Bug fixed in production: `list_visits`' original `WITH linked AS (...)` CTE
 selected `re.video_status`/`(re.video_path IS NOT NULL)` from the representative raw_event instead
@@ -1277,15 +1282,16 @@ detected-object framing/overlay). Fixed by restoring `fetch_frigate_snapshot_bas
 `crop_event` call it unconditionally again -- the seek-based path is no longer invoked by any code
 path at all (see below for what remains and why).
 
-`crop_disabled`/`crop_frame_offset_pct`/`crop_padding_pct` (per-object-type resolvable via
-`profile_config.py`, see "Per-object-type overrides" below) are still accepted parameters on
-`crop.crop_event`'s signature, for call-site compatibility with `crop_worker.py` (which still
-resolves and passes them per claimed row's object type) -- but they have **no effect** now: there's
-no region-crop math to apply on top of an image Frigate itself already framed and rendered. The
-underlying record-stream seek+crop primitives (`crop.crop_and_scale`/`_build_vf_filter`/
-`compute_full_res_box`/`compute_frame_offset_seconds`) remain in `crop.py`, still directly unit
-tested, in case a future deployment wants that path back for a specific type -- but no current code
-path invokes them from `crop_event`.
+**Update: `crop_disabled`/`crop_frame_offset_pct`/`crop_padding_pct` have since been removed
+entirely**, not just left as no-op parameters -- once confirmed there was no region-crop math left
+to configure on top of an image Frigate itself already framed and rendered, keeping these around on
+`crop.crop_event`'s signature (and their `profile_config.py` resolvers, and their `config.py`
+constants) served no purpose but to mislead a reader into thinking they still did something. The
+underlying record-stream seek+crop primitives they used to configure
+(`crop.crop_and_scale`/`_build_vf_filter`/`compute_full_res_box`/`compute_frame_offset_seconds`,
+plus `config.RECORD_WIDTH`/`RECORD_HEIGHT`, their only remaining reader) were deleted along with
+them -- `crop_event` now takes only `raw_event`/`ai_image_max_dimension`. `crop_worker.py` no
+longer resolves or passes the three removed settings at all.
 
 **Two-resolution split, unchanged in shape**: `crop.scale_image_base64` produces a downscaled copy
 of the fetched snapshot (no second network fetch) capped at `ai_image_max_dimension`
@@ -1428,7 +1434,7 @@ camera is correct, wanted behavior, not duplication to collapse.
 
 Using `visit_id` to actually reduce work is now available but opt-in, not the default: `POST
 /ai-queue/claim`'s `source=visits` skips analyzing duplicate det_ids a visit already grouped (see
-Query/report/AI-queue API above), and `STORE_VIDEO_ALERTS`/`TELEGRAM_ALERTS_MODE` add
+Query/report/AI-queue API above), and `STORE_VIDEO_VISITS`/`TELEGRAM_ALERTS_MODE` add
 independent per-visit video/notification flows alongside (not instead of) the existing per-event
 `STORE_VIDEO`/`TELEGRAM_EVENTS_MODE` ones (see Video storage above). All three are deliberately
 independent switches from their events-flow counterparts -- the point is to A/B per-event vs.
@@ -1711,19 +1717,30 @@ embedding coverage (reuses `count_sightings_missing_embedding`), DB size (`db.ge
 actually shows up on the Postgres data volume, not just row bytes), vector index health (`db.
 get_vector_index_status()` -- pgvector extension version, `EMBEDDING_DIMENSIONS`, and each HNSW
 index's `indisvalid`/`indisready`), `get_retention_info()` (already existed, reused as-is), and a
-feature-flags summary (`AI_EVENTS_STAGE_ENABLED`/`STORE_VIDEO`/`STORE_VIDEO_ALERTS`/
-`STORE_EVENT_IMAGES`/`CROP_DISABLED`/`TELEGRAM_EVENTS_MODE`/`TELEGRAM_ALERTS_MODE`) so "what's
-currently turned on" is visible at a glance instead of having to
-check `profiles.yaml` by hand. Everything in this call is cheap SQL -- deliberately excludes
-anything that's a real filesystem walk or network call, so the dashboard's main section always
-loads fast regardless of video backlog size or whether the VLM host is reachable. Note: this
-feature-flags summary only ever reflects `config.py`'s hardcoded fallback defaults -- it doesn't
-parse `profiles.yaml`, so a `defaults:` section or per-type override (see "Per-object-type
-overrides" above) won't show up here, and since these settings no longer have a backing env var at
-all, the hardcoded fallback shown may not reflect what's actually configured for any real type. The
-"By object
-type" section's row counts (below) do reflect whatever actually happened, which is shaped by any
-per-type override already in effect.
+feature-flags summary (`ai_events_stage_enabled`/`store_video`/`store_video_visits`/
+`store_event_images`/`telegram_events_mode`/`telegram_alerts_mode`) so "what's currently turned on"
+is visible at a glance instead of having to check `profiles.yaml` by hand. Everything in this call
+is cheap SQL -- deliberately excludes anything that's a real filesystem walk or network call, so
+the dashboard's main section always loads fast regardless of video backlog size or whether the VLM
+host is reachable.
+
+**Bug found and fixed: the feature-flags summary never actually reflected `profiles.yaml`.** Each
+flag used to be a plain `config.SOME_CONSTANT` read -- since these settings have no env var backing
+at all (see "Per-object-type overrides" above), that constant is always just its hardcoded
+last-resort literal, regardless of whatever a real deployment's `profiles.yaml` actually set.
+Confirmed live: a production instance with `ai_events_stage_enabled: true`/`store_video_visits:
+true`/`store_event_images: true`/`telegram_alerts_mode: video` all set in its own `defaults:`
+section still showed every one of those as off/none on the dashboard. Fixed with
+`profile_config.flag_summary(profile, key, global_default)` -- resolves the *effective* value
+through the normal two-tier lookup (`object_label=None`, i.e. whatever every type falls back to
+unless it overrides it) and additionally reports which tier it came from (`defaults` vs
+`hardcoded`) and which object types, if any, override it to a different value
+(`overridden_for`), so a real per-type split isn't silently flattened into one summary number. This
+needed the loaded `profile` dict reachable from `api.py`, which previously had no access to it at
+all (only worker threads did) -- `api.set_profile(profile)`/a module-level `_profile`, called once
+from `main.py` right after loading, the same pattern `mqtt_ingest.py`'s own module-level `_profile`
+already used for a similar reason. The "By object type" section's row counts (below) still reflect
+whatever actually happened regardless, which is its own independent source of truth.
 
 `row_counts` additionally includes `row_counts_by_object_type` (`db.get_row_counts_by_object_type`)
 -- a per-Frigate-label breakdown of `raw_events`/`sightings`/`visit_sightings` row counts (three
@@ -1774,7 +1791,7 @@ from a confirmed `false` (Frigate genuinely reported itself offline).
 (`admin.dir_size_bytes`, `os.walk` summing real file sizes under `VIDEO_STORAGE_PATH`/
 `VIDEO_STORAGE_PATH_ALERTS`/`EVENT_IMAGES_STORAGE_PATH`) -- kept separate so a large video backlog's
 scan time never blocks the rest of the dashboard from rendering. A path that doesn't exist (e.g.
-`VIDEO_STORAGE_PATH_ALERTS` when `STORE_VIDEO_ALERTS` has never been turned on, or
+`VIDEO_STORAGE_PATH_ALERTS` when `STORE_VIDEO_VISITS` has never been turned on, or
 `EVENT_IMAGES_STORAGE_PATH` when `STORE_EVENT_IMAGES` hasn't) reports as zero bytes rather than an
 error -- an unused optional storage location isn't a fault. Also returns
 `video_storage[_alerts]_by_object_type`/`event_images_storage_by_object_type`

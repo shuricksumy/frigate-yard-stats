@@ -11,7 +11,7 @@ import config
 
 config.AI_EVENTS_STAGE_ENABLED = True
 config.STORE_VIDEO = True
-config.STORE_VIDEO_ALERTS = True
+config.STORE_VIDEO_VISITS = True
 config.TELEGRAM_EVENTS_MODE = "all"
 config.TELEGRAM_ALERTS_MODE = "all"
 

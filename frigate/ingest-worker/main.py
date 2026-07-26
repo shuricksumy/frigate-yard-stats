@@ -12,6 +12,7 @@ import mqtt_ingest
 import profile_config
 import video_worker
 import visit_summary_worker
+import api
 from api import app
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -23,6 +24,9 @@ def main():
     # Telegram mode or AI-stage enable flag (profile_config.py) -- avoids each thread re-reading
     # profiles.yaml off disk independently.
     profile = ai_worker.load_profile(config.AI_STAGE_PROFILE_PATH)
+    # Lets /admin/overview resolve real per-deployment settings (profile_config.flag_summary)
+    # instead of only ever showing config.py's hardcoded fallback -- see api.py's own comment.
+    api.set_profile(profile)
     # Applies profiles.yaml's `defaults:` section to config.py's technical-tuning constants (queue
     # parallel limits, retry counts, timeouts, retention schedule -- see config.py's own comment)
     # once, before any worker starts -- these have no per-object-type meaning, unlike the settings
@@ -38,10 +42,10 @@ def main():
     # profiles.yaml per-type override can start this thread even when the global default is off.
     if profile_config.any_store_video_enabled(profile):
         threading.Thread(target=video_worker.run_forever, args=(profile,), name="video_worker", daemon=True).start()
-    # Independent switch, independent thread -- STORE_VIDEO_ALERTS can be on/off regardless of
+    # Independent switch, independent thread -- STORE_VIDEO_VISITS can be on/off regardless of
     # STORE_VIDEO, so the two flows can be A/B'd separately. Same per-type-override-can-start-it
     # check as above.
-    if profile_config.any_store_video_alerts_enabled(profile):
+    if profile_config.any_store_video_visits_enabled(profile):
         threading.Thread(target=alert_video_worker.run_forever, args=(profile,), name="alert_video_worker", daemon=True).start()
     # Alternative to n8n/metadata-processor.json (see CLAUDE.md) -- off by default so a fresh
     # deploy still needs n8n for the AI stage until this is deliberately opted into. Checks

@@ -76,7 +76,7 @@ a **Precision (exact)** number field if you want to dial in the exact cutoff val
 Click any card with media to open the lightbox. If more than one artifact is available for that
 row, toggle buttons switch between them:
 
-- **Video** — the stored clip, if `STORE_VIDEO`/`STORE_VIDEO_ALERTS` downloaded one — full
+- **Video** — the stored clip, if `STORE_VIDEO`/`STORE_VIDEO_VISITS` downloaded one — full
   scrubber support (drag to any point), since it's served with range-request support.
 - **Image** — the still crop (for a visit, the representative event's own crop — a visit has no
   stored image artifact of its own).

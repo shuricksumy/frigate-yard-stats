@@ -123,7 +123,7 @@ def send_visit_video(
     """Alerts-flow counterpart to send_video -- gated by TELEGRAM_ALERTS_MODE being "video" or
     "all" instead of TELEGRAM_EVENTS_MODE, otherwise identical (same reply-threading onto the
     earlier visit-summary message, same never-raises failure handling). Called by
-    alert_video_worker once a visit's clip finishes downloading (STORE_VIDEO_ALERTS).
+    alert_video_worker once a visit's clip finishes downloading (STORE_VIDEO_VISITS).
 
     `mode` lets a caller pass an already-resolved per-object-type override (see
     profile_config.telegram_alerts_mode) instead of the global config.TELEGRAM_ALERTS_MODE."""

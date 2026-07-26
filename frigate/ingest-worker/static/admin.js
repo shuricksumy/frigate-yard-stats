@@ -210,17 +210,33 @@ function adminApp() {
       }
     },
 
+    // Each flag from /admin/overview is now {value, source, overridden_for} -- source is
+    // "defaults" (profiles.yaml's defaults: section set it) or "hardcoded" (neither defaults: nor
+    // any per-type override set it, so this is just config.py's last-resort literal).
+    // overridden_for lists any object types whose own object_types.<label> entry sets this key to
+    // a *different* value than the summarized one, so a real per-type split isn't silently hidden.
+    _flagSuffix(flag) {
+      let suffix = flag.source === "defaults" ? " (defaults)" : " (hardcoded default)";
+      if (flag.overridden_for && flag.overridden_for.length) {
+        suffix += ` -- overridden for: ${flag.overridden_for.join(", ")}`;
+      }
+      return suffix;
+    },
+
     flagEntries() {
       if (!this.overview) return [];
       const f = this.overview.feature_flags;
-      const boolFlag = (label, value) => ({ label, value: value ? "on" : "off", ok: value });
-      const modeFlag = (label, value) => ({ label, value, ok: value !== "none" });
+      const boolFlag = (label, flag) => ({
+        label, value: (flag.value ? "on" : "off") + this._flagSuffix(flag), ok: flag.value,
+      });
+      const modeFlag = (label, flag) => ({
+        label, value: flag.value + this._flagSuffix(flag), ok: flag.value !== "none",
+      });
       return [
         boolFlag("AI events stage", f.ai_events_stage_enabled),
         boolFlag("Store video", f.store_video),
-        boolFlag("Store video (alerts)", f.store_video_alerts),
+        boolFlag("Store video (visits)", f.store_video_visits),
         boolFlag("Store event images", f.store_event_images),
-        boolFlag("Crop disabled", f.crop_disabled),
         modeFlag("Telegram (events)", f.telegram_events_mode),
         modeFlag("Telegram (alerts)", f.telegram_alerts_mode),
       ];
@@ -242,11 +258,10 @@ function adminApp() {
       return "";
     },
 
-    // Note: these are global .env defaults -- any of them can be overridden per object type in
-    // profiles.yaml (telegram_events_mode/telegram_alerts_mode/ai_events_stage_enabled), which
-    // this overview call has no visibility into (profiles.yaml isn't reloaded/parsed here). The
-    // "By object type" section below shows what actually happened (row counts), which reflects
-    // any per-type override already in effect.
+    // Note: each flag above already reflects profiles.yaml's real effective `defaults:` value (see
+    // _flagSuffix), with any per-type overrides called out inline. The "By object type" section
+    // below still shows what actually happened (row counts), which is the ultimate source of truth
+    // regardless of what's currently configured.
 
     stageList() {
       if (!this.overview) return [];
