@@ -62,8 +62,16 @@ objects:
   filters:
     # This is where we tell Frigate to be patient before confirming
     # It applies to all tracked objects
+    #
+    # min_area is an ABSOLUTE PIXEL count, not normalized -- it must be rescaled whenever your
+    # detect stream's resolution changes, or it silently becomes more/less strict than intended.
+    # This value (10000) is calibrated for a 1920x1080 detect stream; it was 5000 when this
+    # deployment's cameras ran their detect stream at 1280x720 -- the two resolutions differ by
+    # (1920*1080)/(1280*720) = 2.25x total pixels, so min_area was scaled by the same factor to
+    # keep meaning "the same real-world minimum car size" rather than becoming looser at the
+    # higher resolution. Recalculate proportionally if your own detect resolution differs.
     car:
-      min_area: 5000
+      min_area: 10000
       threshold: 0.75
       min_score: 0.45
       min_ratio: 1.3
@@ -130,19 +138,27 @@ cameras:
       inputs:
         - path: rtsp://127.0.0.1:8554/out
           input_args: preset-rtsp-generic
-          roles: [audio, record]
-        - path: rtsp://127.0.0.1:8554/out_sub
-          input_args: preset-rtsp-restream-low-latency
-          roles: [detect]
+          # detect now shares the main (full-resolution) stream instead of a separate low-latency
+          # out_sub substream -- this deployment pushed its detect stream up to the camera's own
+          # full 1920x1080 resolution (better small-object/plate legibility) rather than keeping
+          # a deliberately-downscaled substream just for detection. Uncomment the out_sub role
+          # below instead if you'd rather keep detect on a separate, lower-res/lower-bandwidth
+          # stream (the more common Frigate setup).
+          roles: [audio, record, detect]
+#        - path: rtsp://127.0.0.1:8554/out_sub
+#          input_args: preset-rtsp-restream-low-latency
+#          roles: [detect]
 
     detect:
       enabled: true
-      # Matches this camera's detect-stream (out_sub) resolution -- Frigate's own bounding-box
-      # coordinates are normalized against whatever width/height is set here, so this must match
-      # the actual stream, not just be a reasonable guess.
-      width: 1280
-      height: 720
-      #fps: 5
+      # Matches this camera's detect-stream resolution -- Frigate's own bounding-box coordinates
+      # are normalized against whatever width/height is set here, so this must match the actual
+      # stream, not just be a reasonable guess. (1280x720 in this comment is what this deployment
+      # ran before pushing detect to the full 1920x1080 stream -- see objects.filters.car.min_area
+      # above for what has to be recalculated when this value changes.)
+      width: 1920  # 1280
+      height: 1080 # 720
+      fps: 5
 
     live:
       streams:
@@ -163,7 +179,7 @@ cameras:
         - truck
       filters:
         car:
-          min_area: 5000
+          min_area: 10000
           threshold: 0.75
           min_score: 0.45
           min_ratio: 1.3
@@ -197,9 +213,16 @@ cameras:
     # tuning as the base since it's more sensitive. Watch the car zone for
     # noise (headlight glare/reflections) and adjust lightning_threshold /
     # improve_contrast if false positives increase.
+    #
+    # contour_area (minimum pixel size for a motion region to register at all) is, like
+    # objects.filters.car.min_area above, an ABSOLUTE PIXEL count -- also rescaled 2.25x (25 -> 50)
+    # for this deployment's move to a 1920x1080 detect stream, on top of an earlier bump (15 -> 25)
+    # that filtered out small glare/reflection blobs off wet, parked car paint re-triggering
+    # tracking during rain (see github.com/blakeblackshear/frigate/issues/9636 for the same
+    # documented symptom). No single "correct" value here -- judge against your own real traffic.
     motion:
       threshold: 35
-      contour_area: 15
+      contour_area: 50
       improve_contrast: true
       lightning_threshold: 0.8
       mask: 0.203,0.05,0.204,0,0.002,0.002,0,0.05
@@ -231,18 +254,20 @@ cameras:
       inputs:
         - path: rtsp://127.0.0.1:8554/out2
           input_args: preset-rtsp-generic
-          roles: [audio, record]
-        - path: rtsp://127.0.0.1:8554/out2_sub
-          input_args: preset-rtsp-restream-low-latency
-          roles: [detect]
+          # See the 'outside' camera's own inputs: comment above -- same "detect shares the main
+          # full-resolution stream" choice for this camera too.
+          roles: [audio, record, detect]
+#        - path: rtsp://127.0.0.1:8554/out2_sub
+#          input_args: preset-rtsp-restream-low-latency
+#          roles: [detect]
 
     detect:
       enabled: true
-      # Matches this camera's detect-stream (out2_sub) resolution -- see the 'outside' camera's
-      # own detect: comment above for why this must match the real stream, not just be a guess.
-      width: 1280
-      height: 720
-      #fps: 5
+      # Matches this camera's detect-stream resolution -- see the 'outside' camera's own detect:
+      # comment above for why this must match the real stream, not just be a guess.
+      width: 1920  # 1280
+      height: 1080 # 720
+      fps: 5
 
     live:
       streams:
@@ -263,7 +288,7 @@ cameras:
         - truck
       filters:
         car:
-          min_area: 5000
+          min_area: 10000
           threshold: 0.70
           min_score: 0.35
           min_ratio: 1.2
@@ -295,9 +320,11 @@ cameras:
 
     # NOTE: same tradeoff as 'outside' above — using former person-camera
     # motion tuning as the base.
+    #
+    # contour_area rescaled the same way as 'outside' above (25 -> 50 for the move to 1920x1080).
     motion:
       threshold: 30
-      contour_area: 15
+      contour_area: 50
       improve_contrast: true
       mask: 0.204,0,0.206,0.056,0.012,0.06,0.036,0.554,0.161,1,-0.001,0.996,0,0
 
