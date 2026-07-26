@@ -642,6 +642,87 @@ data permanently), not bundled with the removal itself. `visits.crop_image_base6
 `preview_gif_base64`/`thumb_crop_status`/`thumb_crop_status_changed_at`/`thumb_crop_attempt_count`
 and `idx_visits_thumb_crop_status` (from step 2 above) remain for the identical reason.
 
+### Visit summary stage (`visit_summary_worker.py`) -- a synthesized text summary of a whole visit
+
+A third, independent internal AI stage, distinct from both the events stage above and the
+now-removed alert stage -- and distinct in kind, not just in scope: the events/alert stages both
+analyze **images**; this one analyzes **already-produced text**, the per-event `sightings.
+description` rows a visit's own linked events already have. It exists because a visit can group
+several distinct events, sometimes of different object types (a car and a person), each already
+independently described by the events stage -- there was previously no single synthesized account
+of "what happened during this whole visit," only the separate per-event descriptions side by side.
+
+`db.claim_visit_summary_batch` only claims a visit once every `raw_event` it grouped has settled
+its own `ai_status` (`done`/`skipped`/`failed` -- i.e. non-terminal states `new`/`processing`/
+`retry` block a claim), the same "only claim what the upstream stage already finished" relationship
+the video/AI stages already have with the crop stage, one level further downstream. `visit_summary_
+worker.build_summary_input` joins every linked sighting's `"{object_label}: {description}"` into one
+chronological block of text (via the existing `db.get_sightings_for_visit`, already ordered
+`start_ts ASC`) and sends it, plus `profiles.yaml`'s `visit_summary.prompt`, to `ai_worker.
+_chat_request` with `images=[]` -- a text-only call. This is the one caller in the project that
+exercises `_chat_request`'s empty-images path: `_llama_proxy_chat_request` originally built its
+image content block unconditionally (`images[0]`), which would `IndexError` on an empty list, so it
+was generalized to skip the image block entirely when `images` is empty (the other two providers'
+list-comprehension spread already tolerated this fine). A visit whose linked events produced no
+real sighting text at all (e.g. every one ended up `skipped`/`failed` with no actual `sightings`
+row) is marked `summary_status='skipped'` immediately -- terminal, same "nothing to do here, ever"
+treatment a `has_snapshot=false` row already gets at ingest time -- rather than retried forever.
+
+**Not per-object-type, deliberately** -- `profiles.yaml`'s `visit_summary:` block is a new top-level
+section, sibling to `defaults:`/`object_types:`, not nested under either: a visit isn't tied to one
+type, so there's exactly one shared `prompt`/`provider`/`model`/`chat_path` for this stage, not one
+per label. `provider`/`model`/`chat_path`/`max_tokens` reuse the *exact* same three-way dispatch
+(`llama_proxy`/`openai`/`anthropic`) every other AI call in this project already uses -- "the same
+endpoint config every other AI call has" was an explicit requirement, not a new mechanism. Its own
+queue-tuning knobs (`parallel_limit`/`stale_minutes`/`max_attempts`/`poll_interval_seconds`/
+`max_age_hours`) live inside this same `visit_summary:` block rather than `defaults:`'s
+technical-tuning-knobs mechanism (`config.apply_profile_defaults`'s `_PROFILE_DEFAULTS_MAP`) --
+that mechanism is a fixed map onto `config.py` module constants, and this stage's tuning has no such
+constant to map onto, so keeping it self-contained here means the whole feature is configured in
+one place. Every key falls back to the existing `AI_STAGE_*` constants when omitted -- one more
+caller of the same family of defaults, not a new set. `main.py` starts the stage's poll thread with
+a plain `profile.get("visit_summary", {}).get("enabled")` check (not a `profile_config.py`
+resolver, since there's no per-object-type dimension to resolve).
+
+**Storage: a new table, not a revival of the deprecated `visit_sightings`.** `yard_stats.
+visit_summaries` (`id`, `visit_id`, `summary`, `created_at`, plus a nullable `embedding vector(N)` +
+HNSW index, same templated shape as `sightings`/`visit_sightings`) is a fresh table rather than
+reusing `visit_sightings` (marked "removed, kept only for historical data" earlier in this same
+session for the now-gone alert stage) -- repurposing it for this new, different-meaning artifact
+would contradict that just-written history, and this project's own convention is a dedicated table
+per distinct artifact/flow (the same reasoning that originally justified `visit_sightings` as
+separate from plain `sightings`). Unlike `sightings`/`visit_sightings`, it has no `object_label`
+column at all -- a whole-visit summary isn't tied to one type the way a per-event/per-image analysis
+is. `db.complete_visit_summary` mirrors `complete_sighting`'s insert-plus-mark-done-in-one-
+transaction shape exactly, just against `visit_summaries`/`visits.summary_status` instead of
+`sightings`/`raw_events.ai_status`. New queue-state columns on `visits` (`summary_status`/
+`summary_status_changed_at`/`summary_attempt_count`, the same `new -> processing -> retry/failed ->
+done`/`skipped` shape every stage uses) were added as plain `ALTER TABLE ... ADD COLUMN IF NOT
+EXISTS` statements, **not** inside `CREATE TABLE IF NOT EXISTS` -- learned the hard way earlier this
+session (`raw_events.image_path` was briefly added inside that block and silently never reached a
+live production database, since `CREATE TABLE IF NOT EXISTS` no-ops against an already-existing
+table; see the retention/purge section above for the live incident this caused and how it was
+fixed).
+
+**Surfaced on `GET /visits/{visit_id}/sightings`** as one more field, `visit_summary` (`{id,
+visit_id, summary}` or `null` until the stage is enabled and has finished, or was skipped) --
+alongside the existing `sightings` list, not a new endpoint, matching the "configurable like all
+other AI endpoints" framing this feature was requested with. The web UI's Visit lightbox
+(`static/app.js`'s `openLightbox`) renders it as its own "Visit summary" block above the per-event
+sighting groups, only on the Visits tab (an Events-tab lightbox never has one). **Searchable the
+same way every other sighting already is**: `_build_visits_query`'s `q` filter now OR-in's an
+`EXISTS` against `visit_summaries.summary ILIKE %s` alongside its existing per-event-sighting
+`EXISTS`, so a visit-level summary match surfaces a visit even when no individual linked event's own
+description matches. `semantic_search_combined`'s `source in (None, "visits")` branch -- previously
+reading from `visit_sightings`/`v.alert_ai_status` (permanently empty/stale now that the alert stage
+that wrote them is gone) -- was **repointed** to `visit_summaries`/`v.summary_status`, with
+`object_types` filtering changed to an array-overlap against `v.objects` (matching
+`_build_visits_query`'s own semantics) since a whole-visit summary has no single type the way the
+old per-image alert analysis did. `ai_worker.run_embedding_backfill` gained a third loop
+(`visit_summaries_processed`/`visit_summaries_updated`) alongside the existing `sightings`/
+`visit_sightings` ones -- the `visit_sightings` loop itself is left in place as harmless dead code,
+same "deprecated, not removed" stance the rest of that table's plumbing already takes.
+
 ### Cloud VLM providers (OpenAI / Claude) as an alternative to `llama_slot_proxy`
 
 `ai_worker.py` originally spoke exactly one wire shape for its chat call -- `llama_slot_proxy`'s
@@ -1174,117 +1255,81 @@ An optional `mosquitto` Compose profile (`--profile mqtt`) provides a local/dev 
 bringing up the whole pipeline from scratch without an existing broker -- fully opt-in, never
 collides with a production broker unless you deliberately point `MQTT_HOST=mosquitto` at it.
 
-### Cropping — `region`, not `box`, and why it's capped
+### Cropping — Frigate's own best-moment snapshot, ONLY
 
-Frigate's event `data.box` is the tight detected-object box — often just a few percent of the
-frame — and produces an unusably narrow crop. `data.region` is Frigate's own padded,
-hysteresis-smoothed context area around the object (often 3-10x larger than `box`), and is what
-the Explore UI's own crops are framed around; `ingest-worker/crop.py` crops from `region`.
+`crop.crop_event` uses **only** `crop.fetch_frigate_snapshot_base64` -- Frigate's own
+already-rendered best-detection-score frame (`GET /api/events/<det_id>/snapshot.jpg`), the exact
+same image/framing Frigate's own Explore UI shows for that event, bbox/label/timestamp overlay
+baked in. This is deliberately the *only* image source for an event's crop -- there is no
+ffmpeg seek-from-the-record-stream fallback or alternative in the current code path.
 
-Both `box` and `region` are normalized `[x, y, width, height]` (top-left + size), not
-`[x1, y1, x2, y2]` — and both are in the record-stream's coordinate space already (confirmed via
-Frigate's own API response), so no detect→record scaling is needed once you're reading them from
-`GET /api/events/<id>` (this differs from the raw MQTT `frigate/events` payload's `box`, which IS
-pixel-space `[x1, y1, x2, y2]` — that raw payload is only used for the initial ingest, never for
-cropping).
+#### Bug found and fixed: a seek-based crop briefly replaced Frigate's own snapshot for every event
 
-**Two-resolution split**: `crop.crop_event` does one ffmpeg seek+crop from the record stream at
-native resolution (the fragile/expensive part), then produces a second, downscaled copy from that
-same crop via `crop.scale_image_base64` (no second seek/fetch) capped at `ai_image_max_dimension`
+Commit `b1cd068` (folding the now-removed alert stage's high-res crop path into the events stage)
+switched `crop_event` over to an ffmpeg seek+crop from the record-stream clip (at a computed offset
+into the event's own start/end span, `CROP_FRAME_OFFSET_PCT`) for *every* event, unconditionally --
+removing `FRIGATE_SNAPSHOT_ENABLED` (previously `true` by default) entirely in the process. This was
+a real regression, not an intentional trade-off: the seeked frame can land on a materially
+different, less representative moment than the one Frigate itself already judged as this event's
+best frame and rendered as its own snapshot -- confirmed directly against production traffic, where
+the stored/analyzed crop no longer matched Frigate's own event thumbnail (a different moment, no
+detected-object framing/overlay). Fixed by restoring `fetch_frigate_snapshot_base64` and making
+`crop_event` call it unconditionally again -- the seek-based path is no longer invoked by any code
+path at all (see below for what remains and why).
+
+`crop_disabled`/`crop_frame_offset_pct`/`crop_padding_pct` (per-object-type resolvable via
+`profile_config.py`, see "Per-object-type overrides" below) are still accepted parameters on
+`crop.crop_event`'s signature, for call-site compatibility with `crop_worker.py` (which still
+resolves and passes them per claimed row's object type) -- but they have **no effect** now: there's
+no region-crop math to apply on top of an image Frigate itself already framed and rendered. The
+underlying record-stream seek+crop primitives (`crop.crop_and_scale`/`_build_vf_filter`/
+`compute_full_res_box`/`compute_frame_offset_seconds`) remain in `crop.py`, still directly unit
+tested, in case a future deployment wants that path back for a specific type -- but no current code
+path invokes them from `crop_event`.
+
+**Two-resolution split, unchanged in shape**: `crop.scale_image_base64` produces a downscaled copy
+of the fetched snapshot (no second network fetch) capped at `ai_image_max_dimension`
 (per-object-type resolvable via `profile_config.ai_image_max_dimension`, hardcoded fallback
 `config.MAX_CROP_DIMENSION`, default 1280px long side) — VLMs downsample beyond that internally
-anyway, so there's no analysis benefit to sending a bigger image, only more load on the vision
-encoder. The AI-facing copy (`crop_image_base64`) is what's stored in Postgres, sent to the VLM,
-and shown as the grid thumbnail; the full-resolution copy (`full_res_image_base64`) is never
-stored in the database and is discarded unless `STORE_EVENT_IMAGES`/`store_event_images` opts in
-(see below) — this is the same high-res capture path the now-removed alert stage used to build
-fresh per visit (`crop.crop_event_high_res`, since folded directly into `crop_event`, its only
-remaining caller — see "Alert AI stage" below).
+anyway, so there's no analysis benefit to sending a bigger image. The AI-facing copy
+(`crop_image_base64`) is what's stored in Postgres, sent to the VLM, and shown as the grid
+thumbnail; the unscaled snapshot bytes (`full_res_image_base64`) are never stored in the database
+and are discarded unless `STORE_EVENT_IMAGES`/`store_event_images` opts in (see below) -- "full
+res" here just means "as Frigate rendered it," since Frigate's snapshot has no separate
+higher-resolution version to fetch instead.
 
-**`CROP_DISABLED`** (default `false`) skips the crop filter entirely -- both `crop_image_base64`
-(the AI-facing, `ai_image_max_dimension`-scaled copy) and the full-resolution storage copy become
-the full original camera frame instead of a region around the object. This is the one field the
-web UI, Telegram, the report, and the VLM call all share (via `crop_image_base64`), so the single
-flag changes what's displayed *and* what gets analyzed at once -- there's no separate "wide view
-for humans, cropped for the model" split, since both consumers read the same stored value.
-`crop.crop_and_scale` branches on it before building the ffmpeg `-vf` filter: with it on, `box` is
-entirely unused (no crop-region math, no box-validity check either, since an invalid box never
-affects a result that doesn't depend on it) and only the scale filter runs (or no filter at all,
-when `max_dimension` is also `None` for the full-resolution pass). Off by default because the crop
-exists specifically so the VLM can read small detail (plates, notable features) that's illegible
-in a full wide frame at any reasonable resolution -- this is a real trade-off (context vs.
-legibility), not a strict improvement, so it's opt-in.
+**Resolution/overlay trade-off, an intentional and accepted one**: Frigate's snapshot comes from the
+lower-res detect stream (800x448 in testing, vs. this setup's 3840x2160 record stream), with a
+bounding-box/label/timestamp overlay baked in that this Frigate version's REST API has no way to
+suppress (confirmed directly by re-testing with `bbox=0&timestamp=0&h=720` query params:
+byte-identical response to no params at all, overlay still present, resolution still 800x448). This
+was rejected early in the project's history for exactly that reason, then later accepted anyway
+(`FRIGATE_SNAPSHOT_ENABLED=true` becoming the default) once it became clear Frigate's own
+best-detection-score frame judgment beats a fixed-offset seek often enough in practice to be worth
+the trade-off broadly -- see the now-superseded `CROP_FRAME_OFFSET_PCT` discussion below for why
+that seek-based judgment call was never reliable in the first place.
 
-`crop.py` grabs its frame from a configurable offset into the event's own start/end span
-(`CROP_FRAME_OFFSET_PCT`, `crop.compute_frame_offset_seconds`, default `0.5` = midpoint, this
-project's original fixed behavior) -- but for a long-lived tracked object (a car sitting in a
-zone for 20+ minutes, say), Frigate's saved event clip can be much shorter than that logical span
-(confirmed in production: a ~20-minute event's clip was only ~7 minutes long). Seeking `-ss
-<offset>` past the real end of that shorter file doesn't error -- ffmpeg exits 0 having written
-nothing, so it isn't caught via the subprocess's exit code, only surfaces later when the next
-ffmpeg call tries to read the (missing) frame file. `crop_and_scale` checks for that and retries
-once at a small fixed offset near the start of the clip, which is always within whatever got
-saved regardless of how much the tail was truncated.
+**Why a seek-based offset could never reliably match Frigate's own choice** (the reason this is a
+regression, not a lateral trade-off): Frigate exposes no timestamp for its own best-frame/snapshot
+choice anywhere -- not in `GET /api/events/<id>`'s JSON (`data.score`/`data.top_score` are bare
+numbers with no associated time; `data.path_data` is a movement trail, `[[x, y], timestamp]` pairs
+for drawing a path overlay, not a per-frame score), not in the snapshot image's own HTTP response
+headers (no `Last-Modified`, no custom header), and not in its EXIF (none present at all). The
+*only* place a moment's real wall-clock time is visible at all is the camera's own burned-in
+on-screen timestamp overlay baked into the image's pixels -- readable by eye, not programmatically
+extractable without OCR. Confirmed live against production by comparing two real events' Frigate-
+side snapshot timestamps (read off the snapshot's own burned-in clock) against their start/end: one
+event's snapshot landed almost exactly at event *start*, another landed *past* the midpoint -- a
+single fixed `CROP_FRAME_OFFSET_PCT` value could never universally match this per-event,
+content-dependent choice, which is exactly why using Frigate's own already-rendered choice directly
+is more reliable than approximating it via a seek.
 
-Why this is a tunable rather than a fixed formula: Frigate's own alert thumbnail is taken at
-whatever frame scored highest during the event, which is content-dependent, not a fixed offset --
-confirmed live against production by comparing two real events' Frigate-side snapshot timestamps
-(read off the snapshot's own burned-in clock) against their start/end: one event's snapshot
-landed almost exactly at event *start*, another landed *past* the midpoint. Frigate doesn't expose
-this "best frame" timestamp anywhere in its API (checked both the events list and detail
-endpoints, including `data.path_data`), so there's no way to compute or sync to Frigate's exact
-choice programmatically. `0.5` stays `CROP_FRAME_OFFSET_PCT`'s default until real usage across your
-own cameras suggests a specific different value is consistently better -- there's no universally
-"more correct" number to guess at upfront, for this project's *own* seek-based approach.
-
-`CROP_INITIAL_WAIT_SECONDS` (default 5s, same idea as `VIDEO_INITIAL_WAIT_SECONDS`) gives Frigate
-a head start to finalize the event/clip before the *first* crop attempt on a freshly claimed row
--- confirmed in production that even an ordinary short event's crop can fail this way if attempted
-immediately after the "end" MQTT message, not just long events tripping the clip-duration fallback
-above. Only applies once per row (`crop_attempt_count == 0`), not on every retry pass.
-
-#### `FRIGATE_SNAPSHOT_ENABLED` (removed) -- a rejected-then-accepted-then-rejected-again decision
-
-This project used to have a second image source for events: fetching Frigate's own already-rendered
-snapshot directly (`GET /api/events/<det_id>/snapshot.jpg`) instead of seeking our own frame from
-the record-stream clip. Its history: rejected early on (it's from the lower-res detect stream,
-800x448 in testing vs. this setup's 3840x2160 record stream, with a bounding-box/label/timestamp
-overlay baked in that this Frigate version's REST API has no way to suppress -- confirmed directly
-by re-testing with `bbox=0&timestamp=0&h=720` query params: byte-identical response to no params at
-all, overlay still present, resolution still 800x448) -- then later made the *default* anyway
-(`FRIGATE_SNAPSHOT_ENABLED=true`), since Frigate's own best-detection-score frame judgment beat a
-fixed-offset seek often enough in practice to be worth the resolution/overlay trade-off broadly.
-**Now removed entirely** -- every event always uses our own record-stream crop (`crop.crop_event`,
-see above), independent of Frigate's own detect-stream resolution/quality settings. This trades
-away Frigate's own best-frame judgment (a real, if content-dependent, advantage) for one
-consistent, fully-controlled capture path with no dependency on a second Frigate config knob;
-`crop_frame_offset_pct`'s timing approximation (below) now applies to every event, not just
-whichever ones had `frigate_snapshot_enabled` off.
-
-**Confirmed, live, against real production events, and still true regardless of image source**:
-Frigate exposes no timestamp for its own best-frame/snapshot choice anywhere -- not in
-`GET /api/events/<id>`'s JSON (`data.score`/`data.top_score` are bare numbers with no associated
-time; `data.path_data` is a movement trail, `[[x, y], timestamp]` pairs for drawing a path overlay,
-not a per-frame score), not in the snapshot image's own HTTP response headers (no `Last-Modified`,
-no custom header), and not in its EXIF (none present at all). The *only* place a moment's real
-wall-clock time is visible at all is the camera's own burned-in on-screen timestamp overlay baked
-into the image's pixels -- readable by eye, not programmatically extractable without OCR (fragile:
-overlay position/format varies per camera, and a low-res image makes it small). This means
-`CROP_FRAME_OFFSET_PCT`'s offset-based seek is fundamentally a guess, not a sync to Frigate's actual
-choice, and a single fixed percentage can't universally be "more correct" -- one real comparison
-showed a snapshot's actual best moment landing right at the very start of a 14-second event (not
-the midpoint), consistent with the "content-dependent, no universal value" conclusion reached from
-separate live comparisons.
-
-**Bug found and fixed (now historical, since the code it fixed has since been folded away)**:
-while this trade-off still applied only to the (now-removed) alert stage's own separate high-res
-crop path, its `_gather_alert_images`/`process_claimed_visit` never resolved or threaded
-`crop_frame_offset_pct` through to the crop call at all -- every alert-stage high-res crop silently
-fell back to the hardcoded `config.CROP_FRAME_OFFSET_PCT` module constant, regardless of whatever
-`profiles.yaml` actually set. Confirmed live: changing production's `defaults: crop_frame_offset_pct`
-had zero observable effect on the alert stage, since the value was never read from there in the
-first place. This is what led directly to standardizing on one single crop path for every event
-(see "Alert AI stage" below) rather than maintaining two separate, easy-to-drift crop call sites.
+`CROP_INITIAL_WAIT_SECONDS` (default 5s, same idea as `VIDEO_INITIAL_WAIT_SECONDS`) gives Frigate a
+head start to finalize the event before the *first* crop attempt on a freshly claimed row --
+confirmed in production that even an ordinary short event's crop can fail this way if attempted
+immediately after the "end" MQTT message. Only applies once per row (`crop_attempt_count == 0`), not
+on every retry pass. This still applies regardless of the snapshot-only change above -- Frigate's
+own snapshot endpoint can equally 404/error if hit before the event has genuinely settled.
 
 ### Visit preview (removed) -- a composite grid + animated GIF, superseded then removed entirely
 
@@ -1826,7 +1871,9 @@ why `camera` (unlike `object_label`) also scopes visits.
   `alert_ai_attempt_count`/`alert_image_paths` all remain in the schema but are unwritten/unread by
   any code path -- these backed a now-removed visit-level composite-grid/GIF preview stage and then
   a now-also-removed alert AI stage that superseded it (see "Alert AI stage" above); dropping these
-  columns is a deferred, separate migration.
+  columns is a deferred, separate migration. `summary_status`/`summary_status_changed_at`/
+  `summary_attempt_count` are this visit's own visit-summary-stage queue state (see "Visit summary
+  stage" above), entirely independent of any linked raw_event's `ai_status`.
 - `sightings` — one row per AI-analyzed event, **any** object label (`object_label`, straight from
   `raw_events.objects` -- car, truck, person, dog, whatever `profiles.yaml` maps). `description` is
   the VLM's plain free-text answer to that label's `event_prompt` -- there is no structured
@@ -1840,6 +1887,12 @@ why `camera` (unlike `object_label`) also scopes visits.
   `raw_event_id`. Backed the now-removed alert AI stage (see "Alert AI stage" above) -- remains in
   the schema, unwritten and unread by any code path, same deprecation precedent as the `visits`
   columns above.
+- `visit_summaries` — one row per visit-summary-analyzed visit (`visit_summary_worker.py`, see
+  "Visit summary stage" above), a synthesized text summary built from all of that visit's own
+  already-produced per-event `sightings`, not a second image-analysis pass the way the now-removed
+  `visit_sightings` above was. No `object_label` column -- a whole-visit summary isn't tied to one
+  type. Carries its own nullable `embedding vector(N)` + HNSW index for the Search tab/`q` filter,
+  same shape as `sightings`/`visit_sightings`.
 
 ### Prerequisites this plan assumes
 

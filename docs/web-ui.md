@@ -96,6 +96,14 @@ crops gathered fresh per visit — that stage has since been removed entirely; t
 events" strip below now covers the same ground, since every linked event is already individually
 analyzed.)
 
+If the **visit summary** stage (`visit_summary_worker.py`, off by default — see
+[`configuration.md`](configuration.md#visit-summary-stage)) is enabled and has finished for that
+visit, a "Visit summary" block appears above the per-event sightings — one or two sentences
+synthesizing everything the visit's own individually-analyzed events already described (e.g. "a car
+arrived and parked, then a person got out and approached the door"), rather than one more
+individual sighting to read separately. Events-tab lightboxes never show this block — it only ever
+applies to a visit as a whole.
+
 On the Visits tab specifically, below that a "Connected events" strip shows every individual
 det_id Frigate's own tracker grouped into that visit (not just the deduped sighting(s) above) —
 small thumbnails in chronological order, each clickable to jump straight into that specific

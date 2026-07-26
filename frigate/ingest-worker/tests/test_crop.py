@@ -1,9 +1,11 @@
-"""Unit tests for crop.py's clip-duration-truncation fallback.
+"""Unit tests for crop.py.
 
-Reproduced against real production data: a tracked object with a ~20-minute logical
-start/end span had a saved Frigate clip only ~7 minutes long -- ffmpeg's `-ss <midpoint>` seek
-landed past the real end of the file and exited 0 with no output (not a raised error), so the
-first ffmpeg call succeeding-but-empty can't be caught via subprocess exit code alone.
+crop_and_scale/_build_vf_filter (the record-stream seek+crop primitives, including the
+clip-duration-truncation fallback -- reproduced against real production data: a tracked object
+with a ~20-minute logical start/end span had a saved Frigate clip only ~7 minutes long, so ffmpeg's
+`-ss <midpoint>` seek landed past the real end of the file and exited 0 with no output rather than
+raising) are still exercised directly here, but are no longer invoked by crop_event -- see that
+function's own tests below for why: crop_event uses ONLY Frigate's own best-moment snapshot now.
 """
 import os
 
@@ -200,43 +202,40 @@ def test_crop_and_scale_disabled_ignores_an_invalid_box(monkeypatch):
     assert result
 
 
-# ---- crop_event: seek+crop from the record stream, two-resolution split ----
+# ---- crop_event: Frigate's own best-moment snapshot, ONLY -- never a record-stream seek ----
 
-def test_crop_event_fetches_event_and_crops_from_record_stream(monkeypatch):
+def test_crop_event_uses_frigate_snapshot_not_record_stream_seek(monkeypatch):
     monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
         "data": {"region": [0.1, 0.1, 0.2, 0.2], "score": 0.5}, "sub_label": None,
     })
     captured = {}
 
-    def fake_crop_and_scale(clip_url, offset, box, crop_disabled=None, crop_padding_pct=None, max_dimension=None):
-        captured["clip_url"] = clip_url
-        captured["offset"] = offset
-        captured["max_dimension"] = max_dimension
-        return "full-res-crop-base64"
-    monkeypatch.setattr(crop, "crop_and_scale", fake_crop_and_scale)
-    monkeypatch.setattr(crop, "scale_image_base64", lambda image_base64, max_dimension: "ai-crop-base64")
+    def fake_fetch_snapshot(det_id):
+        captured["det_id"] = det_id
+        return "snapshot-base64"
+    monkeypatch.setattr(crop, "fetch_frigate_snapshot_base64", fake_fetch_snapshot)
+    # crop_and_scale (the record-stream seek+crop path) must never be called -- if it is, this
+    # test fails loudly rather than silently falling back to the old behavior.
+    monkeypatch.setattr(crop, "crop_and_scale", lambda *a, **k: (_ for _ in ()).throw(AssertionError("crop_and_scale must not be called")))
+    monkeypatch.setattr(crop, "scale_image_base64", lambda image_base64, max_dimension: f"ai-{image_base64}")
 
     raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
     result = crop.crop_event(raw_event)
 
     assert result == {
-        "crop_image_base64": "ai-crop-base64",
-        "full_res_image_base64": "full-res-crop-base64",
+        "crop_image_base64": "ai-snapshot-base64",
+        "full_res_image_base64": "snapshot-base64",
         "sub_label": None,
         "score": 0.5,
     }
-    assert captured["clip_url"] == f"{config.FRIGATE_API_BASE}/api/events/abc123/clip.mp4"
-    assert captured["offset"] == 50.0  # default CROP_FRAME_OFFSET_PCT (0.5) midpoint
-    # crop_and_scale is called with no max_dimension -- the full-resolution storage copy, not
-    # capped to the AI-facing size.
-    assert captured["max_dimension"] is None
+    assert captured["det_id"] == "abc123"
 
 
-def test_crop_event_scales_the_full_res_crop_down_for_the_ai_facing_copy(monkeypatch):
+def test_crop_event_scales_the_snapshot_down_for_the_ai_facing_copy(monkeypatch):
     monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
         "data": {"region": [0.1, 0.1, 0.2, 0.2], "score": None}, "sub_label": None,
     })
-    monkeypatch.setattr(crop, "crop_and_scale", lambda *a, **k: "full-res-crop-base64")
+    monkeypatch.setattr(crop, "fetch_frigate_snapshot_base64", lambda det_id: "snapshot-base64")
     captured = {}
 
     def fake_scale(image_base64, max_dimension):
@@ -249,8 +248,8 @@ def test_crop_event_scales_the_full_res_crop_down_for_the_ai_facing_copy(monkeyp
     result = crop.crop_event(raw_event, ai_image_max_dimension=640)
 
     assert result["crop_image_base64"] == "ai-crop-base64"
-    assert result["full_res_image_base64"] == "full-res-crop-base64"
-    assert captured == {"image_base64": "full-res-crop-base64", "max_dimension": 640}
+    assert result["full_res_image_base64"] == "snapshot-base64"
+    assert captured == {"image_base64": "snapshot-base64", "max_dimension": 640}
 
 
 def test_crop_event_ai_image_max_dimension_falls_back_to_global_config(monkeypatch):
@@ -258,7 +257,7 @@ def test_crop_event_ai_image_max_dimension_falls_back_to_global_config(monkeypat
     monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
         "data": {"region": [0.1, 0.1, 0.2, 0.2]}, "sub_label": None,
     })
-    monkeypatch.setattr(crop, "crop_and_scale", lambda *a, **k: "full-res-crop-base64")
+    monkeypatch.setattr(crop, "fetch_frigate_snapshot_base64", lambda det_id: "snapshot-base64")
     captured = {}
     monkeypatch.setattr(crop, "scale_image_base64", lambda image_base64, max_dimension: captured.setdefault("max_dimension", max_dimension) or "ai-crop-base64")
 
@@ -269,15 +268,15 @@ def test_crop_event_ai_image_max_dimension_falls_back_to_global_config(monkeypat
 
 
 def test_crop_event_calls_frigate_event_only_once(monkeypatch):
-    # crop_event must fetch the Frigate event exactly once and reuse it for both the box
-    # computation and its own sub_label/score fields -- not fetch it twice.
+    # crop_event must fetch the Frigate event exactly once and reuse it for its own sub_label/score
+    # fields -- not fetch it twice.
     call_count = {"n": 0}
 
     def counting_fetch(det_id):
         call_count["n"] += 1
         return {"data": {"region": [0.1, 0.1, 0.2, 0.2], "score": 0.5}, "sub_label": None}
     monkeypatch.setattr(crop, "fetch_frigate_event", counting_fetch)
-    monkeypatch.setattr(crop, "crop_and_scale", lambda *a, **k: "full-res-crop-base64")
+    monkeypatch.setattr(crop, "fetch_frigate_snapshot_base64", lambda det_id: "snapshot-base64")
     monkeypatch.setattr(crop, "scale_image_base64", lambda *a, **k: "ai-crop-base64")
 
     raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
@@ -286,18 +285,14 @@ def test_crop_event_calls_frigate_event_only_once(monkeypatch):
     assert call_count["n"] == 1
 
 
-def test_crop_event_passes_crop_disabled_and_padding_and_offset_through(monkeypatch):
+def test_crop_event_ignores_crop_disabled_and_padding_and_offset_params(monkeypatch):
+    # These params are accepted for call-site/signature compatibility with crop_worker.py (which
+    # resolves and passes them per-object-type) but have no effect now -- there's no region-crop
+    # math applied on top of Frigate's own already-rendered snapshot.
     monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
         "data": {"region": [0.1, 0.1, 0.2, 0.2], "score": 0.5}, "sub_label": None,
     })
-    captured = {}
-
-    def fake_crop_and_scale(clip_url, offset, box, crop_disabled=None, crop_padding_pct=None, max_dimension=None):
-        captured["crop_disabled"] = crop_disabled
-        captured["crop_padding_pct"] = crop_padding_pct
-        captured["offset"] = offset
-        return "full-res-crop-base64"
-    monkeypatch.setattr(crop, "crop_and_scale", fake_crop_and_scale)
+    monkeypatch.setattr(crop, "fetch_frigate_snapshot_base64", lambda det_id: "snapshot-base64")
     monkeypatch.setattr(crop, "scale_image_base64", lambda *a, **k: "ai-crop-base64")
 
     raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
@@ -306,4 +301,4 @@ def test_crop_event_passes_crop_disabled_and_padding_and_offset_through(monkeypa
     )
 
     assert result["crop_image_base64"] == "ai-crop-base64"
-    assert captured == {"crop_disabled": True, "crop_padding_pct": 0.05, "offset": 90.0}
+    assert result["full_res_image_base64"] == "snapshot-base64"

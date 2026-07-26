@@ -74,11 +74,16 @@ def _make_old_visit_with_everything(days_old=100, camera="pytest-retention-cam")
         "INSERT INTO yard_stats.visit_sightings (visit_id, object_label, description) VALUES (%s, 'car', 'red sedan')",
         (visit_id,),
     )
+    # visit_summaries -- visit_summary_worker.py's own synthesized-text stage (see CLAUDE.md's
+    # "Visit summary stage"), the same child-before-parent FK shape visit_sightings above already
+    # needed: a visit with a summary must still purge cleanly.
+    db.complete_visit_summary(visit_id, "A car arrived and parked in the driveway.")
     return event_id, visit_id
 
 
 def _cleanup(event_id, visit_id):
     db._execute("DELETE FROM yard_stats.visit_sightings WHERE visit_id = %s", (visit_id,))
+    db._execute("DELETE FROM yard_stats.visit_summaries WHERE visit_id = %s", (visit_id,))
     db._execute("DELETE FROM yard_stats.raw_events WHERE id = %s", (event_id,))
     db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
 
@@ -91,6 +96,7 @@ def test_purge_older_than_deletes_visit_with_linked_raw_event_and_alert_sighting
         cutoff = datetime.now(timezone.utc) - timedelta(days=60)
         preview = db.purge_older_than(cutoff, execute=False)
         assert preview["visit_sightings"] >= 1
+        assert preview["visit_summaries"] >= 1
         assert preview["visits"] >= 1
         assert preview["raw_events"] >= 1
 
@@ -99,6 +105,7 @@ def test_purge_older_than_deletes_visit_with_linked_raw_event_and_alert_sighting
 
         assert db.get_visit(visit_id) is None
         assert db.get_raw_event(event_id) is None
+        assert db.get_visit_summary(visit_id) is None
     finally:
         _cleanup(event_id, visit_id)  # no-ops if already purged
 
@@ -122,6 +129,7 @@ def test_run_retention_cleanup_deletes_old_visit_with_linked_raw_event(conn_ok):
         db.run_retention_cleanup(retention_months=12)  # must not raise ForeignKeyViolation
         assert db.get_visit(visit_id) is None
         assert db.get_raw_event(event_id) is None
+        assert db.get_visit_summary(visit_id) is None
     finally:
         _cleanup(event_id, visit_id)
 
@@ -330,6 +338,7 @@ def test_purge_older_than_object_label_only_affects_matching_type(conn_ok):
         assert preview["sightings"] == 1
         assert preview["visits"] == 0
         assert preview["visit_sightings"] == 0
+        assert preview["visit_summaries"] == 0
 
         db.purge_older_than(cutoff, execute=True, object_label="car")
         assert db.get_raw_event(car_id) is None
@@ -352,8 +361,10 @@ def test_purge_older_than_object_label_never_touches_visits(conn_ok):
             "SELECT id FROM yard_stats.visit_sightings WHERE visit_id = %s", (visit_id,), fetch=True,
         )
         assert sighting_rows
+        assert db.get_visit_summary(visit_id) is not None
     finally:
         db._execute("DELETE FROM yard_stats.visit_sightings WHERE visit_id = %s", (visit_id,))
+        db._execute("DELETE FROM yard_stats.visit_summaries WHERE visit_id = %s", (visit_id,))
         db._execute("DELETE FROM yard_stats.raw_events WHERE id = %s", (event_id,))
         db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
 

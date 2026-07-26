@@ -101,6 +101,9 @@ function eventsApp() {
     // Every raw_event a visit grouped together (GET /events?visit_id=...), for the "Connected
     // events" strip -- always empty for a plain event (no visitId to fetch by).
     lightboxConnectedEvents: [],
+    // visit_summary_worker.py's synthesized text for this visit (string) or null -- always null
+    // for a plain event, and null for a visit until that stage is enabled and has finished.
+    lightboxVisitSummary: null,
     lightboxLoading: false,
     // Set when a connected event's own lightbox was opened from a visit's "Connected events"
     // strip -- a plain EventSummary has no visitId of its own, so without remembering where we
@@ -653,6 +656,7 @@ function eventsApp() {
       this.lightboxMode = event.has_video ? "video" : "image";
       this.lightboxGroups = [];
       this.lightboxConnectedEvents = [];
+      this.lightboxVisitSummary = null;
       // A visit's own ai_status (event.ai_status) only reflects its single earliest-linked
       // event -- a second, different-object-type event in the same visit can still be
       // analyzed (or still pending) independently of that one, so the visit branch always
@@ -675,6 +679,7 @@ function eventsApp() {
             this.lightboxGroups = data.sightings.map((s) => ({
               title: this.titleCase(s.object_label), fields: this.sightingFields(s),
             }));
+            this.lightboxVisitSummary = data.visit_summary ? data.visit_summary.summary : null;
           }
           if (eventsResp.ok) {
             // Earliest-first -- GET /events itself orders newest-first for normal browsing, but
@@ -704,6 +709,7 @@ function eventsApp() {
       this.lightboxEvent = null;
       this.lightboxGroups = [];
       this.lightboxConnectedEvents = [];
+      this.lightboxVisitSummary = null;
       this.lightboxParentVisit = null;
     },
 

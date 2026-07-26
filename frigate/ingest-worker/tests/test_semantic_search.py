@@ -147,24 +147,17 @@ def _insert_visit(camera, objects="car", det_ids=None):
 
 
 def _cleanup_visit(visit_id):
-    db._execute("DELETE FROM yard_stats.visit_sightings WHERE visit_id = %s", (visit_id,))
+    db._execute("DELETE FROM yard_stats.visit_summaries WHERE visit_id = %s", (visit_id,))
     db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
 
 
 def _complete_visit_sighting(visit_id, object_label, description, embedding=None):
-    # visit_sightings/visits.alert_ai_status are deprecated (kept in schema, unwritten by any code
-    # path now that the alert AI stage that used to populate them via db.complete_visit_sighting
-    # was removed) -- semantic_search_combined's "visits" branch still reads both, unchanged, so
-    # this local test helper inserts directly rather than depending on the removed convenience
-    # function.
-    db._execute(
-        "INSERT INTO yard_stats.visit_sightings (visit_id, object_label, description, embedding) "
-        "VALUES (%s, %s, %s, %s::vector)",
-        (visit_id, object_label, description, db._vector_literal(embedding)),
-    )
-    db._execute(
-        "UPDATE yard_stats.visits SET alert_ai_status = 'done' WHERE id = %s", (visit_id,),
-    )
+    # semantic_search_combined's "visits" branch reads visit_summaries/v.summary_status
+    # (visit_summary_worker.py's synthesized text) -- object_label is accepted for call-site
+    # symmetry with _insert_event/complete_sighting but unused: a whole-visit summary has no single
+    # type the way a per-event sighting does (see visit_summaries' own schema -- no object_label
+    # column at all).
+    db.complete_visit_summary(visit_id, description, embedding=embedding)
 
 
 # ---- semantic_search_combined (web UI Search tab's own combined events+visits lookup) ----

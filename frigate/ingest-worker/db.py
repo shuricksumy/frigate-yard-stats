@@ -135,6 +135,7 @@ def get_table_row_counts() -> dict:
         "visits": _execute("SELECT count(*)::int AS c FROM yard_stats.visits", fetch=True)[0]["c"],
         "sightings": _execute("SELECT count(*)::int AS c FROM yard_stats.sightings", fetch=True)[0]["c"],
         "visit_sightings": _execute("SELECT count(*)::int AS c FROM yard_stats.visit_sightings", fetch=True)[0]["c"],
+        "visit_summaries": _execute("SELECT count(*)::int AS c FROM yard_stats.visit_summaries", fetch=True)[0]["c"],
     }
 
 
@@ -159,6 +160,7 @@ def get_stage_counts() -> dict:
         },
         "visits": {
             "video_status": _counts("visits", "video_status"),
+            "summary_status": _counts("visits", "summary_status"),
         },
     }
 
@@ -393,6 +395,10 @@ def count_sightings_missing_embedding() -> dict:
         )[0]["c"],
         "visit_sightings": _execute(
             "SELECT count(*)::int AS c FROM yard_stats.visit_sightings WHERE embedding IS NULL",
+            fetch=True,
+        )[0]["c"],
+        "visit_summaries": _execute(
+            "SELECT count(*)::int AS c FROM yard_stats.visit_summaries WHERE embedding IS NULL",
             fetch=True,
         )[0]["c"],
     }
@@ -755,6 +761,160 @@ def mark_visit_video_retry_or_failed(visit_id: int, max_attempts: int) -> None:
     )
 
 
+def reap_stale_visit_summary_processing(stale_minutes: int) -> None:
+    _execute(
+        """
+        UPDATE yard_stats.visits
+        SET summary_status = 'retry', summary_status_changed_at = now()
+        WHERE summary_status = 'processing'
+          AND summary_status_changed_at < now() - (%s * interval '1 minute')
+        """,
+        (stale_minutes,),
+    )
+
+
+def count_visit_summary_in_progress() -> int:
+    rows = _execute(
+        "SELECT count(*)::int AS c FROM yard_stats.visits WHERE summary_status = 'processing'",
+        fetch=True,
+    )
+    return rows[0]["c"] if rows else 0
+
+
+def claim_visit_summary_batch(
+    parallel_limit: int, stale_minutes: int, max_age_hours: float | None = None,
+) -> list:
+    # Same reap-stale + count-in-progress + CTE-`FOR UPDATE SKIP LOCKED` shape every other claim
+    # function here uses, newest-start_ts-first. Eligibility is the one thing genuinely different
+    # from every other claim function: a visit is only claimable once the events stage has
+    # genuinely finished (one way or another) with *every* raw_event it grouped -- at least one
+    # linked event exists, and none of them still has a non-terminal ai_status ('new'/'processing'/
+    # 'retry'). This mirrors the existing crop-stage -> video/AI-stage "only claim what the
+    # upstream stage already finished" relationship, just one level further downstream.
+    reap_stale_visit_summary_processing(stale_minutes)
+    in_progress = count_visit_summary_in_progress()
+    capacity = max(0, parallel_limit - in_progress)
+    if capacity == 0:
+        return []
+
+    age_clause = ""
+    params: list = []
+    if max_age_hours is not None:
+        age_clause = "AND v.start_ts >= now() - (%s * interval '1 hour')"
+        params.append(max_age_hours)
+    params.append(capacity)
+
+    return _execute(
+        f"""
+        WITH claimable AS (
+            SELECT v.id FROM yard_stats.visits v
+            WHERE v.summary_status IN ('new', 'retry')
+              AND EXISTS (SELECT 1 FROM yard_stats.raw_events re WHERE re.visit_id = v.id)
+              AND NOT EXISTS (
+                  SELECT 1 FROM yard_stats.raw_events re
+                  WHERE re.visit_id = v.id AND re.ai_status NOT IN ('done', 'skipped', 'failed')
+              )
+              {age_clause}
+            ORDER BY v.start_ts DESC
+            LIMIT %s
+            FOR UPDATE SKIP LOCKED
+        )
+        UPDATE yard_stats.visits
+        SET summary_status = 'processing', summary_status_changed_at = now()
+        FROM claimable
+        WHERE yard_stats.visits.id = claimable.id
+        RETURNING yard_stats.visits.*
+        """,
+        params,
+        fetch=True,
+    )
+
+
+def mark_visit_summary_skipped(visit_id: int) -> None:
+    # A visit whose linked events produced no sighting text at all to summarize (e.g. every one
+    # ended up ai_status='skipped'/'failed' with no real sighting row) -- terminal, same "nothing
+    # to do here, ever" treatment a has_snapshot=false row already gets at ingest time.
+    _execute(
+        "UPDATE yard_stats.visits SET summary_status = 'skipped', summary_status_changed_at = now() WHERE id = %s",
+        (visit_id,),
+    )
+
+
+def fail_visit_summary(visit_id: int, max_attempts: int) -> dict:
+    # Same retry-or-fail-with-cap CASE logic as fail_ai_event, against visits.summary_status.
+    rows = _execute(
+        """
+        UPDATE yard_stats.visits
+        SET summary_attempt_count = summary_attempt_count + 1,
+            summary_status = CASE WHEN summary_attempt_count + 1 >= %s THEN 'failed' ELSE 'retry' END,
+            summary_status_changed_at = now()
+        WHERE id = %s
+        RETURNING summary_status, summary_attempt_count
+        """,
+        (max_attempts, visit_id),
+        fetch=True,
+    )
+    return rows[0]
+
+
+def complete_visit_summary(visit_id: int, summary: str | None, embedding: list[float] | None = None) -> int:
+    # Same insert-plus-mark-done-in-one-transaction shape as complete_sighting, just against
+    # visit_summaries/visits.summary_status instead of sightings/raw_events.ai_status.
+    conn = get_conn()
+    conn.autocommit = False
+    try:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(
+                """
+                INSERT INTO yard_stats.visit_summaries (visit_id, summary, embedding)
+                VALUES (%s, %s, %s::vector)
+                RETURNING id
+                """,
+                (visit_id, summary, _vector_literal(embedding)),
+            )
+            summary_id = cur.fetchone()["id"]
+            cur.execute(
+                "UPDATE yard_stats.visits SET summary_status = 'done', summary_status_changed_at = now() WHERE id = %s",
+                (visit_id,),
+            )
+        conn.commit()
+        return summary_id
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.autocommit = True
+
+
+def get_visit_summary(visit_id: int) -> dict | None:
+    # The visit's own summary (visit_summary_worker.py), if that stage has produced one -- used by
+    # GET /visits/{id}/sightings so the web UI's lightbox can show it alongside the per-event
+    # sightings list. Null until the stage is enabled, hasn't finished yet, or was skipped.
+    rows = _execute(
+        """
+        SELECT id, visit_id, summary
+        FROM yard_stats.visit_summaries WHERE visit_id = %s
+        ORDER BY id DESC LIMIT 1
+        """,
+        (visit_id,), fetch=True,
+    )
+    return rows[0] if rows else None
+
+
+def get_visit_summaries_missing_embedding(limit: int) -> list[dict]:
+    return _execute(
+        "SELECT id, visit_id, summary FROM yard_stats.visit_summaries WHERE embedding IS NULL ORDER BY id LIMIT %s",
+        (limit,), fetch=True,
+    )
+
+
+def update_visit_summary_embedding(summary_id: int, embedding: list[float]) -> None:
+    _execute(
+        "UPDATE yard_stats.visit_summaries SET embedding = %s::vector WHERE id = %s",
+        (_vector_literal(embedding), summary_id),
+    )
+
+
 def reap_stale_processing() -> None:
     # Mirrors the n8n processors' "Reap Stale Processing Items" node, scoped to crop_status
     # instead of the (now n8n-only) ai_status.
@@ -1048,6 +1208,16 @@ def run_retention_cleanup(retention_months: int) -> None:
         """,
         (retention_months,),
     )
+    # visit_summaries references visits(id) with no ON DELETE CASCADE -- same child-before-parent
+    # reasoning as visit_sightings above.
+    _execute(
+        """
+        DELETE FROM yard_stats.visit_summaries WHERE visit_id IN (
+            SELECT id FROM yard_stats.visits WHERE start_ts < now() - (%s || ' months')::interval
+        )
+        """,
+        (retention_months,),
+    )
     # raw_events.visit_id references visits(id) -- the opposite direction from the delete order
     # below (visits before raw_events), so a visit about to be deleted can't still have a
     # raw_event pointing at it, deleted or not (a visit's start_ts is set from its earliest-linked
@@ -1125,6 +1295,14 @@ def purge_older_than(
             """,
             [cutoff, *visits_camera_params], fetch=True,
         )[0]["c"],
+        "visit_summaries": 0 if object_label else _execute(
+            f"""
+            SELECT count(*)::int AS c FROM yard_stats.visit_summaries vsum
+            JOIN yard_stats.visits v ON v.id = vsum.visit_id
+            WHERE v.start_ts < %s {visits_camera_clause}
+            """,
+            [cutoff, *visits_camera_params], fetch=True,
+        )[0]["c"],
         "visits": 0 if object_label else _execute(
             f"SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s {visits_camera_clause}",
             [cutoff, *visits_camera_params], fetch=True,
@@ -1183,6 +1361,16 @@ def purge_older_than(
             _execute(
                 f"""
                 DELETE FROM yard_stats.visit_sightings WHERE visit_id IN (
+                    SELECT id FROM yard_stats.visits WHERE start_ts < %s {visits_camera_clause}
+                )
+                """,
+                [cutoff, *visits_camera_params],
+            )
+            # visit_summaries references visits(id) with no ON DELETE CASCADE -- same
+            # child-before-parent reasoning as visit_sightings above.
+            _execute(
+                f"""
+                DELETE FROM yard_stats.visit_summaries WHERE visit_id IN (
                     SELECT id FROM yard_stats.visits WHERE start_ts < %s {visits_camera_clause}
                 )
                 """,
@@ -1530,20 +1718,28 @@ def _build_visits_query(
         params.append(end)
     if q and q.strip():
         # Matches a visit if ANY of its linked raw_events has a sighting whose AI analysis text
-        # matches -- same ILIKE substring match as GET /events' own q. An EXISTS subquery against
-        # a fresh raw_events/sightings join, not a condition on the `re` row already joined into
-        # `linked` below -- a visit can group several distinct events (e.g. a car and a person),
-        # and the match might come from either one, not necessarily the one row_number picks as
-        # the representative, so this can't be a plain per-row filter without breaking
-        # event_count/rn (which need every linked event, matching or not).
+        # matches, OR the visit's own synthesized summary (visit_summary_worker.py) matches --
+        # same ILIKE substring match as GET /events' own q. Both are EXISTS subqueries against a
+        # fresh join, not a condition on the `re` row already joined into `linked` below -- a visit
+        # can group several distinct events (e.g. a car and a person), and the match might come
+        # from any one of them (or the summary) rather than whichever row_number picks as the
+        # representative, so this can't be a plain per-row filter without breaking event_count/rn
+        # (which need every linked event, matching or not).
         term = f"%{q.strip()}%"
         clauses.append("""
-        EXISTS (
-            SELECT 1 FROM yard_stats.raw_events re2
-            JOIN yard_stats.sightings s2 ON s2.raw_event_id = re2.id
-            WHERE re2.visit_id = v.id AND s2.description ILIKE %s
+        (
+            EXISTS (
+                SELECT 1 FROM yard_stats.raw_events re2
+                JOIN yard_stats.sightings s2 ON s2.raw_event_id = re2.id
+                WHERE re2.visit_id = v.id AND s2.description ILIKE %s
+            )
+            OR EXISTS (
+                SELECT 1 FROM yard_stats.visit_summaries vsum2
+                WHERE vsum2.visit_id = v.id AND vsum2.summary ILIKE %s
+            )
         )
         """)
+        params.append(term)
         params.append(term)
 
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
@@ -1908,7 +2104,7 @@ def semantic_search_combined(
 ) -> list[dict]:
     # Web UI "Search" tab's own combined lookup -- unlike semantic_search_sightings above (the
     # n8n-facing endpoint's underlying function, left untouched so that existing contract never
-    # shifts), this one can rank across BOTH sightings (events) and visit_sightings (alerts) at
+    # shifts), this one can rank across BOTH sightings (events) and visit_summaries (visits) at
     # once, since the web UI wants "anything relevant," not one flow specifically. source=None
     # (the default) searches both, unioned and re-ranked together by distance; source="events" or
     # "visits" searches just that one table -- skipping the other branch's JOIN/WHERE entirely
@@ -1959,8 +2155,11 @@ def semantic_search_combined(
     if source in (None, "visits"):
         # has_image falls back to the representative (earliest-linked) raw_event's own crop, same
         # convention GET /visits/{id}/thumbnail already applies server-side, so a search result
-        # never hides a thumbnail that's actually fetchable.
-        clauses = ["vs.embedding IS NOT NULL"]
+        # never hides a thumbnail that's actually fetchable. object_types filters by array-overlap
+        # against v.objects (matching _build_visits_query's own semantics), not a single
+        # object_label equality -- a whole-visit summary has no one type the way a per-image
+        # analysis under the now-removed alert stage used to.
+        clauses = ["vsum.embedding IS NOT NULL"]
         branch_params = [vector_literal]
         if start:
             clauses.append("v.start_ts >= %s")
@@ -1969,15 +2168,16 @@ def semantic_search_combined(
             clauses.append("v.start_ts <= %s")
             branch_params.append(end)
         if object_types:
-            clauses.append("vs.object_label = ANY(%s)")
+            clauses.append("string_to_array(v.objects, ',') && %s")
             branch_params.append(object_types)
         if camera:
             clauses.append("v.cameras = %s")
             branch_params.append(camera)
         branches.append((
             f"""
-            SELECT 'visit' AS kind, v.id AS id, vs.id AS sighting_id, v.start_ts, v.cameras AS camera,
-                   v.objects, vs.object_label, vs.description, vs.embedding <=> %s::vector AS distance,
+            SELECT 'visit' AS kind, v.id AS id, vsum.id AS sighting_id, v.start_ts, v.cameras AS camera,
+                   v.objects, v.objects AS object_label, vsum.summary AS description,
+                   vsum.embedding <=> %s::vector AS distance,
                    COALESCE((
                        SELECT re.crop_image_base64 IS NOT NULL OR re.image_path IS NOT NULL
                        FROM yard_stats.raw_events re
@@ -1985,9 +2185,9 @@ def semantic_search_combined(
                        ORDER BY re.start_ts ASC, re.id ASC
                        LIMIT 1
                    ), false) AS has_image,
-                   (v.video_path IS NOT NULL) AS has_video, v.alert_ai_status AS ai_status
-            FROM yard_stats.visit_sightings vs
-            JOIN yard_stats.visits v ON v.id = vs.visit_id
+                   (v.video_path IS NOT NULL) AS has_video, v.summary_status AS ai_status
+            FROM yard_stats.visit_summaries vsum
+            JOIN yard_stats.visits v ON v.id = vsum.visit_id
             WHERE {' AND '.join(clauses)}
             """,
             branch_params,

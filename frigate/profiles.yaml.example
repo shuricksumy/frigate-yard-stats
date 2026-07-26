@@ -277,3 +277,52 @@ object_types:
       doing in this one frame, in one short sentence. No speculation about identity. Do not
       describe your process or repeat these instructions -- respond with only the one-sentence
       description.
+
+# visit_summary -- a THIRD, independent AI stage (visit_summary_worker.py), sibling to
+# `defaults:`/`object_types:` above, not nested under either. Unlike everything above, this is
+# NOT per-object-type: a visit can group several distinct types (a car and a person), so there's
+# exactly one shared prompt/provider for "summarize this whole visit," not one per label. Once
+# every raw_event a visit grouped has settled its own ai_status (done/skipped/failed -- see
+# db.claim_visit_summary_batch), this stage sends all of those events' already-produced
+# sightings.description text (chronological, one line each) to an LLM and asks for one synthesized
+# account of the whole visit -- e.g. "a car arrived and parked, then a person got out and
+# approached the door." Stored in yard_stats.visit_summaries, surfaced on
+# GET /visits/{id}/sightings as `visit_summary`, and searchable both via GET /visits' own `q` and
+# the Search tab's semantic search, same as every other sighting.
+#
+# Off by default (enabled: false) -- like every other AI stage here, a fresh deploy doesn't
+# require this. provider/model/chat_path/max_tokens follow the EXACT same three-way dispatch
+# every other AI call in this project uses (see the object_types.car comment above for the full
+# llama_proxy/openai/anthropic comparison) -- this is "configurable like all other AI endpoints,"
+# not a special case. images=[] for this call (no image is sent -- only the gathered text), so a
+# provider/chat_path pointed at a vision-only model slot won't work well here; a text-capable slot
+# (or a small/cheap one, since the input is short) is the natural choice.
+#
+# Queue-tuning knobs (parallel_limit/stale_minutes/max_attempts/poll_interval_seconds/
+# max_age_hours) live inside this same block rather than `defaults:`'s technical-tuning-knobs
+# mechanism -- that mechanism is a fixed Python-side map of config.py attribute names
+# (config.apply_profile_defaults), and this stage's tuning has no such global constant to map onto;
+# keeping it self-contained here means everything about this one feature is in one place to read
+# or edit. Falls back to the existing ai_stage_* defaults (AI_STAGE_DEFAULT_TIMEOUT_SECONDS/
+# AI_STAGE_PARALLEL_LIMIT/etc.) when a key is omitted -- one more caller of the same family of
+# constants, not a new set.
+# visit_summary:
+#   enabled: false
+#   provider: llama_proxy          # or openai / anthropic -- see object_types.car's comment above
+#   chat_path: /REPLACE_WITH_SUMMARY_SLOT/v1/chat/completions
+#   # model: gpt-4o                 # openai/anthropic only
+#   # max_tokens: 512                # anthropic only
+#   timeout_seconds: 60
+#   parallel_limit: 2
+#   stale_minutes: 5
+#   max_attempts: 3
+#   poll_interval_seconds: 5
+#   max_age_hours: null
+#   prompt: >-
+#     You are given a chronological list of short AI-generated descriptions, one per distinct
+#     sighting during a single continuous visit to a property (there may be one or several,
+#     possibly of different object types -- a car and a person, etc.). Write one or two concise
+#     sentences summarizing what happened during this visit as a whole -- mention distinct
+#     objects/people/vehicles involved and the overall sequence of activity (e.g. arrived, parked,
+#     approached the door, left). Do not just repeat each individual description -- synthesize an
+#     overall picture. Do not describe your process.

@@ -94,21 +94,18 @@ MAX_CROP_DIMENSION = 1280
 # type's own object_types.<label> entry before falling back to `defaults:`. The literals below are
 # only the last-resort fallback once neither of those sets a value either.
 # -------------------------------------------------
+# CROP_PADDING_PCT/CROP_DISABLED/CROP_FRAME_OFFSET_PCT are currently UNUSED by crop.crop_event --
+# crop_event uses ONLY Frigate's own best-detection-score snapshot now (crop.
+# fetch_frigate_snapshot_base64), never a region-crop/seek computed from these values (see
+# crop_event's own comment and CLAUDE.md's "Cropping" section for why: a seeked frame can land on a
+# materially different, less representative moment than Frigate's own choice, and there's no way to
+# sync our own seek to it -- Frigate never exposes that timestamp anywhere in its API). Left in
+# place (still resolvable per-object-type via profile_config.py, still threaded through to
+# crop_event's signature) since the underlying record-stream seek+crop primitives
+# (crop.crop_and_scale/_build_vf_filter) remain in the codebase, tested, in case a future
+# deployment wants that path back for a specific type -- but no current code path applies them.
 CROP_PADDING_PCT = 0.2
-# Off by default -- the crop exists specifically so the VLM can read small detail (plates, notable
-# features) that's illegible in a full wide frame; only turn this on if you've decided that
-# trade-off is worth it. Affects both what the web UI displays and what gets analyzed, since both
-# read the same stored crop_image_base64.
 CROP_DISABLED = False
-# Where in the event's start_ts->end_ts span to seek for the crop frame (0.0=start, 0.5=midpoint,
-# 1.0=end). Frigate itself picks its own alert thumbnail at whatever frame scored highest during
-# the event -- a content-dependent choice, not a fixed offset, and never exposed via its API
-# (confirmed live, directly: not in the event JSON, not in the snapshot's own response headers, not
-# in EXIF -- the only place a moment's real time is visible at all is the camera's own burned-in
-# on-screen clock, not programmatically extractable). There is no universal offset value that
-# matches Frigate's per-event choice, so this stays a tunable approximation rather than a guessed
-# new default -- true for every event now that FRIGATE_SNAPSHOT_ENABLED (Frigate's own snapshot as
-# an alternative image source) has been removed; see CLAUDE.md's "Cropping" section.
 CROP_FRAME_OFFSET_PCT = 0.5
 # A second, much smaller copy of the same crop -- for report/preview UIs that would otherwise
 # embed the full MAX_CROP_DIMENSION image inline per row (multiplied across every sighting, that's

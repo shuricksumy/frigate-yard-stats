@@ -105,3 +105,24 @@ object_types:
       they appear to be doing in this one frame, in one short sentence. No speculation about
       identity. Do not describe your process or repeat these instructions -- respond with only
       the one-sentence description.
+
+# visit_summary -- a third, independent AI stage (visit_summary_worker.py), NOT per-object-type
+# (a visit can span several types, so there's one shared prompt/provider, not one per label). Once
+# every raw_event a visit grouped has settled its own ai_status, this sends all of those events'
+# sightings.description text to an LLM for one synthesized account of the whole visit, stored in
+# yard_stats.visit_summaries. Same provider/model/chat_path dispatch as object_types above. Off by
+# default. See frigate/profiles.yaml.example for the full documented version of this block.
+# visit_summary:
+#   enabled: false
+#   provider: llama_proxy
+#   chat_path: /REPLACE_WITH_SUMMARY_SLOT/v1/chat/completions
+#   timeout_seconds: 60
+#   parallel_limit: 2
+#   stale_minutes: 5
+#   max_attempts: 3
+#   poll_interval_seconds: 5
+#   max_age_hours: null
+#   prompt: >-
+#     You are given a chronological list of short AI-generated descriptions, one per distinct
+#     sighting during a single continuous visit to a property. Write one or two concise sentences
+#     summarizing what happened during this visit as a whole. Do not describe your process.

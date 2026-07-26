@@ -345,6 +345,16 @@ button:disabled { opacity: 0.4; cursor: default; }
 }
 .lightbox-info-loading { color: var(--muted); margin: 0; padding: 8px 0; font-size: 0.85rem; }
 
+/* Same text-wrapping cap .lightbox-info-row dd already needs, for the same reason -- a long
+   synthesized visit summary would otherwise blow out .lightbox-info's shrink-to-fit width. */
+.lightbox-visit-summary p {
+  margin: 0;
+  color: var(--text);
+  max-width: 60ch;
+  overflow-wrap: anywhere;
+  font-size: 0.85rem;
+}
+
 .lightbox-toggle {
   position: absolute;
   top: 8px;

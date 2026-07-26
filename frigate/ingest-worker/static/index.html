@@ -249,6 +249,16 @@
       <div class="lightbox-info" x-show="lightboxEvent && (lightboxEvent.visitId || lightboxEvent.ai_status === 'done')" style="display:none">
         <p class="lightbox-info-loading" x-show="lightboxLoading">Loading AI analysis…</p>
         <template x-if="!lightboxLoading">
+          <!-- visit_summary_worker.py's synthesized account of the whole visit, once it's
+               enabled and has finished -- shown above the per-event groups below since it's the
+               "what happened overall" summary, not one more individual sighting. Visits only;
+               null for a plain event. -->
+          <div class="lightbox-info-group lightbox-visit-summary" x-show="lightboxVisitSummary">
+            <h4>Visit summary</h4>
+            <p x-text="lightboxVisitSummary"></p>
+          </div>
+        </template>
+        <template x-if="!lightboxLoading">
           <!-- One block per sighting -- a plain event has at most one; a visit can have several
                (e.g. a car and a person grouped into the same real-world activity). -->
           <template x-for="group in lightboxGroups" :key="group.title + JSON.stringify(group.fields)">

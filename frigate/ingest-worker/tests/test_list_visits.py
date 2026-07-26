@@ -47,6 +47,7 @@ def _cleanup(*raw_event_ids, visit_id=None):
     db._execute("DELETE FROM yard_stats.sightings WHERE raw_event_id = ANY(%s)", (list(raw_event_ids),))
     db._execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", (list(raw_event_ids),))
     if visit_id is not None:
+        db._execute("DELETE FROM yard_stats.visit_summaries WHERE visit_id = %s", (visit_id,))
         db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
 
 
@@ -315,6 +316,28 @@ def test_list_visits_q_matches_visit_by_a_non_representative_events_sighting(con
         assert any(r["id"] == visit_id for r in matching)
     finally:
         _cleanup(car_id, person_id, visit_id=visit_id)
+
+
+def test_list_visits_q_matches_visit_by_its_own_synthesized_summary(conn_ok):
+    # visit_summary_worker.py's synthesized text lives in visit_summaries, not sightings -- q must
+    # match a visit via either, since a search term might describe the whole visit ("arrived and
+    # parked") rather than any single event's own description.
+    det_id = f"pytest-{uuid.uuid4()}"
+    raw_id = _insert_raw_event(det_id, objects="car")
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
+    })
+    try:
+        db.complete_visit_summary(visit_id, "A car arrived and parked in the driveway.")
+
+        matching = db.list_visits(q="parked in the driveway", start=None, end=None, limit=50, offset=0)
+        assert any(r["id"] == visit_id for r in matching)
+
+        non_matching = db.list_visits(q="left on foot", start=None, end=None, limit=50, offset=0)
+        assert not any(r["id"] == visit_id for r in non_matching)
+    finally:
+        _cleanup(raw_id, visit_id=visit_id)
 
 
 def test_list_visits_q_is_case_insensitive_substring(conn_ok):

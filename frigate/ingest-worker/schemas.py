@@ -60,6 +60,15 @@ class VisitSummary(BaseModel):
     has_video: bool
 
 
+class VisitSummaryResult(BaseModel):
+    # visit_summary_worker.py's synthesized text (see CLAUDE.md's "Visit summary stage") -- one
+    # combined account of everything this visit's already-analyzed events described, not a second
+    # per-image VLM call the way the now-removed alert stage's alert_sighting used to be.
+    id: int
+    visit_id: int
+    summary: str | None
+
+
 class VisitSightings(BaseModel):
     # Every sighting linked to this visit, not just the representative event's -- claim_ai_batch's
     # only_visit_representative partitions by (visit_id, objects), so a visit can have more than
@@ -70,6 +79,9 @@ class VisitSightings(BaseModel):
     # is its video plus these individually-analyzed connected events, not a second gathered-image
     # VLM call.)
     sightings: list[Sighting]
+    # Null until the visit_summary stage is enabled and has finished (or was skipped) for this
+    # visit -- see visit_summary_worker.py.
+    visit_summary: VisitSummaryResult | None = None
 
 
 class CameraCount(BaseModel):

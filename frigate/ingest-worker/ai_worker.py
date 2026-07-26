@@ -26,33 +26,27 @@ def _llama_proxy_chat_request(type_config: dict, prompt: str, images: list[str],
     # on a self-hosted llama.cpp+mmproj backend is unverified (see ai_worker.py's own multi-image
     # docstring note / CLAUDE.md), so only the first image is ever sent here regardless of how many
     # were gathered -- a warning is logged once (module-global, not per-call) rather than silently
-    # dropping the rest with no visibility at all.
+    # dropping the rest with no visibility at all. images=[] (the visit-summary stage's text-only
+    # call, see visit_summary_worker.py) sends no image block at all -- a plain text message, same
+    # as the other two providers already handle via their own empty list-comprehension spread.
     global _warned_llama_proxy_multi_image
     if len(images) > 1 and not _warned_llama_proxy_multi_image:
         logger.warning(
-            "%d images were gathered for this alert but llama_proxy only ever sends the first one "
-            "-- set provider/alert_provider to 'openai' or 'anthropic' for multi-image analysis",
+            "%d images were gathered for this call but llama_proxy only ever sends the first one "
+            "-- set provider to 'openai' or 'anthropic' for multi-image analysis",
             len(images),
         )
         _warned_llama_proxy_multi_image = True
     headers = {}
     if config.LLAMA_PROXY_TOKEN:
         headers["Authorization"] = f"Bearer {config.LLAMA_PROXY_TOKEN}"
+    content = [{"type": "text", "text": prompt}]
+    if images:
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{images[0]}"}})
     resp = requests.post(
         f"{config.LLAMA_PROXY_BASE_URL}{type_config['chat_path']}",
         json={
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{images[0]}"},
-                        },
-                    ],
-                }
-            ],
+            "messages": [{"role": "user", "content": content}],
             "temperature": 0,
         },
         headers=headers,
@@ -247,7 +241,11 @@ def run_embedding_backfill(limit: int) -> dict:
     elif not config.LLAMA_PROXY_BASE_URL:
         raise RuntimeError("LLAMA_PROXY_BASE_URL is not configured")
 
-    result = {"sightings_processed": 0, "sightings_updated": 0, "visit_sightings_processed": 0, "visit_sightings_updated": 0}
+    result = {
+        "sightings_processed": 0, "sightings_updated": 0,
+        "visit_sightings_processed": 0, "visit_sightings_updated": 0,
+        "visit_summaries_processed": 0, "visit_summaries_updated": 0,
+    }
 
     for row in db.get_sightings_missing_embedding(limit):
         result["sightings_processed"] += 1
@@ -256,12 +254,22 @@ def run_embedding_backfill(limit: int) -> dict:
             db.update_sighting_embedding(row["id"], embedding)
             result["sightings_updated"] += 1
 
+    # visit_sightings backed the now-removed alert AI stage -- always empty going forward, but this
+    # loop is kept as harmless dead code (nothing to process, same "deprecated, not removed" stance
+    # schema.sql itself takes for that table).
     for row in db.get_visit_sightings_missing_embedding(limit):
         result["visit_sightings_processed"] += 1
         embedding = _embed_text(row["description"])
         if embedding is not None:
             db.update_visit_sighting_embedding(row["id"], embedding)
             result["visit_sightings_updated"] += 1
+
+    for row in db.get_visit_summaries_missing_embedding(limit):
+        result["visit_summaries_processed"] += 1
+        embedding = _embed_text(row["summary"])
+        if embedding is not None:
+            db.update_visit_summary_embedding(row["id"], embedding)
+            result["visit_summaries_updated"] += 1
 
     return result
 

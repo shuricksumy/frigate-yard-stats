@@ -78,6 +78,19 @@ CREATE INDEX IF NOT EXISTS idx_visits_alert_ai_status ON yard_stats.visits (aler
 -- the events stage's own full-resolution crop instead.
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS alert_image_paths TEXT;
 
+-- Visit summary stage (visit_summary_worker.py, profiles.yaml's top-level visit_summary: block) --
+-- a NEW, active stage (not deprecated like the two blocks above): once every raw_event linked to a
+-- visit has settled its own ai_status (done/skipped/failed -- see claim_visit_summary_batch), this
+-- synthesizes one text summary from all of the visit's already-produced per-event sightings
+-- (yard_stats.visit_summaries below), not a second image-analysis pass. Same
+-- new -> processing -> retry/failed -> done shape as every other queue stage, plus 'skipped' for
+-- a visit whose linked events produced no sighting text at all to summarize.
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS summary_status TEXT NOT NULL DEFAULT 'new'
+  CHECK (summary_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS summary_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS summary_attempt_count INTEGER NOT NULL DEFAULT 0;
+CREATE INDEX IF NOT EXISTS idx_visits_summary_status ON yard_stats.visits (summary_status);
+
 -- One row per Frigate "end" event, any label (car/truck/person/dog/...). Carries three
 -- independent queue state machines -- crop_status/video_status owned directly by ingest-worker,
 -- ai_status owned by n8n via ingest-worker's /ai-queue/* API -- see CLAUDE.md's "Architecture"
@@ -204,6 +217,19 @@ CREATE TABLE IF NOT EXISTS yard_stats.visit_sightings (
 CREATE INDEX IF NOT EXISTS idx_visit_sightings_visit ON yard_stats.visit_sightings (visit_id);
 CREATE INDEX IF NOT EXISTS idx_visit_sightings_object_label ON yard_stats.visit_sightings (object_label);
 
+-- One row per visit-summary-analyzed visit (visit_summary_worker.py) -- a synthesized text summary
+-- built from all of the visit's own already-produced per-event sightings (see
+-- db.get_sightings_for_visit), not a second image-analysis pass the way the now-removed alert AI
+-- stage's visit_sightings above was. No object_label column (unlike sightings/visit_sightings) --
+-- a whole-visit summary isn't tied to one type, since a visit can group several distinct ones.
+CREATE TABLE IF NOT EXISTS yard_stats.visit_summaries (
+  id SERIAL PRIMARY KEY,
+  visit_id INTEGER REFERENCES yard_stats.visits(id),
+  summary TEXT,
+  created_at TIMESTAMPTZ DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS idx_visit_summaries_visit ON yard_stats.visit_summaries (visit_id);
+
 -- Semantic search over AI-written sighting text, embedded via whatever model is loaded behind
 -- LLAMA_PROXY_EMBED_PATH (Qwen3-Embedding-0.6B-GGUF, 1024 dims, in this deployment). Nullable:
 -- only newly-analyzed sightings get one; existing rows stay searchable by every other filter, just
@@ -219,7 +245,10 @@ CREATE INDEX IF NOT EXISTS idx_visit_sightings_object_label ON yard_stats.visit_
 -- unconditional/idempotent, since it clears the column's data).
 ALTER TABLE yard_stats.sightings ADD COLUMN IF NOT EXISTS embedding vector(__EMBEDDING_DIMENSIONS__);
 ALTER TABLE yard_stats.visit_sightings ADD COLUMN IF NOT EXISTS embedding vector(__EMBEDDING_DIMENSIONS__);
+ALTER TABLE yard_stats.visit_summaries ADD COLUMN IF NOT EXISTS embedding vector(__EMBEDDING_DIMENSIONS__);
 CREATE INDEX IF NOT EXISTS idx_sightings_embedding ON yard_stats.sightings
   USING hnsw (embedding vector_cosine_ops);
 CREATE INDEX IF NOT EXISTS idx_visit_sightings_embedding ON yard_stats.visit_sightings
+  USING hnsw (embedding vector_cosine_ops);
+CREATE INDEX IF NOT EXISTS idx_visit_summaries_embedding ON yard_stats.visit_summaries
   USING hnsw (embedding vector_cosine_ops);

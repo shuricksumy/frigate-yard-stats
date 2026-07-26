@@ -46,40 +46,36 @@ You must set these — `ingest-worker` won't start without them:
 ## Crop tuning
 
 Controls how `ingest-worker` turns a Frigate event into the still image that gets displayed and
-analyzed. `RECORD_WIDTH`/`RECORD_HEIGHT` stay plain `.env` settings (they describe your camera
-hardware, not a tunable behavior); everything else here is configured entirely in `profiles.yaml`
-instead — see "Per-object-type overrides" below for the full mechanism.
+analyzed. **The image source is Frigate's own best-detection-score snapshot, exclusively** —
+`crop.crop_event` fetches `GET /api/events/<det_id>/snapshot.jpg`, the same image/framing Frigate's
+own Explore UI shows for that event (bbox/label/timestamp overlay baked in), and never seeks its
+own frame from the record-stream clip. This wasn't always true within this project's history — see
+CLAUDE.md's "Cropping" section for the regression (a brief period where every event used a
+seek-based record-stream frame instead, unintentionally landing on a different, less representative
+moment than Frigate's own choice) and why it was reverted.
 
 - `RECORD_WIDTH` / `RECORD_HEIGHT` — your cameras' actual full-resolution record-stream size (see
-  [`frigate.md`](frigate.md)'s "detect vs record" section) — needed to correctly scale Frigate's
-  normalized bounding-box coordinates.
-- `crop_padding_pct` (default `0.2`, in `profiles.yaml`) — extra margin added around Frigate's own
-  detected region, so the crop isn't razor-tight around the object.
-- `crop_frame_offset_pct` (default `0.5`, in `profiles.yaml`) — *where* in the event's timespan to
-  grab the frame (`0.0` = right at the start, `0.5` = midpoint, `1.0` = right at the end). There's
-  no universally "correct" value — Frigate never exposes a timestamp for its own best-frame choice
-  anywhere in its API (checked directly: not in the event JSON, not in the snapshot's response
-  headers, not in EXIF — the only place it's visible at all is the camera's own burned-in
-  on-screen clock, readable by eye but not extractable programmatically), so this is a starting
-  point to tune against your own footage if `0.5` consistently looks off, not a value that can be
-  computed or synced to Frigate's exact choice.
-- `crop_disabled` (default `false`, in `profiles.yaml`) — skips cropping entirely; the full
-  original camera frame is used instead of a region around the object (still capped to
-  `ai_image_max_dimension` for the copy sent to the VLM — see below). This is a real trade-off, not
-  a strict improvement: a full wide frame gives more context but makes small detail (plates,
-  notable features) harder for the VLM to read. The same image is what's displayed in the web UI
-  *and* sent to the VLM — there's no separate "wide for humans, cropped for the model" mode.
+  [`frigate.md`](frigate.md)'s "detect vs record" section). Kept as plain `.env` settings even
+  though the crop path below no longer uses them for bounding-box scaling — still read by other
+  parts of this project (e.g. the visit video flows).
 - `ai_image_max_dimension` (default `1280`, in `profiles.yaml`) — the long side of the downscaled
-  copy actually sent to the VLM and stored in Postgres (`raw_events.crop_image_base64`). VLMs
-  downsample beyond this internally anyway, so a bigger value only adds load, not analysis
-  quality — a plate-heavy vehicle prompt may still want more resolution than a person/dog prompt,
-  which is why this is per-object-type rather than one shared global cap. The full-resolution crop
-  written to disk when `store_event_images` is on (see "Event-analysis image storage" below) is
-  never capped by this at all.
+  copy actually sent to the VLM and stored in Postgres (`raw_events.crop_image_base64`) — a
+  downscale of Frigate's own snapshot, no second network fetch. VLMs downsample beyond this
+  internally anyway, so a bigger value only adds load, not analysis quality — a plate-heavy vehicle
+  prompt may still want more resolution than a person/dog prompt, which is why this is
+  per-object-type rather than one shared global cap. `store_event_images` (see "Event-analysis
+  image storage" below) persists the unscaled snapshot bytes to disk instead — Frigate's snapshot
+  has no separate higher-resolution version to fetch.
+- `crop_padding_pct` / `crop_frame_offset_pct` / `crop_disabled` (in `profiles.yaml`) — still
+  accepted, per-object-type-resolvable settings, kept for signature compatibility, but **currently
+  have no effect**: there's no region-crop/seek math applied on top of an image Frigate itself
+  already framed and rendered. They're left in place (rather than removed outright) in case a
+  future deployment wants the underlying record-stream seek+crop path back for a specific type —
+  the primitives (`crop.crop_and_scale`, etc.) remain in `crop.py`, still tested directly, just not
+  invoked by `crop_event` today.
 
-All four can be set globally via `profiles.yaml`'s `defaults:` section, or per object type, e.g. to
-have `car` use extra padding and more resolution for plate legibility while everything else stays
-at the defaults. See "Per-object-type overrides" below for how the tiers work.
+`ai_image_max_dimension` can be set globally via `profiles.yaml`'s `defaults:` section, or per
+object type — see "Per-object-type overrides" below for how the tiers work.
 
 ## Camera allow-list
 
@@ -395,6 +391,43 @@ never every mapped type unconditionally. See "Per-object-type overrides" below.
   fallback timeouts; the real per-type chat timeout belongs in `profiles.yaml` itself
   (`timeout_seconds`), since a local model's response time genuinely depends on which model/prompt
   you've picked for that type. Plain technical knobs, `profiles.yaml`'s `defaults:` only.
+
+## Visit summary stage
+
+A third, independent AI stage (`visit_summary_worker.py`), configured entirely in `profiles.yaml`'s
+own top-level `visit_summary:` block (sibling to `defaults:`/`object_types:`, not nested under
+either) — off by default. Unlike the internal AI stage above, this is **not** per-object-type: a
+visit can group several distinct object types (a car and a person), so there's exactly one shared
+prompt/provider for "summarize this whole visit," not one per label.
+
+Once every `raw_event` a visit grouped has settled its own `ai_status` (`done`/`skipped`/`failed`
+— see `db.claim_visit_summary_batch`), this stage gathers all of that visit's already-produced
+`sightings.description` text (chronological, one line per sighting), sends it to an LLM with
+`visit_summary.prompt`, and stores the synthesized result in `yard_stats.visit_summaries`. No image
+is ever sent for this call — only the previously-generated text — so pick a text-capable (and
+typically cheap/fast) model slot, not a vision one. Surfaced on the web UI's Visit lightbox above
+the per-event sightings, and searchable both via `GET /visits`' own `q` and the Search tab's
+semantic search, same as every other sighting.
+
+- **`enabled`** — off by default; set `true` to start the stage's poll thread (`main.py`).
+- **`provider`/`model`/`chat_path`/`max_tokens`** — the exact same three-way dispatch
+  (`llama_proxy`/`openai`/`anthropic`) every other AI call in this project uses — see "Hosted VLM
+  providers" below for the full comparison. Not per-object-type, since this stage has no per-type
+  concept at all.
+- **`prompt`** — the one shared instruction for synthesizing a whole visit from its already-produced
+  per-event descriptions. See `frigate/profiles.yaml.example`'s `visit_summary:` block for the
+  shipped default.
+- **`parallel_limit`/`stale_minutes`/`max_attempts`/`poll_interval_seconds`/`max_age_hours`** —
+  same queue-tuning shape every other stage has, but kept inside this same `visit_summary:` block
+  rather than `defaults:`'s technical-tuning-knobs mechanism (that mechanism maps onto fixed
+  `config.py` constants; this stage's tuning has no such constant to map onto, so it's
+  self-contained instead). Falls back to the existing `ai_stage_*` defaults when a key is omitted.
+- **`timeout_seconds`** — this call's own chat-completion timeout; falls back to
+  `ai_stage_default_timeout_seconds` if omitted.
+
+A visit whose linked events produced no real sighting text at all (e.g. every one ended up
+`skipped`/`failed`) is marked `summary_status='skipped'` — terminal, not retried forever, since
+there's nothing to summarize.
 
 ## Hosted VLM providers (OpenAI / Claude)
 

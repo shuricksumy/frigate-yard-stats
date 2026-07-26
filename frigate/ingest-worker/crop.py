@@ -146,6 +146,23 @@ def crop_and_scale(
             return base64.b64encode(f.read()).decode()
 
 
+def fetch_frigate_snapshot_base64(det_id: str) -> str:
+    # Frigate's own already-rendered best-detection-score frame -- no ffmpeg involved at all, just
+    # the raw JPEG bytes Frigate itself already produced. This is deliberately the ONLY image
+    # source crop_event uses (see its own comment below) -- a seeked frame from the record-stream
+    # clip at a computed offset can land on a materially different, less representative moment than
+    # whatever Frigate itself judged as this event's best frame, and there is no way to sync our own
+    # seek to Frigate's actual choice (Frigate never exposes that timestamp anywhere in its API --
+    # confirmed directly: not in the event JSON, not in the snapshot's own response headers, not in
+    # EXIF; see CLAUDE.md's "Cropping" section). The resolution/overlay trade-off this accepts
+    # (Frigate's fixed, lower detect-stream resolution, with a burned-in bbox/label/timestamp
+    # overlay this Frigate version's API has no way to suppress) is worth it for actually matching
+    # what Frigate itself considered the event's defining moment.
+    resp = requests.get(f"{config.FRIGATE_API_BASE}/api/events/{det_id}/snapshot.jpg", timeout=10)
+    resp.raise_for_status()
+    return base64.b64encode(resp.content).decode()
+
+
 def crop_event(
     raw_event: dict,
     crop_disabled: bool | None = None,
@@ -158,35 +175,33 @@ def crop_event(
     # settled, final read. Captured here rather than re-fetched later so the AI-processing
     # stage (n8n) never needs to call Frigate's API at all.
     #
-    # A genuine ffmpeg seek+crop from the record stream, via the event-id-scoped clip endpoint
-    # (/api/events/{det_id}/clip.mp4) -- NOT the continuous-recording start/end endpoint
-    # video.build_clip_url uses for visits, which is what caused the old visit-preview grid's
-    # abandoned unpredictable-padding bugs (see CLAUDE.md). This endpoint is confirmed far more
-    # durable (observed surviving over an hour vs. ~36 minutes for the continuous-recording one).
-    # One seek produces one full-resolution crop; the AI-facing (and DB-stored) copy is a cheap
-    # scale_image_base64 downscale of that same crop, not a second seek/fetch. This is the same
-    # capture path the alert stage used to use on its own (crop_event_high_res, now folded in here
-    # since that was its only other caller) -- there is no longer a separate Frigate-snapshot image
-    # source to choose between (see FRIGATE_SNAPSHOT_ENABLED's removal in CLAUDE.md).
-    if crop_frame_offset_pct is None:
-        crop_frame_offset_pct = config.CROP_FRAME_OFFSET_PCT
+    # Uses ONLY fetch_frigate_snapshot_base64 -- never a seek+crop grabbed from the record-stream
+    # clip at a computed offset. A prior change (commit b1cd068) switched every event over to an
+    # unconditional record-stream seek, which was a real regression: the seeked frame can be a
+    # materially different, less representative moment than the one Frigate itself already chose
+    # and rendered as this event's own snapshot -- confirmed directly against production traffic.
+    # crop_disabled/crop_frame_offset_pct/crop_padding_pct are accepted for call-site/signature
+    # compatibility (crop_worker.py resolves and passes them per-object-type) but unused here --
+    # there's no region-crop math to apply on top of an image Frigate itself already framed and
+    # rendered. ai_image_max_dimension still applies: the snapshot is scaled down to fit the
+    # AI/DB-stored size limit, same as every other image this project sends to a VLM. The
+    # record-stream seek+crop primitives (crop_and_scale/_build_vf_filter/compute_full_res_box/
+    # compute_frame_offset_seconds) remain in this module, still tested directly, but are no longer
+    # invoked by this function.
     det_id = raw_event["det_id"]
     event = fetch_frigate_event(det_id)
     data = event.get("data") or {}
-    box = compute_full_res_box(event)
-    offset = compute_frame_offset_seconds(
-        raw_event["start_ts"], raw_event["end_ts"], crop_frame_offset_pct,
-    )
-    clip_url = f"{config.FRIGATE_API_BASE}/api/events/{det_id}/clip.mp4"
-    full_res_image_base64 = crop_and_scale(clip_url, offset, box, crop_disabled, crop_padding_pct)
+    snapshot_base64 = fetch_frigate_snapshot_base64(det_id)
     ai_image_base64 = scale_image_base64(
-        full_res_image_base64, ai_image_max_dimension or config.MAX_CROP_DIMENSION,
+        snapshot_base64, ai_image_max_dimension or config.MAX_CROP_DIMENSION,
     )
     return {
         "crop_image_base64": ai_image_base64,
         # Never stored in Postgres -- only written to disk (event_images.store_event_image) when
-        # STORE_EVENT_IMAGES resolves true for this event's own object type.
-        "full_res_image_base64": full_res_image_base64,
+        # STORE_EVENT_IMAGES resolves true for this event's own object type. Frigate's snapshot has
+        # no separate higher-resolution version to persist here -- this is the same unscaled bytes
+        # fetch_frigate_snapshot_base64 already returned.
+        "full_res_image_base64": snapshot_base64,
         "sub_label": event.get("sub_label"),
         "score": data.get("score"),
     }

@@ -239,7 +239,10 @@ def get_visit_sightings(visit_id: int):
     the web UI's lightbox uses instead."""
     if db.get_visit(visit_id) is None:
         raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
-    return {"sightings": db.get_sightings_for_visit(visit_id)}
+    return {
+        "sightings": db.get_sightings_for_visit(visit_id),
+        "visit_summary": db.get_visit_summary(visit_id),
+    }
 
 
 @app.get("/events/{event_id}", response_model=schemas.EventDetail, tags=["events"], dependencies=[Depends(require_api_key)])
@@ -532,6 +535,8 @@ def admin_overview():
             "sightings_total": row_counts["sightings"],
             "visit_sightings_missing": missing_embeddings["visit_sightings"],
             "visit_sightings_total": row_counts["visit_sightings"],
+            "visit_summaries_missing": missing_embeddings["visit_summaries"],
+            "visit_summaries_total": row_counts["visit_summaries"],
         },
         "db_size": db.get_db_size_info(),
         "db_size_by_object_type": db.get_db_size_by_object_type(),

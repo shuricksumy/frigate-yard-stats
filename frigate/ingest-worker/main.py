@@ -11,6 +11,7 @@ import db
 import mqtt_ingest
 import profile_config
 import video_worker
+import visit_summary_worker
 from api import app
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -49,6 +50,13 @@ def main():
     # least one object type opts in.
     if profile_config.any_ai_events_stage_enabled(profile):
         threading.Thread(target=ai_worker.run_forever, args=(profile,), name="ai_worker", daemon=True).start()
+    # Not a per-object-type setting (a visit isn't tied to one type), so this is a plain profile
+    # lookup rather than a profile_config.py resolver -- see profiles.yaml's own visit_summary:
+    # section.
+    if profile.get("visit_summary", {}).get("enabled"):
+        threading.Thread(
+            target=visit_summary_worker.run_forever, args=(profile,), name="visit_summary_worker", daemon=True,
+        ).start()
     uvicorn.run(app, host="0.0.0.0", port=config.API_PORT)
 
 

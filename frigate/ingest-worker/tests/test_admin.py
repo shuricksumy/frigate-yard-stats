@@ -62,14 +62,14 @@ def test_get_table_row_counts_reflects_inserted_row(conn_ok):
 
 def test_get_table_row_counts_has_universal_sighting_tables(conn_ok):
     result = db.get_table_row_counts()
-    assert set(result.keys()) == {"raw_events", "visits", "sightings", "visit_sightings"}
+    assert set(result.keys()) == {"raw_events", "visits", "sightings", "visit_sightings", "visit_summaries"}
 
 
 def test_get_stage_counts_has_expected_shape(conn_ok):
     result = db.get_stage_counts()
     assert set(result.keys()) == {"raw_events", "visits"}
     assert set(result["raw_events"].keys()) == {"crop_status", "video_status", "ai_status"}
-    assert set(result["visits"].keys()) == {"video_status"}
+    assert set(result["visits"].keys()) == {"video_status", "summary_status"}
 
 
 def test_get_stage_counts_counts_a_failed_ai_row(conn_ok):
