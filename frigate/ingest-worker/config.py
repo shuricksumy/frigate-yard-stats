@@ -122,7 +122,7 @@ API_KEY = _env("API_KEY")
 # -------------------------------------------------
 STORE_VIDEO = False
 # Mount point inside the container -- pair with a bind mount in docker-compose.yml
-# (VIDEO_STORAGE_HOST_PATH on the host side). Files are laid out as
+# (VIDEO_STORAGE_EVENTS_PATH on the host side). Files are laid out as
 # {VIDEO_STORAGE_PATH}/{YYYY}/{MM}/{DD}/{object_type}-{event_id}-{start_ts_epoch}.mp4.
 VIDEO_STORAGE_PATH = _env("VIDEO_STORAGE_PATH", "/data/video")
 # How many rows may be video_status='processing' at once -- kept separate from (and by default

@@ -1013,7 +1013,7 @@ continuous-recording endpoint `video.py` already uses for the events flow, via a
 dict (`{start_ts, end_ts, camera: visit["cameras"], det_id: "visit-{id}"}`) so `download_clip`/
 `build_clip_url` need no changes -- and stored under `VIDEO_STORAGE_PATH_ALERTS` (its own mount
 point/bind mount, `VIDEO_STORAGE_ALERTS_HOST_PATH` on the host side -- a genuinely separate
-storage location from `VIDEO_STORAGE_PATH`/`VIDEO_STORAGE_HOST_PATH`, not a subfolder of it, so
+storage location from `VIDEO_STORAGE_PATH`/`VIDEO_STORAGE_EVENTS_PATH`, not a subfolder of it, so
 the two flows' disk usage can be measured/managed independently) with a `visit-` filename prefix
 (`video.store_visit_clip`) so it's never confused with a per-event clip that happens to share the
 same numeric id (visit ids and raw_event ids are independent sequences). Shares

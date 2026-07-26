@@ -120,7 +120,7 @@ services:
     volumes:
       # Bind mount for stored clips -- only used when STORE_VIDEO=true, but always mounted so
       # toggling the flag doesn't require a compose file change, just a restart.
-      - ${VIDEO_STORAGE_HOST_PATH:-./video-storage}:/data/video
+      - ${VIDEO_STORAGE_EVENTS_PATH:-./video-storage-events}:/data/video
       # Separate bind mount for the visits flow (STORE_VIDEO_VISITS) -- its own directory,
       # not a subfolder of the one above, so the two flows' storage is genuinely independent.
       - ${VIDEO_STORAGE_ALERTS_HOST_PATH:-./video-storage-alerts}:/data/video-alerts

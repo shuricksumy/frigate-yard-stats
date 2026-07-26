@@ -103,7 +103,7 @@ overrides" below), each defaulting to `false` (off) unless set in `profiles.yaml
 section or per type:
 
 - `store_video` — downloads and keeps the clip for every individual event, alongside its crop.
-  Stored under `VIDEO_STORAGE_HOST_PATH` (default `./video-storage` on the host).
+  Stored under `VIDEO_STORAGE_EVENTS_PATH` (default `./video-storage-events` on the host).
 - `store_video_visits` — same idea, but one clip per *visit* (a whole grouped real-world activity)
   instead of per raw event. Stored completely separately, under `VIDEO_STORAGE_ALERTS_HOST_PATH`
   (default `./video-storage-alerts`), so you can measure/manage the two flows' disk usage

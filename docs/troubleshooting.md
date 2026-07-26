@@ -80,7 +80,7 @@ This stage is owned by n8n, not `ingest-worker` — see [`n8n.md`](n8n.md):
   [`docker.md`](docker.md)'s troubleshooting section for why `up -d` alone won't pick up a
   `profiles.yaml` edit).
 - Check the relevant bind-mount directory actually exists and is writable
-  (`VIDEO_STORAGE_HOST_PATH`/`VIDEO_STORAGE_ALERTS_HOST_PATH` on the host).
+  (`VIDEO_STORAGE_EVENTS_PATH`/`VIDEO_STORAGE_ALERTS_HOST_PATH` on the host).
 - A row permanently stuck on `video_status = 'failed'` after using up its retry attempts is often
   Frigate's recording buffer having already rolled the clip off before `ingest-worker` got to it —
   see [`frigate.md`](frigate.md)'s retention section. Raising `record.continuous.days` (per-camera
