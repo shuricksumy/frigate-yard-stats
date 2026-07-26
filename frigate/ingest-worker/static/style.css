@@ -608,6 +608,11 @@ input:disabled, select:disabled {
   border-radius: 6px;
   overflow: hidden;
   border: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.alert-images-strip a.active {
+  border-color: var(--accent);
 }
 
 .alert-images-strip img {

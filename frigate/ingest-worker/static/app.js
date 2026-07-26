@@ -112,6 +112,11 @@ function eventsApp() {
     // branch only -- always empty for a plain event (no visit-level image series exists there) or
     // when the option was off/nothing was stored for this visit.
     lightboxAlertImageUrls: [],
+    // Index into lightboxAlertImageUrls currently shown full-size in the main media area, or null
+    // when showing the normal video/image instead -- toggled by clicking a gallery thumbnail /
+    // the "Back" button, same popup (not a new tab, not a nested lightbox) the normal event/video
+    // preview already uses. The AI analysis description panel stays visible throughout either way.
+    lightboxAlertImageIndex: null,
 
     init() {
       this.fetchVersionInfo();
@@ -664,6 +669,7 @@ function eventsApp() {
       this.lightboxGroups = [];
       this.lightboxConnectedEvents = [];
       this.lightboxAlertImageUrls = [];
+      this.lightboxAlertImageIndex = null;
       // A visit's own ai_status (event.ai_status) only reflects its single earliest-linked
       // event -- a second, different-object-type event in the same visit can still be
       // analyzed (or still pending) independently of that one, so the visit branch always
@@ -737,6 +743,20 @@ function eventsApp() {
       this.lightboxConnectedEvents = [];
       this.lightboxParentVisit = null;
       this.lightboxAlertImageUrls = [];
+      this.lightboxAlertImageIndex = null;
+    },
+
+    // Opens one of the alert stage's gathered images full-size in the SAME lightbox's main media
+    // area (not a new tab, not a separate nested lightbox) -- the description panel below stays
+    // visible throughout, same "popup with a way back" pattern the Connected-events strip already
+    // established via backToVisit(), just without needing a second network fetch since these
+    // images have no separate detail/description of their own to load.
+    viewAlertImage(index) {
+      this.lightboxAlertImageIndex = index;
+    },
+
+    backFromAlertImage() {
+      this.lightboxAlertImageIndex = null;
     },
 
     // A sighting is just {object_label, description} in this universal model -- no per-type
