@@ -2,6 +2,7 @@ import logging
 import time
 
 import ai_worker
+import alert_images
 import config
 import crop
 import db
@@ -66,24 +67,28 @@ def _select_events_for_alert(events: list[dict], max_images: int) -> list[dict]:
 
 def _gather_alert_images(
     events: list[dict], crop_disabled: bool | None = None, crop_padding_pct: float | None = None,
-) -> list[str]:
+) -> list[tuple[dict, str]]:
     # A single bad/expired linked event (Frigate's own event-id clip already rolled off, a
     # transient fetch error, ...) shouldn't fail the whole visit's alert analysis -- same "a gap
     # doesn't take the rest down with it" tolerance crop._panels_from_independent_timestamps
     # already established for the old grid's per-moment fetches. Only an empty result routes to a
-    # real failure (see process_claimed_visit).
-    images = []
+    # real failure (see process_claimed_visit). Returns (event, image) pairs rather than a bare
+    # image list -- a per-event failure means events/images can end up different lengths, and
+    # alert_images.store_alert_images needs each image's own source event (for its filename) when
+    # STORE_ALERT_IMAGES is on, not just the flat image list the VLM call itself needs.
+    gathered = []
     for event in events:
         try:
-            images.append(crop.crop_event_high_res(
+            image = crop.crop_event_high_res(
                 event, crop_disabled=crop_disabled, crop_padding_pct=crop_padding_pct,
-            ))
+            )
+            gathered.append((event, image))
         except Exception:
             logger.warning(
                 "Could not build a high-res crop for raw_event id=%s det_id=%s in alert analysis, skipping",
                 event.get("id"), event.get("det_id"), exc_info=True,
             )
-    return images
+    return gathered
 
 
 def _resolve_alert_type_config(type_config: dict) -> dict:
@@ -127,9 +132,24 @@ def process_claimed_visit(row: dict, profile: dict) -> None:
     try:
         linked_events = db.get_raw_events_for_visit(visit_id)
         selected = _select_events_for_alert(linked_events, config.ALERT_AI_MAX_IMAGES)
-        images = _gather_alert_images(selected, crop_disabled, crop_padding_pct)
-        if not images:
+        gathered = _gather_alert_images(selected, crop_disabled, crop_padding_pct)
+        if not gathered:
             raise ValueError(f"Could not gather any high-res images for visit id={visit_id}")
+        gathered_events = [event for event, _image in gathered]
+        images = [image for _event, image in gathered]
+
+        if profile_config.store_alert_images(profile, object_label):
+            # Best-effort, non-fatal -- a disk-write failure (full disk, permissions) shouldn't
+            # take down an AI analysis that already has its images in hand. Deterministic
+            # filenames (visit id + index + event id, not a timestamp) mean a later retry of this
+            # same visit overwrites these files rather than accumulating duplicates.
+            try:
+                paths = alert_images.store_alert_images(row, gathered_events, images)
+                db.set_visit_alert_image_paths(visit_id, paths)
+            except Exception:
+                logger.warning(
+                    "Failed to persist alert images to disk for visit id=%s", visit_id, exc_info=True,
+                )
 
         response = ai_worker._chat_request(effective_config, effective_config["alert_prompt"], images, timeout)
         fields = parse_alert_sighting_response(response, row, effective_config)

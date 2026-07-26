@@ -160,6 +160,14 @@
 #     stage's poll thread -- see profile_config.any_store_video_enabled/
 #     any_store_video_alerts_enabled. e.g. a `person` entry could set store_video: false to skip
 #     storing clips for people while cars still get them. Hardcoded fallback: false (both).
+#   store_alert_images -- true/false. Persists the alert stage's own gathered high-res crops
+#     (built for the VLM call regardless, see alert_prompt above) to disk under
+#     ALERT_IMAGES_STORAGE_PATH -- comma-joined file paths land on visits.alert_image_paths, the
+#     actual JPEG bytes never touch Postgres. Off by default (the images stay ephemeral: built,
+#     sent to the VLM, discarded), so the database stays minimal unless you opt in. Unlike
+#     store_video/store_video_alerts, this doesn't gate a poll thread -- it's a plain per-row
+#     resolver (profile_config.store_alert_images), since persisting is a synchronous side effect
+#     inside the existing alert stage, not a separate queue. Hardcoded fallback: false.
 #
 # `defaults:` ALSO holds a second, unrelated category: plain technical tuning knobs with no
 # per-object-type meaning at all -- queue parallel limits, retry counts, timeouts, poll intervals,
@@ -269,6 +277,7 @@ object_types:
     # frigate_snapshot_enabled: true
     # store_video: true
     # store_video_alerts: true
+    # store_alert_images: true
     event_prompt: >-
       This image shows a single moment from one vehicle sighting. In one or two short sentences,
       describe the vehicle's color, body type (sedan/suv/truck/van/pickup/minivan/etc.), make and

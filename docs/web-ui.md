@@ -91,11 +91,18 @@ configured — there's no per-field table, just the model's own words). On the E
 always the event's own single-frame analysis
 (`AI_EVENTS_STAGE_ENABLED`). On the Visits tab, it prefers that visit's own alert-stage analysis
 instead (`AI_ALERTS_ENABLED`, labeled "... (alert analysis)") — analyzed from a series of separate
-high-res crops gathered from the visit's own linked events (never stored, built fresh for that
-analysis), a richer result that also describes what changed across the visit, not just a static
-snapshot — falling back to the per-event analysis if the alert stage is off or hasn't finished
-that visit yet. A visit that grouped several distinct object types (e.g. a car and a person) shows
-each one's sighting (per-event fallback only), labeled separately, rather than picking just one.
+high-res crops gathered from the visit's own linked events (built fresh for that analysis,
+discarded right after by default), a richer result that also describes what changed across the
+visit, not just a static snapshot — falling back to the per-event analysis if the alert stage is
+off or hasn't finished that visit yet. A visit that grouped several distinct object types (e.g. a
+car and a person) shows each one's sighting (per-event fallback only), labeled separately, rather
+than picking just one.
+
+If the deployment has `store_alert_images` turned on for that visit's type (see
+[`configuration.md`](configuration.md#alert-analysis-image-storage) — off by default), a small
+"AI analysis images" gallery strip appears below the description: exactly the high-res crops the
+alert stage analyzed, not just its written summary. Each thumbnail opens the full-size image in a
+new tab. Nothing shows here if the option was off or nothing was stored for this particular visit.
 
 On the Visits tab specifically, below that a "Connected events" strip shows every individual
 det_id Frigate's own tracker grouped into that visit (not just the deduped sighting(s) above) —
@@ -146,44 +153,49 @@ both pages). It shows:
 - **Counts** — total events, visits, sightings (any object type), and retention info (how many months
   you're keeping, and the oldest event still in the database).
 - **By object type** — one row per Frigate object label (car/truck/person/dog/...) showing its own
-  event/sighting row counts, an approximate Postgres byte footprint, and real on-disk video bytes
-  (parsed from stored clip filenames, which always start with the object type). Lets you see at a
-  glance which type is actually driving disk/DB growth instead of only a pipeline-wide total.
+  event/sighting row counts, an approximate Postgres byte footprint, real on-disk video bytes, and
+  real on-disk alert-analysis image bytes (`store_alert_images`, both parsed from stored filenames,
+  which always start with the object type). Lets you see at a glance which type is actually driving
+  disk/DB growth instead of only a pipeline-wide total.
 - **By camera** — the same idea, one row per Frigate camera instead of object type: event/sighting
-  row counts and real on-disk video bytes. The video byte figure comes straight from each camera's
-  own top-level storage directory (`video.py` stores clips under `camera/YYYY/MM/DD/...` — see
-  [`configuration.md`](configuration.md#video-storage-layout)), not filename parsing, so a clip
-  stored before that layout existed won't show up under a real camera name here (it lands under
-  whichever year directory it was written to instead).
+  row counts, real on-disk video bytes, and real on-disk alert-analysis image bytes. Both byte
+  figures come straight from each camera's own top-level storage directory (`video.py`/
+  `alert_images.py` both store files under `camera/YYYY/MM/DD/...` — see
+  [`configuration.md`](configuration.md#video-storage-layout)), not filename parsing, so a video
+  clip stored before that layout existed won't show up under a real camera name here (it lands
+  under whichever year directory it was written to instead) — alert images always used this layout.
 - **Semantic search coverage** — how many sightings have an embedding vs. don't, with buttons to
   backfill missing ones or reindex the vector database.
 - **Queue health** — a status breakdown (new/processing/retry/failed/done) for every queue stage
   (crop/video/AI on events, video/alert AI on visits). Any stage with failed rows gets a "Requeue N
   failed" button — the same fix `frigate/sql/queue-debug.sql` documents for manual psql use, now a
   real button instead of requiring shell access.
-- **Storage** — disk usage for stored video (main and alerts), plus Postgres database size broken
-  down per table.
+- **Storage** — disk usage for stored video (main and alerts) and stored alert-analysis images
+  (`store_alert_images`), plus Postgres database size broken down per table.
 - **Retention purge** — pick a cutoff in days, then hit Preview to see exactly what would happen,
   and Delete/Clear now, which asks for an explicit confirmation spelling out those same numbers
-  before anything actually changes. Nothing happens from a single click. Three checkboxes control
-  what "purge" actually clears — two independent media categories, plus a separate, clearly
+  before anything actually changes. Nothing happens from a single click. Four checkboxes control
+  what "purge" actually clears — three independent media categories, plus a separate, clearly
   destructive "Delete ALL":
   - **Delete video files** (on by default) — clears stored video clips (`raw_events` and `visits`)
     older than the cutoff, and deletes the files off disk.
   - **Delete Event Snapshots** (off by default) — clears the per-event still crop
     (`raw_events.crop_image_base64`).
+  - **Delete alert-analysis images** (on by default) — clears the alert stage's own gathered
+    high-res crops (`visits.alert_image_paths`, `store_alert_images`) and deletes those files too.
   - **Delete ALL (rows, text, and media — permanent)** (off by default) — a separate, more drastic
     switch: instead of clearing media and keeping the row, this deletes the matching events/visits
     (and their sightings) entirely, then rebuilds the semantic search index against whatever
-    remains. Checking it visually disables the two media checkboxes above, since they no longer
+    remains. Checking it visually disables the three media checkboxes above, since they no longer
     mean anything once the whole row is going away.
 
-  Video defaults on because it's by far the largest stored payload; still-images default off since
-  a still crop is comparatively cheap to keep and often still useful to glance at even once a row
-  is old. Both media checkboxes are independent and composable — you can check just "Delete Event
-  Snapshots" alone, for example, and nothing else is touched. Rows, embeddings, and every text
-  field (AI analysis, plate reads) always survive a media-only purge regardless of which boxes are
-  checked — only "Delete ALL" removes the row itself.
+  Video and alert images default on because they're the largest stored payloads (alert images can
+  be several JPEGs per visit); still-images default off since a still crop is comparatively cheap
+  to keep and often still useful to glance at even once a row is old. All three media checkboxes
+  are independent and composable — you can check just "Delete Event Snapshots" alone, for example,
+  and nothing else is touched. Rows, embeddings, and every text field (AI analysis, plate reads)
+  always survive a media-only purge regardless of which boxes are checked — only "Delete ALL"
+  removes the row itself.
 
   An "Object type" dropdown (defaults to "All types") restricts any of the above to one Frigate
   label at a time -- e.g. clean up just `dog` events without touching everything else's retention.
@@ -193,7 +205,9 @@ both pages). It shows:
   single camera — unlike object type, this **does** apply to visits too, since visit grouping is
   per-camera only (a visit's own camera is always a single, unambiguous value). Object type and
   camera compose — set both to restrict to, say, just `car` events on one specific camera.
-- **Reports** — generate a report on demand (Events or Visits/alerts, any object type or all,
-  a time window, and the same GIF/image/none preview modes `/reports/generate` accepts) and open
-  it in a new tab -- the exact same HTML n8n's scheduled report workflows email/Telegram, without
-  waiting for the next scheduled run.
+- **Reports** — generate a report on demand (Events or Visits/alerts, any object type or all, a
+  time window, an "Include image" checkbox, and — for Visits/alerts only — an "Include
+  alert-analysis images" checkbox that embeds the alert stage's own gathered high-res crops as a
+  thumbnail strip, when `store_alert_images` produced any) and open it in a new tab -- the exact
+  same HTML n8n's scheduled report workflows email/Telegram, without waiting for the next
+  scheduled run.

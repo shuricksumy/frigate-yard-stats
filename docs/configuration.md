@@ -155,6 +155,30 @@ each camera's own top-level directory to report real on-disk video bytes — thi
 because of the layout above, so a pre-migration file (still under a bare year directory) won't be
 attributed to a real camera name there; it'll show up bucketed under that year instead.
 
+## Alert-analysis image storage
+
+`store_alert_images` (default `false`, in `profiles.yaml` — same per-object-type override
+mechanism as `store_video`/`store_video_alerts` above, see "Per-object-type overrides" below)
+persists the alert stage's own gathered high-res crops (see "Internal AI stages" below) to disk
+under `ALERT_IMAGES_STORAGE_HOST_PATH` (default `./alert-images` on the host) — same "only the
+path lives in Postgres" shape video storage already uses. Off by default: these images stay purely
+ephemeral (built, sent to the VLM, discarded) unless you opt in. Unlike `store_video`/
+`store_video_alerts`, turning this on doesn't start a separate poll thread — it's a synchronous
+step inside the existing alert-stage thread, so there's no extra queue/capacity tuning to configure.
+
+Files land under `{ALERT_IMAGES_STORAGE_PATH}/{camera}/{YYYY}/{MM}/{DD}/visit-{object_type}-
+{visit_id}-{index}-{event_id}.jpg` — the same camera-first layout video clips use, so the admin
+dashboard's disk-usage/by-camera/by-object-type breakdowns (see
+[`web-ui.md`](web-ui.md#admin-dashboard)) apply here with no extra code. A retried analysis
+attempt overwrites the same files (deterministic names), so a backlog of retries doesn't pile up
+duplicate images on disk.
+
+Once stored, these images are reachable three ways: the web UI's Visit lightbox shows a small
+thumbnail-strip gallery of exactly what the alert stage analyzed; `/reports/generate`'s optional
+`include_alert_images` param embeds the same series into the alerts report; and
+`/retention/purge`'s `delete_alert_images` flag (default on) clears them independently of video/
+snapshots. See [`web-ui.md`](web-ui.md) and "Retention" below for each.
+
 ## Telegram notifications
 
 Two more **independent** settings, each a *mode* (`none` / `image` / `video` / `all`), not a bool
@@ -201,10 +225,11 @@ not `.env` (see "Per-object-type overrides" below):
 a cutoff of your own choosing right now rather than waiting for or reconfiguring the scheduled
 sweep — defaults to a dry run (just shows you counts) until you pass `confirm=true`. `only_media`
 (default `true`) keeps every row and its AI analysis text/plate reads searchable forever; what it
-actually clears is two independent flags, not one all-or-nothing "media" switch: `delete_video`
-(default `true`), `delete_snapshots` (default `false`) — see `web-ui.md` for what each one maps to.
+actually clears is three independent flags, not one all-or-nothing "media" switch: `delete_video`
+(default `true`), `delete_snapshots` (default `false`), `delete_alert_images` (default `true`,
+`STORE_ALERT_IMAGES`'s own gathered high-res crops) — see `web-ui.md` for what each one maps to.
 Set `only_media=false` for the original full-row delete instead (rebuilds the semantic search
-index afterward); the two `delete_*` params are ignored entirely in that mode, since a full row
+index afterward); the three `delete_*` params are ignored entirely in that mode, since a full row
 delete already covers all of their columns.
 
 Two optional, composable scoping params (both also dropdowns on `/ui/admin`) restrict any of the
@@ -232,7 +257,7 @@ currently being processed:
 - `telegram_events_mode` / `telegram_alerts_mode`
 - `ai_events_stage_enabled` / `ai_alerts_enabled`
 - `crop_disabled` / `crop_frame_offset_pct` / `crop_padding_pct` / `frigate_snapshot_enabled`
-- `store_video` / `store_video_alerts`
+- `store_video` / `store_video_alerts` / `store_alert_images`
 - `provider` / `model` / `chat_path` (event-stage VLM routing) and `alert_provider` /
   `alert_model` / `alert_chat_path` (alert-stage override — see "Hosted VLM providers" below)
 
@@ -341,8 +366,9 @@ all until you turn at least one of these on (there's no n8n workflow shipped for
   separately in `visit_sightings`. Rather than one low-res frame, this stage gathers up to
   `alert_ai_max_images` (default `4`) genuinely high-resolution crops — one per distinct object
   type the visit's linked events cover, then temporally-spread re-tracks to fill any remaining
-  slots — built fresh from the record stream at analysis time and discarded right after, never
-  stored. No readiness gate to wait on: a visit is claimable as soon as it exists. Can run
+  slots — built fresh from the record stream at analysis time and discarded right after by
+  default, never stored (unless `store_alert_images` opts in — see "Alert-analysis image storage"
+  above). No readiness gate to wait on: a visit is claimable as soon as it exists. Can run
   alongside or instead of `ai_events_stage_enabled` — the two are fully independent queues.
 
 Both can be set globally via `profiles.yaml`'s `defaults:` section, or per object type — e.g. to

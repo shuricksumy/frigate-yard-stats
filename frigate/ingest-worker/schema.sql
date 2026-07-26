@@ -59,18 +59,26 @@ CREATE INDEX IF NOT EXISTS idx_visits_zone_ts ON yard_stats.visits (zone, start_
 CREATE INDEX IF NOT EXISTS idx_visits_video_status ON yard_stats.visits (video_status);
 CREATE INDEX IF NOT EXISTS idx_visits_thumb_crop_status ON yard_stats.visits (thumb_crop_status);
 
--- Sixth queue stage (AI_ALERTS_ENABLED) -- analyzes the visit's own composite grid
--- (crop_image_base64 above, built once thumb_crop_status='done') with alert_ai_worker.py, using
--- profiles.yaml's alert_prompt (framed for 4-frames-of-change, unlike AI_EVENTS_STAGE_ENABLED's
--- event_prompt which is framed for one static frame). Independent of raw_events.ai_status
--- entirely -- a visit's alert-level analysis and its linked raw_events' own event-level analysis
--- are two separate results, stored in two separate places (see visit_sightings below vs.
--- sightings), so both can run at once without one overwriting or blocking the other.
+-- Sixth queue stage (AI_ALERTS_ENABLED) -- analyzes a series of high-res per-event crops gathered
+-- fresh from the visit's own linked raw_events at processing time (crop.crop_event_high_res, see
+-- alert_ai_worker.py), never a stored visit-level image, using profiles.yaml's alert_prompt
+-- (framed for a series of separate high-res photos, unlike AI_EVENTS_STAGE_ENABLED's event_prompt
+-- which is framed for one static frame). Independent of raw_events.ai_status entirely -- a visit's
+-- alert-level analysis and its linked raw_events' own event-level analysis are two separate
+-- results, stored in two separate places (see visit_sightings below vs. sightings), so both can
+-- run at once without one overwriting or blocking the other.
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS alert_ai_status TEXT NOT NULL DEFAULT 'new'
   CHECK (alert_ai_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS alert_ai_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS alert_ai_attempt_count INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_visits_alert_ai_status ON yard_stats.visits (alert_ai_status);
+
+-- Optional, opt-in (STORE_ALERT_IMAGES/store_alert_images) filesystem persistence of the same
+-- high-res crops gathered for alert analysis above -- comma-joined file paths only (same
+-- convention as the `objects` column), the actual JPEG bytes live under
+-- ALERT_IMAGES_STORAGE_PATH on disk, never in Postgres. NULL until the alert stage has both run
+-- and had this option enabled for the visit's representative object type. See alert_images.py.
+ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS alert_image_paths TEXT;
 
 -- One row per Frigate "end" event, any label (car/truck/person/dog/...). Carries three
 -- independent queue state machines -- crop_status/video_status owned directly by ingest-worker,
@@ -176,10 +184,11 @@ CREATE INDEX IF NOT EXISTS idx_sightings_raw_event ON yard_stats.sightings (raw_
 CREATE INDEX IF NOT EXISTS idx_sightings_object_label ON yard_stats.sightings (object_label);
 
 -- One row per alert-stage-analyzed visit (AI_ALERTS_ENABLED) -- same universal shape as
--- sightings above, keyed by visit_id instead of raw_event_id, since this analyzes the visit's own
--- composite grid (visits.crop_image_base64) rather than any single raw_event's crop. description
--- covers both static attributes and what changed across the grid's 4 frames in one flowing
--- answer -- alert_prompt asks for both together, there's no separate structured "notes" field.
+-- sightings above, keyed by visit_id instead of raw_event_id, since this analyzes a series of
+-- high-res crops gathered from the visit's own linked raw_events rather than any single event's
+-- own crop. description covers both static attributes and what changed across that series in one
+-- flowing answer -- alert_prompt asks for both together, there's no separate structured "notes"
+-- field.
 CREATE TABLE IF NOT EXISTS yard_stats.visit_sightings (
   id SERIAL PRIMARY KEY,
   visit_id INTEGER REFERENCES yard_stats.visits(id),

@@ -65,15 +65,17 @@ function adminApp() {
     skipFailedResult: {},
 
     purgeDays: 60,
-    // Two independently toggleable media categories (only meaningful while purgeDeleteAll is
+    // Three independently toggleable media categories (only meaningful while purgeDeleteAll is
     // false) rather than one all-or-nothing "media" checkbox -- they have very different storage
-    // cost and "still worth keeping" answers (a 4K video clip vs. a single still crop). Defaults
-    // match this project's own judgment on what's safe to routinely discard.
+    // cost and "still worth keeping" answers (a 4K video clip / a handful of alert-analysis crops
+    // vs. a single still crop). Defaults match this project's own judgment on what's safe to
+    // routinely discard.
     purgeDeleteVideo: true,
     purgeDeleteSnapshots: false,
+    purgeDeleteAlertImages: true,
     // Full row delete (today's only_media=false) -- a separate, more drastic checkbox rather than
     // the old checkbox's inverse meaning, so its own destructive intent reads clearly at a glance
-    // next to the two (non-destructive-to-rows) media categories above.
+    // next to the (non-destructive-to-rows) media categories above.
     purgeDeleteAll: false,
     purgeObjectLabel: "",
     purgeCamera: "",
@@ -85,6 +87,8 @@ function adminApp() {
     reportObjectLabel: "",
     reportHours: 24,
     reportIncludeImage: true,
+    // Only meaningful for source="visits" -- see the checkbox's own x-show in admin.html.
+    reportIncludeAlertImages: false,
     generatingReport: false,
     reportError: "",
 
@@ -218,6 +222,7 @@ function adminApp() {
         boolFlag("AI alerts stage", f.ai_alerts_enabled),
         boolFlag("Store video", f.store_video),
         boolFlag("Store video (alerts)", f.store_video_alerts),
+        boolFlag("Store alert-analysis images", f.store_alert_images),
         boolFlag("Crop disabled", f.crop_disabled),
         boolFlag("Frigate snapshot (events)", f.frigate_snapshot_enabled),
         modeFlag("Telegram (events)", f.telegram_events_mode),
@@ -260,17 +265,18 @@ function adminApp() {
     },
 
     // Combines row_counts_by_object_type/db_size_by_object_type (from /admin/overview) and
-    // video_storage[_alerts]_by_object_type (from /admin/disk-usage) into one row per object
-    // type -- three otherwise-separate breakdowns (Postgres row counts, approximate Postgres
-    // bytes, on-disk video bytes) sharing the same "object_type" key, so a reader can see
-    // everything about one type (e.g. "car") in a single row instead of cross-referencing three
-    // tables by hand.
+    // video_storage[_alerts]_by_object_type/alert_images_storage_by_object_type (from
+    // /admin/disk-usage) into one row per object type -- otherwise-separate breakdowns (Postgres
+    // row counts, approximate Postgres bytes, on-disk video/alert-image bytes) sharing the same
+    // "object_type" key, so a reader can see everything about one type (e.g. "car") in a single
+    // row instead of cross-referencing several tables by hand.
     objectTypeRows() {
       if (!this.overview) return [];
       const rc = this.overview.row_counts_by_object_type || {};
       const dbSize = this.overview.db_size_by_object_type || {};
       const diskEvents = (this.diskUsage && this.diskUsage.video_storage_by_object_type) || {};
       const diskAlerts = (this.diskUsage && this.diskUsage.video_storage_alerts_by_object_type) || {};
+      const diskAlertImages = (this.diskUsage && this.diskUsage.alert_images_storage_by_object_type) || {};
 
       const types = new Set();
       const addKeys = (list) => (list || []).forEach((r) => types.add(r.object_type));
@@ -279,6 +285,7 @@ function adminApp() {
       addKeys(rc.visit_sightings);
       Object.keys(diskEvents).forEach((t) => types.add(t));
       Object.keys(diskAlerts).forEach((t) => types.add(t));
+      Object.keys(diskAlertImages).forEach((t) => types.add(t));
 
       const lookup = (list, type) => {
         const row = (list || []).find((r) => r.object_type === type);
@@ -292,21 +299,24 @@ function adminApp() {
         visitSightings: lookup(rc.visit_sightings, type),
         dbBytes: lookup(dbSize.raw_events, type) + lookup(dbSize.sightings, type) + lookup(dbSize.visit_sightings, type),
         videoBytes: (diskEvents[type] ? diskEvents[type].bytes : 0) + (diskAlerts[type] ? diskAlerts[type].bytes : 0),
+        alertImageBytes: diskAlertImages[type] ? diskAlertImages[type].bytes : 0,
       }));
     },
 
     // Same idea as objectTypeRows(), grouped by camera instead -- row counts come straight from
-    // /admin/overview's row_counts_by_camera (a cheap query); video bytes come from
-    // /admin/disk-usage's video_storage[_alerts]_by_camera, which only works because store_clip/
-    // store_visit_clip now write under a camera-named top-level directory (no filename parsing
-    // needed, unlike the by-object-type breakdown). No per-camera DB-size figure -- that would
-    // need the same join-back-to-raw_events cost for every table just for a "nice to have"
-    // duplicate of the totals already shown elsewhere.
+    // /admin/overview's row_counts_by_camera (a cheap query); video/alert-image bytes come from
+    // /admin/disk-usage's video_storage[_alerts]_by_camera/alert_images_storage_by_camera, which
+    // only work because store_clip/store_visit_clip/alert_images.store_alert_images all write
+    // under a camera-named top-level directory (no filename parsing needed, unlike the
+    // by-object-type breakdown). No per-camera DB-size figure -- that would need the same
+    // join-back-to-raw_events cost for every table just for a "nice to have" duplicate of the
+    // totals already shown elsewhere.
     cameraRows() {
       if (!this.overview) return [];
       const rc = this.overview.row_counts_by_camera || {};
       const diskEvents = (this.diskUsage && this.diskUsage.video_storage_by_camera) || {};
       const diskAlerts = (this.diskUsage && this.diskUsage.video_storage_alerts_by_camera) || {};
+      const diskAlertImages = (this.diskUsage && this.diskUsage.alert_images_storage_by_camera) || {};
 
       const cams = new Set();
       const addKeys = (list) => (list || []).forEach((r) => cams.add(r.camera));
@@ -315,6 +325,7 @@ function adminApp() {
       addKeys(rc.visit_sightings);
       Object.keys(diskEvents).forEach((c) => cams.add(c));
       Object.keys(diskAlerts).forEach((c) => cams.add(c));
+      Object.keys(diskAlertImages).forEach((c) => cams.add(c));
 
       const lookup = (list, camera) => {
         const row = (list || []).find((r) => r.camera === camera);
@@ -327,6 +338,7 @@ function adminApp() {
         sightings: lookup(rc.sightings, camera),
         visitSightings: lookup(rc.visit_sightings, camera),
         videoBytes: (diskEvents[camera] ? diskEvents[camera].bytes : 0) + (diskAlerts[camera] ? diskAlerts[camera].bytes : 0),
+        alertImageBytes: diskAlertImages[camera] ? diskAlertImages[camera].bytes : 0,
       }));
     },
 
@@ -415,7 +427,8 @@ function adminApp() {
       const onlyMedia = !this.purgeDeleteAll;
       let url = `/retention/purge?older_than_days=${this.purgeDays}&confirm=${confirm}&only_media=${onlyMedia}`;
       if (onlyMedia) {
-        url += `&delete_video=${this.purgeDeleteVideo}&delete_snapshots=${this.purgeDeleteSnapshots}`;
+        url += `&delete_video=${this.purgeDeleteVideo}&delete_snapshots=${this.purgeDeleteSnapshots}` +
+          `&delete_alert_images=${this.purgeDeleteAlertImages}`;
       }
       if (this.purgeObjectLabel) url += `&object_label=${encodeURIComponent(this.purgeObjectLabel)}`;
       if (this.purgeCamera) url += `&camera=${encodeURIComponent(this.purgeCamera)}`;
@@ -455,6 +468,7 @@ function adminApp() {
         const parts = [];
         if (this.purgeDeleteVideo) parts.push(`${c.raw_events_video_files + c.visits_video_files} video files`);
         if (this.purgeDeleteSnapshots) parts.push(`${c.raw_events_snapshots} event snapshots`);
+        if (this.purgeDeleteAlertImages) parts.push(`${c.visits_alert_images} alert-analysis image sets`);
         if (parts.length === 0) {
           this.purgeResult = "Select at least one category to clear (or check \"Delete ALL\").";
           return;
@@ -486,6 +500,7 @@ function adminApp() {
       this.reportError = "";
       try {
         let url = `/reports/generate?source=${this.reportSource}&hours=${this.reportHours}&include_image=${this.reportIncludeImage}`;
+        if (this.reportSource === "visits") url += `&include_alert_images=${this.reportIncludeAlertImages}`;
         if (this.reportObjectLabel) url += `&object_label=${encodeURIComponent(this.reportObjectLabel)}`;
         const r = await fetch(url, { headers: this._headers() });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);

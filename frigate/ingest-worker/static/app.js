@@ -108,6 +108,10 @@ function eventsApp() {
     // visit/alert view (openVisitLightbox's own shape: {id, representative_event_id, has_video,
     // has_image, ai_status}). Null whenever the lightbox wasn't reached that way.
     lightboxParentVisit: null,
+    // URLs for the alert stage's own gathered high-res crops (STORE_ALERT_IMAGES), for the visit
+    // branch only -- always empty for a plain event (no visit-level image series exists there) or
+    // when the option was off/nothing was stored for this visit.
+    lightboxAlertImageUrls: [],
 
     init() {
       this.fetchVersionInfo();
@@ -612,6 +616,12 @@ function eventsApp() {
       return `/media/video/visit/${visitId}?api_key=${encodeURIComponent(this.apiKey)}`;
     },
 
+    // One of the alert stage's own gathered high-res crops (STORE_ALERT_IMAGES) -- see
+    // lightboxAlertImageUrls, populated from GET /visits/{id}/sightings' alert_image_count.
+    alertImageUrl(visitId, index) {
+      return `/media/alert-image/${visitId}/${index}?api_key=${encodeURIComponent(this.apiKey)}`;
+    },
+
     // The lightbox is shared between the Events and Visits views -- lightboxEvent.visitId is
     // only set when opened from a visit card, in which case its video (if any) lives under a
     // completely separate visit-video endpoint, not the per-event one.
@@ -653,6 +663,7 @@ function eventsApp() {
       this.lightboxMode = event.has_video ? "video" : "image";
       this.lightboxGroups = [];
       this.lightboxConnectedEvents = [];
+      this.lightboxAlertImageUrls = [];
       // A visit's own ai_status (event.ai_status) only reflects its single earliest-linked
       // event -- a second, different-object-type event in the same visit can still be
       // analyzed (or still pending) independently of that one, so the visit branch always
@@ -672,11 +683,12 @@ function eventsApp() {
           ]);
           if (sightingsResp.ok) {
             const data = await sightingsResp.json();
-            // Prefer the visit's own alert-stage analysis (AI_ALERTS_ENABLED, the 2x2 grid) when
-            // it's ready -- it's the richer, change-aware result this whole view exists for.
-            // Falls back to the per-event sightings (AI_EVENTS_STAGE_ENABLED) when the alert
-            // stage is off or hasn't finished this visit yet, so the lightbox never shows nothing
-            // just because one specific stage is still catching up.
+            // Prefer the visit's own alert-stage analysis (AI_ALERTS_ENABLED, a series of
+            // high-res per-event crops) when it's ready -- it's the richer, change-aware result
+            // this whole view exists for. Falls back to the per-event sightings
+            // (AI_EVENTS_STAGE_ENABLED) when the alert stage is off or hasn't finished this visit
+            // yet, so the lightbox never shows nothing just because one specific stage is still
+            // catching up.
             if (data.alert_sighting) {
               this.lightboxGroups = [{
                 title: `${this.titleCase(data.alert_sighting.object_label)} (alert analysis)`,
@@ -687,6 +699,13 @@ function eventsApp() {
                 title: this.titleCase(s.object_label), fields: this.sightingFields(s),
               }));
             }
+            // The actual high-res images the alert stage analyzed (STORE_ALERT_IMAGES) -- a
+            // gallery strip, separate from the description text above, only populated when that
+            // option was on and produced at least one file for this visit.
+            this.lightboxAlertImageUrls = Array.from(
+              { length: data.alert_image_count || 0 },
+              (_, i) => this.alertImageUrl(event.visitId, i),
+            );
           }
           if (eventsResp.ok) {
             // Earliest-first -- GET /events itself orders newest-first for normal browsing, but
@@ -717,6 +736,7 @@ function eventsApp() {
       this.lightboxGroups = [];
       this.lightboxConnectedEvents = [];
       this.lightboxParentVisit = null;
+      this.lightboxAlertImageUrls = [];
     },
 
     // A sighting is just {object_label, description} in this universal model -- no per-type

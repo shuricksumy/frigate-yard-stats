@@ -60,7 +60,8 @@ def _make_old_visit_with_everything(days_old=100, camera="pytest-retention-cam")
         "det_ids": [det_id],
     })
     db._execute(
-        "UPDATE yard_stats.visits SET start_ts = %s, video_path = '/data/video-alerts/fake.mp4' "
+        "UPDATE yard_stats.visits SET start_ts = %s, video_path = '/data/video-alerts/fake.mp4', "
+        "alert_image_paths = '/data/alert-images/fake1.jpg,/data/alert-images/fake2.jpg' "
         "WHERE id = %s",
         (_old_ts(days_old), visit_id),
     )
@@ -129,6 +130,7 @@ def test_purge_media_older_than_preview_matches_execute_counts(conn_ok):
         assert preview["raw_events_video_files"] >= 1
         assert preview["raw_events_snapshots"] >= 1
         assert preview["visits_video_files"] >= 1
+        assert preview["visits_alert_images"] >= 1
         assert "video_files_deleted" not in preview  # dry run never reports an action taken
 
         result = db.purge_media_older_than(cutoff, execute=True)
@@ -138,15 +140,17 @@ def test_purge_media_older_than_preview_matches_execute_counts(conn_ok):
         # production behavior for a path left over from before VIDEO_STORAGE_PATH existed. This
         # only exercises that the key is reported, not real file I/O.
         assert result["video_files_deleted"] == 0
+        assert result["alert_image_files_deleted"] == 0
     finally:
         _cleanup(event_id, visit_id)
 
 
-def test_purge_media_older_than_default_flags_clear_video_only(conn_ok):
-    # Defaults: delete_video on, delete_snapshots off -- the smaller, still-useful-for-a-quick-look
-    # snapshot survives a default-flags purge; only the large video files go. Visits carry no
-    # clearable image media of their own anymore (the composite grid/GIF were removed entirely --
-    # see CLAUDE.md's "Visit preview"), only video.
+def test_purge_media_older_than_default_flags_clear_video_and_alert_images(conn_ok):
+    # Defaults: delete_video on, delete_snapshots off, delete_alert_images on -- the smaller,
+    # still-useful-for-a-quick-look snapshot survives a default-flags purge; the large video files
+    # and the alert stage's own gathered high-res crops (STORE_ALERT_IMAGES) both go. Visits carry
+    # no other clearable image media of their own (the composite grid/GIF were removed entirely --
+    # see CLAUDE.md's "Visit preview").
     event_id, visit_id = _make_old_visit_with_everything()
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=60)
@@ -161,6 +165,7 @@ def test_purge_media_older_than_default_flags_clear_video_only(conn_ok):
         visit = db.get_visit(visit_id)
         assert visit is not None
         assert visit["video_path"] is None
+        assert visit["alert_image_paths"] is None
 
         sighting = db.get_visit_alert_sighting(visit_id)
         assert sighting is not None  # alert-stage text analysis fully preserved
@@ -170,11 +175,13 @@ def test_purge_media_older_than_default_flags_clear_video_only(conn_ok):
         _cleanup(event_id, visit_id)
 
 
-def test_purge_media_older_than_both_flags_clear_everything(conn_ok):
+def test_purge_media_older_than_all_flags_clear_everything(conn_ok):
     event_id, visit_id = _make_old_visit_with_everything()
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=60)
-        db.purge_media_older_than(cutoff, execute=True, delete_video=True, delete_snapshots=True)
+        db.purge_media_older_than(
+            cutoff, execute=True, delete_video=True, delete_snapshots=True, delete_alert_images=True,
+        )
 
         event = db.get_raw_event(event_id)
         assert event["video_path"] is None
@@ -182,17 +189,20 @@ def test_purge_media_older_than_both_flags_clear_everything(conn_ok):
 
         visit = db.get_visit(visit_id)
         assert visit["video_path"] is None
+        assert visit["alert_image_paths"] is None
     finally:
         _cleanup(event_id, visit_id)
 
 
 def test_purge_media_older_than_snapshots_only(conn_ok):
-    # Only delete_snapshots on -- video left alone, confirming the two categories are truly
-    # independent, not a bundled pair.
+    # Only delete_snapshots on -- video and alert images left alone, confirming all three
+    # categories are truly independent, not a bundled set.
     event_id, visit_id = _make_old_visit_with_everything()
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=60)
-        db.purge_media_older_than(cutoff, execute=True, delete_video=False, delete_snapshots=True)
+        db.purge_media_older_than(
+            cutoff, execute=True, delete_video=False, delete_snapshots=True, delete_alert_images=False,
+        )
 
         event = db.get_raw_event(event_id)
         assert event["crop_image_base64"] is None  # cleared
@@ -200,6 +210,44 @@ def test_purge_media_older_than_snapshots_only(conn_ok):
 
         visit = db.get_visit(visit_id)
         assert visit["video_path"] is not None  # untouched
+        assert visit["alert_image_paths"] is not None  # untouched
+    finally:
+        _cleanup(event_id, visit_id)
+
+
+def test_purge_media_older_than_alert_images_only(conn_ok):
+    # Only delete_alert_images on -- video/snapshots left alone.
+    event_id, visit_id = _make_old_visit_with_everything()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+        db.purge_media_older_than(
+            cutoff, execute=True, delete_video=False, delete_snapshots=False, delete_alert_images=True,
+        )
+
+        event = db.get_raw_event(event_id)
+        assert event["crop_image_base64"] is not None  # untouched
+        assert event["video_path"] is not None  # untouched
+
+        visit = db.get_visit(visit_id)
+        assert visit["video_path"] is not None  # untouched
+        assert visit["alert_image_paths"] is None  # cleared
+    finally:
+        _cleanup(event_id, visit_id)
+
+
+def test_purge_media_older_than_object_label_never_touches_alert_images(conn_ok):
+    # Same reasoning as video/snapshots being visits-scoped -- alert_image_paths lives on visits,
+    # which are never touched at all under an object_label-scoped purge (a visit can span multiple
+    # distinct object types, so there's no single-type-safe way to decide it belongs to one purge).
+    event_id, visit_id = _make_old_visit_with_everything()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+        preview = db.purge_media_older_than(cutoff, execute=False, object_label="car")
+        assert preview["visits_alert_images"] == 0
+
+        db.purge_media_older_than(cutoff, execute=True, object_label="car", delete_alert_images=True)
+        visit = db.get_visit(visit_id)
+        assert visit["alert_image_paths"] is not None  # untouched
     finally:
         _cleanup(event_id, visit_id)
 
@@ -208,10 +256,14 @@ def test_purge_media_older_than_never_touches_recent_rows(conn_ok):
     event_id, visit_id = _make_old_visit_with_everything(days_old=1)
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=60)
-        db.purge_media_older_than(cutoff, execute=True, delete_video=True, delete_snapshots=True)
+        db.purge_media_older_than(
+            cutoff, execute=True, delete_video=True, delete_snapshots=True, delete_alert_images=True,
+        )
         event = db.get_raw_event(event_id)
         assert event["crop_image_base64"] is not None
         assert event["video_path"] is not None
+        visit = db.get_visit(visit_id)
+        assert visit["alert_image_paths"] is not None
     finally:
         _cleanup(event_id, visit_id)
 

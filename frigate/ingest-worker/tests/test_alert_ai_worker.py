@@ -297,6 +297,39 @@ def test_get_visit_alert_sighting_returns_result(conn_ok):
         _cleanup_visit(visit_id, event_id)
 
 
+# ---- db.set_visit_alert_image_paths / get_visit_alert_image_paths ----
+
+def test_get_visit_alert_image_paths_empty_before_any_stored(conn_ok):
+    visit_id, event_id = _make_visit()
+    try:
+        assert db.get_visit_alert_image_paths(visit_id) == []
+    finally:
+        _cleanup_visit(visit_id, event_id)
+
+
+def test_set_and_get_visit_alert_image_paths_round_trip(conn_ok):
+    visit_id, event_id = _make_visit()
+    try:
+        db.set_visit_alert_image_paths(visit_id, ["/data/alert-images/a.jpg", "/data/alert-images/b.jpg"])
+        assert db.get_visit_alert_image_paths(visit_id) == [
+            "/data/alert-images/a.jpg", "/data/alert-images/b.jpg",
+        ]
+    finally:
+        _cleanup_visit(visit_id, event_id)
+
+
+def test_set_visit_alert_image_paths_empty_list_clears_to_null(conn_ok):
+    visit_id, event_id = _make_visit()
+    try:
+        db.set_visit_alert_image_paths(visit_id, ["/data/alert-images/a.jpg"])
+        db.set_visit_alert_image_paths(visit_id, [])
+        assert db.get_visit_alert_image_paths(visit_id) == []
+        row = db.get_visit(visit_id)
+        assert row["alert_image_paths"] is None
+    finally:
+        _cleanup_visit(visit_id, event_id)
+
+
 # ---- alert_ai_worker.parse_alert_sighting_response ----
 
 def test_parse_alert_sighting_response_uses_raw_content_and_objects_label():
@@ -378,8 +411,10 @@ def test_gather_alert_images_skips_individual_failures(monkeypatch):
 
     monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", fake_crop)
     events = [{"id": 1, "det_id": "d1"}, {"id": 2, "det_id": "d2"}, {"id": 3, "det_id": "d3"}]
-    images = alert_ai_worker._gather_alert_images(events)
-    assert images == ["crop-for-1", "crop-for-3"]
+    gathered = alert_ai_worker._gather_alert_images(events)
+    # (event, image) pairs, not a bare image list -- so alert_images.store_alert_images can name
+    # each stored file after its own source event even when a middle one was skipped.
+    assert gathered == [(events[0], "crop-for-1"), (events[2], "crop-for-3")]
 
 
 def test_gather_alert_images_empty_when_all_fail(monkeypatch):
@@ -446,6 +481,92 @@ def test_process_claimed_visit_success(monkeypatch):
     assert inserted[0][:3] == (9, "car", "orange suv, parked")
     assert not failed
     assert calls[0] == "http://llama.test/vehicle-slot/v1/chat/completions"
+
+
+def test_process_claimed_visit_stores_images_when_enabled(monkeypatch):
+    monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
+    monkeypatch.setattr(config, "ALERT_AI_INITIAL_WAIT_SECONDS", 0)
+    monkeypatch.setattr(db, "get_raw_events_for_visit", lambda visit_id: [
+        {"id": 100, "det_id": "d1", "objects": "car", "start_ts": 10, "end_ts": 20},
+    ])
+    monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", lambda event, **k: "high-res-base64")
+    monkeypatch.setattr(alert_ai_worker.ai_worker, "_chat_request", lambda *a, **k: {"choices": [{"message": {"content": "orange suv"}}]})
+    monkeypatch.setattr(db, "complete_visit_sighting", lambda *a, **k: 1)
+    monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: None)
+
+    stored = {}
+    monkeypatch.setattr(
+        alert_ai_worker.alert_images, "store_alert_images",
+        lambda visit, events, images: stored.update(visit=visit, events=events, images=images) or ["p1"],
+    )
+    recorded = []
+    monkeypatch.setattr(db, "set_visit_alert_image_paths", lambda visit_id, paths: recorded.append((visit_id, paths)))
+
+    profile = {
+        "object_types": {
+            "car": {**PROFILE["object_types"]["car"], "store_alert_images": True},
+        },
+    }
+    row = {"id": 9, "objects": "car", "det_id": "d1", "alert_ai_attempt_count": 0, "cameras": "outside", "start_ts": 10}
+    alert_ai_worker.process_claimed_visit(row, profile)
+
+    assert stored["images"] == ["high-res-base64"]
+    assert stored["events"] == [{"id": 100, "det_id": "d1", "objects": "car", "start_ts": 10, "end_ts": 20}]
+    assert recorded == [(9, ["p1"])]
+
+
+def test_process_claimed_visit_does_not_store_images_by_default(monkeypatch):
+    monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
+    monkeypatch.setattr(config, "ALERT_AI_INITIAL_WAIT_SECONDS", 0)
+    monkeypatch.setattr(db, "get_raw_events_for_visit", lambda visit_id: [
+        {"id": 100, "det_id": "d1", "objects": "car", "start_ts": 10, "end_ts": 20},
+    ])
+    monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", lambda event, **k: "high-res-base64")
+    monkeypatch.setattr(alert_ai_worker.ai_worker, "_chat_request", lambda *a, **k: {"choices": [{"message": {"content": "orange suv"}}]})
+    monkeypatch.setattr(db, "complete_visit_sighting", lambda *a, **k: 1)
+    monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: None)
+
+    store_calls = []
+    monkeypatch.setattr(alert_ai_worker.alert_images, "store_alert_images", lambda *a, **k: store_calls.append(1))
+    record_calls = []
+    monkeypatch.setattr(db, "set_visit_alert_image_paths", lambda *a, **k: record_calls.append(1))
+
+    row = {"id": 9, "objects": "car", "det_id": "d1", "alert_ai_attempt_count": 0, "cameras": "outside", "start_ts": 10}
+    alert_ai_worker.process_claimed_visit(row, PROFILE)  # PROFILE has no store_alert_images key
+
+    assert not store_calls
+    assert not record_calls
+
+
+def test_process_claimed_visit_storage_failure_is_non_fatal(monkeypatch):
+    # A disk-write failure (full disk, permissions) shouldn't take down an AI analysis that already
+    # has its images in hand and is about to (or already did) succeed.
+    monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
+    monkeypatch.setattr(config, "ALERT_AI_INITIAL_WAIT_SECONDS", 0)
+    monkeypatch.setattr(db, "get_raw_events_for_visit", lambda visit_id: [
+        {"id": 100, "det_id": "d1", "objects": "car", "start_ts": 10, "end_ts": 20},
+    ])
+    monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", lambda event, **k: "high-res-base64")
+    monkeypatch.setattr(alert_ai_worker.ai_worker, "_chat_request", lambda *a, **k: {"choices": [{"message": {"content": "orange suv"}}]})
+    inserted = []
+    monkeypatch.setattr(db, "complete_visit_sighting", lambda *a, **k: inserted.append(1) or 1)
+    failed = []
+    monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: failed.append(1))
+
+    def _boom(*a, **k):
+        raise OSError("disk full")
+    monkeypatch.setattr(alert_ai_worker.alert_images, "store_alert_images", _boom)
+
+    profile = {
+        "object_types": {
+            "car": {**PROFILE["object_types"]["car"], "store_alert_images": True},
+        },
+    }
+    row = {"id": 9, "objects": "car", "det_id": "d1", "alert_ai_attempt_count": 0, "cameras": "outside", "start_ts": 10}
+    alert_ai_worker.process_claimed_visit(row, profile)
+
+    assert inserted == [1]  # analysis still completed
+    assert not failed
 
 
 def test_process_claimed_visit_sends_one_image_per_selected_event(monkeypatch):

@@ -17,7 +17,7 @@ rather than raising.
 Two families of settings:
   - Plain per-row settings (telegram_events_mode/telegram_alerts_mode/ai_events_stage_enabled/
     ai_alerts_enabled/crop_disabled/crop_frame_offset_pct/crop_padding_pct/
-    frigate_snapshot_enabled) -- resolved fresh for whatever row is
+    frigate_snapshot_enabled/store_alert_images) -- resolved fresh for whatever row is
     currently being processed, since the worker that owns that row already claims every type
     regardless (crop_worker) or already knows which types to ask an existing
     object_types-aware claim function for (ai_worker/alert_ai_worker).
@@ -98,6 +98,14 @@ def store_video_enabled(profile: dict | None, object_label: str | None) -> bool:
 
 def store_video_alerts_enabled(profile: dict | None, object_label: str | None) -> bool:
     return _resolve(profile, object_label, "store_video_alerts", config.STORE_VIDEO_ALERTS)
+
+
+def store_alert_images(profile: dict | None, object_label: str | None) -> bool:
+    # Plain per-row resolution, same shape as crop_disabled -- gates a synchronous side effect
+    # inside the existing alert_ai_worker thread (persisting its already-gathered images to disk),
+    # not a separate poll thread/claim query, so this doesn't need the claim-filter/any_*_enabled
+    # machinery store_video/store_video_alerts have.
+    return _resolve(profile, object_label, "store_alert_images", config.STORE_ALERT_IMAGES)
 
 
 def any_ai_events_stage_enabled(profile: dict | None) -> bool:

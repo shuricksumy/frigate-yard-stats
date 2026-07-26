@@ -294,6 +294,23 @@ ALERT_AI_INITIAL_WAIT_SECONDS = 5.0
 # sane starting default; a visit with lots of tracker re-ID/label-flicker noise would otherwise
 # send an unbounded, cost-scaling number of near-duplicate images for no analytical benefit.
 ALERT_AI_MAX_IMAGES = 4
+# Opt-in filesystem persistence of the same high-res crops gathered above -- off by default (they
+# are ephemeral, built/sent/discarded, unless this is turned on). Deliberately NOT an env var, same
+# reasoning as STORE_VIDEO/CROP_DISABLED -- this is a setting you'd realistically want different
+# per Frigate object type, so it's resolved via profile_config.store_alert_images (a plain
+# per-row resolver like crop_disabled, not a claim-filter/thread-gating setting -- persisting to
+# disk is a synchronous side effect inside the existing alert_ai_worker thread, not a separate poll
+# loop/queue stage). This literal is only the last-resort fallback for a deployment that never sets
+# it in profiles.yaml at all.
+STORE_ALERT_IMAGES = False
+# Mount point inside the container -- pair with a bind mount in docker-compose.yml
+# (ALERT_IMAGES_STORAGE_HOST_PATH on the host side). A genuinely separate storage location from
+# VIDEO_STORAGE_PATH/VIDEO_STORAGE_PATH_ALERTS (own mount point), not a subfolder of either, so
+# this flow's disk usage can be measured/managed independently -- same reasoning
+# VIDEO_STORAGE_PATH_ALERTS already established. Files are laid out as
+# {ALERT_IMAGES_STORAGE_PATH}/{camera}/{YYYY}/{MM}/{DD}/visit-{object_type}-{visit_id}-{index}-
+# {event_id}.jpg -- see alert_images.py.
+ALERT_IMAGES_STORAGE_PATH = _env("ALERT_IMAGES_STORAGE_PATH", "/data/alert-images")
 # llama_slot_proxy's own base URL, called directly instead of going through n8n -- e.g.
 # http://llama-proxy-host:port. Only required when AI_EVENTS_STAGE_ENABLED or AI_ALERTS_ENABLED is
 # true.

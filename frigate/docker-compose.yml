@@ -72,9 +72,10 @@ services:
       # are ALL configured in profiles.yaml now, not here -- see that file's own comments and
       # CLAUDE.md's "Per-object-type overrides" section. Two categories moved there:
       # per-object-type settings (crop_disabled/crop_frame_offset_pct/crop_padding_pct/
-      # frigate_snapshot_enabled, store_video/store_video_alerts, telegram_events_mode/
-      # telegram_alerts_mode/ai_events_stage_enabled/ai_alerts_enabled, provider/model/chat_path
-      # and alert_provider/alert_model/alert_chat_path), each resolved fresh per row/type; and plain
+      # frigate_snapshot_enabled, store_video/store_video_alerts/store_alert_images,
+      # telegram_events_mode/telegram_alerts_mode/ai_events_stage_enabled/ai_alerts_enabled,
+      # provider/model/chat_path and alert_provider/alert_model/alert_chat_path), each resolved
+      # fresh per row/type; and plain
       # technical tuning knobs with no per-type meaning at all (parallel_limit/stale_minutes/
       # max_attempts/crop_initial_wait_seconds/max_crop_dimension/thumbnail_max_dimension/
       # poll_interval_seconds, retention_months/retention_check_interval_seconds, the video_*/
@@ -89,6 +90,10 @@ services:
       API_KEY: ${API_KEY}
       VIDEO_STORAGE_PATH: /data/video
       VIDEO_STORAGE_PATH_ALERTS: /data/video-alerts
+      # STORE_ALERT_IMAGES (profiles.yaml, off by default) -- own storage location, not a
+      # subfolder of either video path above, same "measure/manage independently" reasoning
+      # VIDEO_STORAGE_PATH_ALERTS already established.
+      ALERT_IMAGES_STORAGE_PATH: /data/alert-images
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
       # Defaults to Telegram's own cloud API. Point at the optional telegram-bot-api service
@@ -125,6 +130,10 @@ services:
       # Separate bind mount for the alerts/visits flow (STORE_VIDEO_ALERTS) -- its own directory,
       # not a subfolder of the one above, so the two flows' storage is genuinely independent.
       - ${VIDEO_STORAGE_ALERTS_HOST_PATH:-./video-storage-alerts}:/data/video-alerts
+      # Bind mount for the alert stage's own gathered high-res crops -- only used when
+      # STORE_ALERT_IMAGES=true (profiles.yaml), but always mounted so toggling the flag doesn't
+      # require a compose file change, just a restart (same convention as the video mounts above).
+      - ${ALERT_IMAGES_STORAGE_HOST_PATH:-./alert-images}:/data/alert-images
       # Internal AI stage's object-type/prompt/model config (see CLAUDE.md's "Internal AI stage"
       # section) -- overrides the image-baked default at the same path
       # (AI_STAGE_PROFILE_PATH=/app/profiles.yaml), so editing frigate/profiles.yaml and

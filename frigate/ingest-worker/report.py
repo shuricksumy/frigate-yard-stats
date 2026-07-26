@@ -1,9 +1,13 @@
+import base64
 import html as html_lib
+import logging
 from datetime import datetime
 
 import config
 import crop
 import db
+
+logger = logging.getLogger(__name__)
 
 
 def _esc(value) -> str:
@@ -50,6 +54,9 @@ def _group_by_visit(sightings: list) -> list[dict]:
             groups[key] = {
                 "start_ts": row["start_ts"], "camera": row["camera"],
                 "crop_image_base64": row["crop_image_base64"],
+                # Same value on every sighting row in a group (joined off the shared visit_id, not
+                # per-sighting) -- carried once at group level rather than re-read per sighting.
+                "alert_image_paths": row.get("alert_image_paths"),
                 "sightings": [],
             }
             order.append(key)
@@ -65,6 +72,30 @@ def _group_by_visit(sightings: list) -> list[dict]:
     return [groups[key] for key in order]
 
 
+def _alert_images_cell(alert_image_paths: str | None, lightboxes: list, counter: list) -> str:
+    # A row of small additional thumbnails for the alert stage's own gathered high-res crops
+    # (STORE_ALERT_IMAGES), underneath the representative event's own image cell -- reads each
+    # file fresh off disk and encodes it for this one report generation, same as the representative
+    # crop's own thumbnail/lightbox pair (_img_cell), just for however many alert images exist.
+    # A path that's gone (e.g. already cleared by a retention purge since the images were gathered)
+    # is silently skipped rather than failing the whole report -- this is best-effort extra
+    # richness, not a required field.
+    if not alert_image_paths:
+        return ""
+    thumbs = []
+    for path in alert_image_paths.split(","):
+        try:
+            with open(path, "rb") as f:
+                image_base64 = base64.b64encode(f.read()).decode()
+        except OSError:
+            logger.warning("Alert image file missing/unreadable for report, skipping: %s", path)
+            continue
+        thumbs.append(_img_cell(image_base64, lightboxes, counter))
+    if not thumbs:
+        return ""
+    return '<div style="display:flex;gap:4px;flex-wrap:wrap;margin-top:4px;">' + "".join(thumbs) + "</div>"
+
+
 def _build_alert_rows(sightings: list, lightboxes: list, counter: list) -> str:
     # Newest first -- matches get_report_data's own ORDER BY re.start_ts DESC and the web report
     # UI's convention (most recent activity at the top, not buried at the bottom of a long window).
@@ -75,8 +106,10 @@ def _build_alert_rows(sightings: list, lightboxes: list, counter: list) -> str:
         # "person: wearing a red jacket") -- a visit grouping several distinct object types shows
         # all of them, joined, rather than picking just one.
         summary = "; ".join(f"{s['object_label']}: {s['description']}" for s in g["sightings"] if s["description"]) or None
+        image_cell = _img_cell(g["crop_image_base64"], lightboxes, counter)
+        image_cell += _alert_images_cell(g.get("alert_image_paths"), lightboxes, counter)
         rows.append(
-            f"<tr><td>{_img_cell(g['crop_image_base64'], lightboxes, counter)}</td>"
+            f"<tr><td>{image_cell}</td>"
             f"<td>{_fmt_time(g['start_ts'])}</td><td>{_esc(g['camera'])}</td>"
             f"<td>{_esc(summary)}</td></tr>"
         )
@@ -85,14 +118,17 @@ def _build_alert_rows(sightings: list, lightboxes: list, counter: list) -> str:
 
 def generate_report(
     start: datetime, end: datetime, source: str = "events", include_image: bool = True,
-    object_label: str | None = None,
+    object_label: str | None = None, include_alert_images: bool = False,
 ) -> dict:
     # include_image=false drops the row image entirely (see db.get_report_data) -- comes back NULL
     # at the SQL level, so _img_cell's existing "(no image)" fallback applies with no separate
     # rendering path needed. object_label (optional) restricts the report to a single Frigate
     # object type, e.g. a "cars only" report alongside the default "every type" one -- see
-    # db.get_report_data.
-    data = db.get_report_data(start, end, source, include_image, object_label)
+    # db.get_report_data. include_alert_images (source="visits" only -- ignored/no-op under
+    # source="events", where there's no visit-level image series to include) embeds the alert
+    # stage's own gathered high-res crops as a thumbnail strip under each alert row's main image,
+    # when STORE_ALERT_IMAGES produced any for that visit -- see _alert_images_cell.
+    data = db.get_report_data(start, end, source, include_image, object_label, include_alert_images)
     sightings = data["sightings"]
 
     lightboxes: list[str] = []

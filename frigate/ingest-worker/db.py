@@ -1018,6 +1018,16 @@ def run_retention_cleanup(retention_months: int) -> None:
             (retention_months,), fetch=True,
         )
     ]
+    # Same reasoning as video_path above -- a visit's alert_image_paths (STORE_ALERT_IMAGES) is
+    # comma-joined, so each row can contribute several individual files, not just one.
+    for row in _execute(
+        """
+        SELECT alert_image_paths FROM yard_stats.visits
+        WHERE start_ts < now() - (%s || ' months')::interval AND alert_image_paths IS NOT NULL
+        """,
+        (retention_months,), fetch=True,
+    ):
+        video_paths += row["alert_image_paths"].split(",")
     deleted_files = _delete_video_files(video_paths)
 
     _execute(
@@ -1079,8 +1089,8 @@ def purge_older_than(
     # object_label (optional) scopes this purge to a single Frigate object type -- deliberately
     # raw_events/sightings only. visits/visit_sightings are never touched when object_label is set:
     # a visit can span multiple distinct object types (see "Visit grouping" in CLAUDE.md), so there
-    # is no single-type-safe way to decide whether the visit *row itself* (or its own composite-grid
-    # media) belongs to just one type's purge -- only the type-scoped raw_events/sightings have an
+    # is no single-type-safe way to decide whether the visit *row itself* belongs to just one
+    # type's purge -- only the type-scoped raw_events/sightings have an
     # unambiguous single label to filter on. Purging "all types" (object_label=None) still covers
     # visits/visit_sightings exactly as before this param existed.
     #
@@ -1139,6 +1149,13 @@ def purge_older_than(
                 [cutoff, *visits_camera_params], fetch=True,
             )
         ]
+        # Comma-joined -- each matching row can contribute several individual files (see
+        # visits.alert_image_paths / STORE_ALERT_IMAGES).
+        for row in _execute(
+            f"SELECT alert_image_paths FROM yard_stats.visits WHERE start_ts < %s AND alert_image_paths IS NOT NULL {visits_camera_clause}",
+            [cutoff, *visits_camera_params], fetch=True,
+        ):
+            video_paths += row["alert_image_paths"].split(",")
     counts["video_files"] = len(video_paths)
 
     if execute:
@@ -1198,6 +1215,7 @@ def purge_media_older_than(
     camera: str | None = None,
     delete_video: bool = True,
     delete_snapshots: bool = False,
+    delete_alert_images: bool = True,
 ) -> dict:
     # POST /retention/purge's only_media=true mode (the default) -- clears stored media for rows
     # older than cutoff, but keeps the rows themselves and every text field on them (AI analysis,
@@ -1205,13 +1223,14 @@ def purge_media_older_than(
     # sightings/visit_sightings at all -- those tables carry no media columns of their own, only
     # text.
     #
-    # Two independently toggleable categories -- video (raw_events.video_path + visits.video_path,
-    # the actual files on disk) and snapshots (raw_events.crop_image_base64, "Event Snapshots" --
-    # the per-event still). Defaults (video on, snapshots off) match this project's own judgment on
-    # which artifacts are safe to routinely discard (large, rarely revisited) vs. which are worth
-    # keeping longer (small, still useful for a quick visual check). (The visit-level composite
-    # grid/GIF this used to also cover were removed entirely -- see CLAUDE.md's "Visit preview";
-    # visits carry no clearable image media of their own anymore, only video.)
+    # Three independently toggleable categories -- video (raw_events.video_path + visits.video_path,
+    # the actual files on disk), snapshots (raw_events.crop_image_base64, "Event Snapshots" -- the
+    # per-event still), and alert images (visits.alert_image_paths, STORE_ALERT_IMAGES -- the alert
+    # stage's own gathered high-res crops, comma-joined, several files per visit). Defaults (video
+    # and alert images on, snapshots off) match this project's own judgment on which artifacts are
+    # safe to routinely discard (large, rarely revisited) vs. which are worth keeping longer (small,
+    # still useful for a quick visual check). (The visit-level composite grid/GIF this used to also
+    # cover were removed entirely -- see CLAUDE.md's "Visit preview".)
     #
     # object_label (optional), same scoping decision as purge_older_than: only raw_events (a
     # single-type-per-row concept) are filtered by it -- visits (which can span multiple object
@@ -1247,6 +1266,10 @@ def purge_media_older_than(
             f"SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s AND video_path IS NOT NULL {visits_camera_clause}",
             [cutoff, *visits_camera_params], fetch=True,
         )[0]["c"],
+        "visits_alert_images": 0 if object_label else _execute(
+            f"SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s AND alert_image_paths IS NOT NULL {visits_camera_clause}",
+            [cutoff, *visits_camera_params], fetch=True,
+        )[0]["c"],
     }
 
     if execute:
@@ -1267,6 +1290,16 @@ def purge_media_older_than(
                 ]
             deleted_files = _delete_video_files(video_paths)
 
+        deleted_alert_image_files = 0
+        if delete_alert_images and not object_label:
+            alert_image_paths = []
+            for row in _execute(
+                f"SELECT alert_image_paths FROM yard_stats.visits WHERE start_ts < %s AND alert_image_paths IS NOT NULL {visits_camera_clause}",
+                [cutoff, *visits_camera_params], fetch=True,
+            ):
+                alert_image_paths += row["alert_image_paths"].split(",")
+            deleted_alert_image_files = _delete_video_files(alert_image_paths)
+
         # raw_events: video_path and/or crop_image_base64 (Event Snapshots) -- one UPDATE covering
         # whichever of the two toggles is actually on, rather than one query per column.
         re_sets, re_wheres = [], []
@@ -1285,22 +1318,30 @@ def purge_media_older_than(
                 [cutoff, *type_params, *camera_params],
             )
 
-        # visits: video_path only now -- never touched at all when object_label is set, same
-        # reasoning as the counts above.
-        if not object_label and delete_video:
+        # visits: video_path and/or alert_image_paths -- never touched at all when object_label is
+        # set, same reasoning as the counts above.
+        v_sets, v_wheres = [], []
+        if delete_video:
+            v_sets.append("video_path = NULL")
+            v_wheres.append("video_path IS NOT NULL")
+        if delete_alert_images:
+            v_sets.append("alert_image_paths = NULL")
+            v_wheres.append("alert_image_paths IS NOT NULL")
+        if not object_label and v_sets:
             _execute(
                 f"""
-                UPDATE yard_stats.visits SET video_path = NULL
-                WHERE start_ts < %s AND video_path IS NOT NULL {visits_camera_clause}
+                UPDATE yard_stats.visits SET {', '.join(v_sets)}
+                WHERE start_ts < %s AND ({' OR '.join(v_wheres)}) {visits_camera_clause}
                 """,
                 [cutoff, *visits_camera_params],
             )
 
         counts["video_files_deleted"] = deleted_files
+        counts["alert_image_files_deleted"] = deleted_alert_image_files
         logger.info(
             "Media-only purge executed (cutoff=%s, object_label=%s, camera=%s, delete_video=%s, "
-            "delete_snapshots=%s, counts=%s)",
-            cutoff, object_label, camera, delete_video, delete_snapshots, counts,
+            "delete_snapshots=%s, delete_alert_images=%s, counts=%s)",
+            cutoff, object_label, camera, delete_video, delete_snapshots, delete_alert_images, counts,
         )
 
     return counts
@@ -2146,10 +2187,11 @@ def fail_alert_ai_event(visit_id: int, max_attempts: int) -> dict:
 
 
 def get_visit_alert_sighting(visit_id: int) -> dict | None:
-    # The visit's own alert-stage (composite grid) analysis, if AI_ALERTS_ENABLED has produced
-    # one -- used by GET /visits/{id}/sightings so the web UI's Visits-tab lightbox can prefer
-    # this over the representative event's own per-event sighting (see get_sightings_for_visit),
-    # falling back to that when this is null (alert stage off, or not finished yet for this visit).
+    # The visit's own alert-stage analysis (a series of high-res per-event crops, see
+    # alert_ai_worker.py), if AI_ALERTS_ENABLED has produced one -- used by
+    # GET /visits/{id}/sightings so the web UI's Visits-tab lightbox can prefer this over the
+    # representative event's own per-event sighting (see get_sightings_for_visit), falling back to
+    # that when this is null (alert stage off, or not finished yet for this visit).
     rows = _execute(
         """
         SELECT id, visit_id, object_label, description
@@ -2161,9 +2203,32 @@ def get_visit_alert_sighting(visit_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
+def set_visit_alert_image_paths(visit_id: int, paths: list[str]) -> None:
+    # Persists the alert stage's gathered high-res crops' filesystem paths (STORE_ALERT_IMAGES,
+    # see alert_images.py) -- comma-joined, same convention as visits.objects. Called once per
+    # successful gather in alert_ai_worker.process_claimed_visit; an empty list clears the column
+    # back to NULL rather than storing an empty string.
+    _execute(
+        "UPDATE yard_stats.visits SET alert_image_paths = %s WHERE id = %s",
+        (",".join(paths) if paths else None, visit_id),
+    )
+
+
+def get_visit_alert_image_paths(visit_id: int) -> list[str]:
+    # Read side for the above -- also backs GET /visits/{id}/sightings' alert_image_count and
+    # GET /media/alert-image/{visit_id}/{index}'s lookup.
+    rows = _execute(
+        "SELECT alert_image_paths FROM yard_stats.visits WHERE id = %s",
+        (visit_id,), fetch=True,
+    )
+    if not rows or not rows[0]["alert_image_paths"]:
+        return []
+    return rows[0]["alert_image_paths"].split(",")
+
+
 def get_report_data(
     start: datetime, end: datetime, source: str = "events", include_image: bool = True,
-    object_label: str | None = None,
+    object_label: str | None = None, include_alert_images: bool = False,
 ) -> dict:
     # Same joins daily-report.json's two query nodes used to run directly -- filtered by
     # created_at (when the AI stage produced the sighting), not start_ts, matching that behavior.
@@ -2194,6 +2259,16 @@ def get_report_data(
     # comes back NULL, so no separate rendering path is needed for that case.
     if not include_image:
         crop_image_expr = "NULL"
+    # include_alert_images (source="visits" only -- an events-stage sighting has no visit-level
+    # alert image series at all) pulls visits.alert_image_paths in alongside the representative
+    # event's own crop, for report.py's _alert_images_cell thumbnail strip. A LEFT JOIN (a
+    # raw_event's visit_id can be NULL for one never grouped by Frigate's review stream) gated
+    # behind the same param so a caller that doesn't want this pays no extra join cost at all.
+    visit_join = ""
+    alert_image_paths_expr = "NULL"
+    if source == "visits" and include_alert_images:
+        visit_join = "LEFT JOIN yard_stats.visits v ON v.id = re.visit_id"
+        alert_image_paths_expr = "v.alert_image_paths"
     # visit_id is included so report.py can group a visit's sightings into one combined alert
     # entry (source="visits" only -- always NULL under source="events", where there's no grouping
     # concept and every sighting is its own entry). One universal query now -- object_label tells
@@ -2214,9 +2289,11 @@ def get_report_data(
         f"""
         SELECT re.id AS raw_event_id, re.visit_id, re.camera, re.zone, re.start_ts,
                {crop_image_expr} AS crop_image_base64,
+               {alert_image_paths_expr} AS alert_image_paths,
                s.object_label, s.description
         FROM yard_stats.sightings s
         JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
+        {visit_join}
         WHERE s.created_at >= %s AND s.created_at <= %s
         {visit_clause}
         {label_clause}

@@ -266,6 +266,21 @@
           </template>
         </template>
       </div>
+      <!-- The alert stage's own gathered high-res crops (STORE_ALERT_IMAGES) -- what the alert
+           analysis above actually looked at, not just its written description. Visits only, and
+           only when that option was on and produced at least one file for this visit. Each
+           thumbnail opens the full-size image in a new tab -- deliberately not a nested
+           lightbox-within-lightbox. -->
+      <div class="lightbox-alert-images" x-show="lightboxAlertImageUrls.length > 0" style="display:none">
+        <h4>AI analysis images (<span x-text="lightboxAlertImageUrls.length"></span>)</h4>
+        <div class="alert-images-strip">
+          <template x-for="(url, i) in lightboxAlertImageUrls" :key="url">
+            <a :href="url" target="_blank" rel="noopener noreferrer">
+              <img :src="url" alt="alert analysis image" loading="lazy">
+            </a>
+          </template>
+        </div>
+      </div>
       <!-- Every raw_event this visit grouped together (Frigate's own review/tracker grouping),
            not just the deduped AI-analyzed sighting(s) above -- click one to open its own
            per-event lightbox. Visits only; a plain event has no connected events of its own. -->

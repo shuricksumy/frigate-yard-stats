@@ -89,6 +89,7 @@ def purge_old_records(
     only_media: bool = Query(True, description="Default true: keeps every row and all its text/structured AI analysis (including embeddings) -- only clears the media categories selected below, so old data stays searchable with just the media gone. false: deletes the rows entirely (raw_events, visits, and their dependent sightings) -- today's original full purge -- and rebuilds the vector search index afterward against whatever data remains. When false, the delete_* params below are ignored entirely (a full row delete already covers all of their columns)."),
     delete_video: bool = Query(True, description="only_media=true only: delete stored video clip files off disk and clear video_path (raw_events and visits)."),
     delete_snapshots: bool = Query(False, description="only_media=true only: clear raw_events.crop_image_base64 (the per-event still crop, aka 'Event Snapshots')."),
+    delete_alert_images: bool = Query(True, description="only_media=true only: delete the alert stage's own gathered high-res crop files off disk and clear visits.alert_image_paths (STORE_ALERT_IMAGES). Never touches raw_events/object_label-scoped rows -- this is a visits-only artifact, so (like video/snapshots for visits) it's skipped entirely under an object_label-scoped purge."),
     object_label: str | None = Query(None, description="Restrict this purge to a single Frigate object label (e.g. 'car'). Only ever affects raw_events and their sightings -- visits/visit_sightings are never touched when this is set, since a visit can span multiple distinct object types and there's no single-type-safe way to decide the visit row belongs to just one type's purge. Omit for the existing all-types behavior, which does cover visits/visit_sightings same as before this param existed."),
     camera: str | None = Query(None, description="Restrict this purge to a single Frigate camera. Unlike object_label, this DOES apply to visits/visit_sightings too -- visit grouping is per-camera only, so a visit's own `cameras` column is always a single, unambiguous value. Composes with object_label (both can be set at once)."),
 ):
@@ -96,9 +97,9 @@ def purge_old_records(
     RETENTION_MONTHS sweep -- e.g. to clear out a backlog of old test data, reclaim space sooner
     than the configured retention window, or (only_media=true, the default) strip old
     media while keeping every row's AI analysis text and plate reads searchable indefinitely.
-    only_media mode is itself two independently toggleable categories (delete_video/
-    delete_snapshots) rather than one all-or-nothing "media" concept, since they have very
-    different storage cost and "still worth keeping" answers. Unlike /retention/run,
+    only_media mode is itself three independently toggleable categories (delete_video/
+    delete_snapshots/delete_alert_images) rather than one all-or-nothing "media" concept, since
+    they have very different storage cost and "still worth keeping" answers. Unlike /retention/run,
     the cutoff here is caller-controlled and the delete has no undo, so this requires X-API-Key and
     defaults to a dry run: call once without confirm=true to see how many rows/files would be
     affected, then again with confirm=true to actually apply it."""
@@ -107,11 +108,13 @@ def purge_old_records(
         counts = db.purge_media_older_than(
             cutoff, execute=confirm, object_label=object_label, camera=camera,
             delete_video=delete_video, delete_snapshots=delete_snapshots,
+            delete_alert_images=delete_alert_images,
         )
         return {
             "cutoff": cutoff, "dry_run": not confirm, "only_media": True, "object_label": object_label,
             "camera": camera,
             "delete_video": delete_video, "delete_snapshots": delete_snapshots,
+            "delete_alert_images": delete_alert_images,
             "counts": counts,
         }
     counts = db.purge_older_than(cutoff, execute=confirm, object_label=object_label, camera=camera)
@@ -234,11 +237,19 @@ def get_visit_sightings(visit_id: int):
     person has one sighting each here, not just whichever was analyzed first. GET /events/{id}
     still only ever returns a single event's own sighting; this is the visit-scoped combined view
     the web UI's lightbox uses instead. alert_sighting is the visit's own AI_ALERTS_ENABLED
-    analysis of its composite grid, independent of sightings above -- null until that stage has
-    produced one for this visit."""
+    analysis (a series of high-res per-event crops, see alert_ai_worker.py), independent of
+    sightings above -- null until that stage has produced one for this visit. alert_image_count is
+    how many of those gathered images were persisted to disk (STORE_ALERT_IMAGES, 0 if that option
+    was off or none were stored) -- the web UI's lightbox uses this to build
+    GET /media/alert-image/{visit_id}/{index} URLs for a gallery, without needing the raw
+    filesystem paths themselves."""
     if db.get_visit(visit_id) is None:
         raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
-    return {"sightings": db.get_sightings_for_visit(visit_id), "alert_sighting": db.get_visit_alert_sighting(visit_id)}
+    return {
+        "sightings": db.get_sightings_for_visit(visit_id),
+        "alert_sighting": db.get_visit_alert_sighting(visit_id),
+        "alert_image_count": len(db.get_visit_alert_image_paths(visit_id)),
+    }
 
 
 @app.get("/events/{event_id}", response_model=schemas.EventDetail, tags=["events"], dependencies=[Depends(require_api_key)])
@@ -327,6 +338,23 @@ def get_visit_image(visit_id: int):
     raise HTTPException(status_code=404, detail=f"No crop image or video for visit {visit_id}")
 
 
+@app.get("/media/alert-image/{visit_id}/{index}", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
+def get_alert_image(visit_id: int, index: int):
+    """One of the alert stage's own gathered high-res crops (STORE_ALERT_IMAGES), stored on disk
+    under ALERT_IMAGES_STORAGE_PATH -- `index` is 0-based, matching the order implied by
+    GET /visits/{id}/sightings' alert_image_count, for the web UI's lightbox gallery. 404s if the
+    visit has none stored, `index` is out of range, or the file itself is missing (e.g. already
+    cleared by a retention purge since the images were gathered). Accepts X-API-Key header or
+    ?api_key= query param since this is loaded directly by an <img> tag."""
+    paths = db.get_visit_alert_image_paths(visit_id)
+    if index < 0 or index >= len(paths):
+        raise HTTPException(status_code=404, detail=f"No alert image at index {index} for visit {visit_id}")
+    path = paths[index]
+    if not os.path.isfile(path):
+        raise HTTPException(status_code=404, detail=f"Alert image file missing for visit {visit_id}")
+    return FileResponse(path, media_type="image/jpeg")
+
+
 @app.get("/media/video/{event_id}", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
 def get_event_video(event_id: int):
     """Streams the stored clip off disk (range requests supported via Starlette's FileResponse,
@@ -393,13 +421,14 @@ def generate_report(
     source: str = Query("events", pattern="^(events|visits)$", description="'events' (default) includes every sighting independently -- today's exact behavior. 'visits' dedups the same way POST /ai-queue/claim's source=visits does: only the sighting for a visit's earliest-linked raw_event, plus every sighting whose raw_event was never grouped into a visit -- for an alerts-scoped report where one real-world visit shouldn't show up once per det_id."),
     include_image: bool = Query(True, description="False skips the row image entirely, for a caller that wants the smallest possible payload -- the field is never even fetched from Postgres in that mode."),
     object_label: str | None = Query(None, description="Restrict the report to a single Frigate object label (e.g. 'car') -- for a per-type report alongside the default report covering every type. Omit for no filter (today's behavior)."),
+    include_alert_images: bool = Query(False, description="source=visits only (ignored/no-op under source=events, where there's no visit-level image series). When true, embeds a thumbnail strip of the alert stage's own gathered high-res crops (STORE_ALERT_IMAGES) underneath each alert row's main image, for whichever visits have any stored. Off by default -- a real payload-size increase (several extra base64 images per alert row), so it's opt-in."),
 ):
     """Builds the same HTML report daily-report.json used to build itself in a Code node --
     n8n now just calls this and emails/Telegrams the result. Each row's inline image is a small
     on-the-fly thumbnail (never touching the stored full-quality crop); the full-size image is
     still available via the report's click-to-enlarge lightbox, embedded once, not twice."""
     resolved_start, resolved_end = _resolve_window(start, end, hours)
-    return report.generate_report(resolved_start, resolved_end, source, include_image, object_label)
+    return report.generate_report(resolved_start, resolved_end, source, include_image, object_label, include_alert_images)
 
 
 @app.post("/ai-queue/claim", response_model=schemas.ClaimResponse, tags=["ai-queue"], dependencies=[Depends(require_api_key)])
@@ -524,6 +553,7 @@ def admin_overview():
             "ai_alerts_enabled": config.AI_ALERTS_ENABLED,
             "store_video": config.STORE_VIDEO,
             "store_video_alerts": config.STORE_VIDEO_ALERTS,
+            "store_alert_images": config.STORE_ALERT_IMAGES,
             "crop_disabled": config.CROP_DISABLED,
             "frigate_snapshot_enabled": config.FRIGATE_SNAPSHOT_ENABLED,
             "telegram_events_mode": config.TELEGRAM_EVENTS_MODE,
@@ -534,9 +564,9 @@ def admin_overview():
 
 @app.get("/admin/disk-usage", tags=["admin"], dependencies=[Depends(require_api_key)])
 def admin_disk_usage():
-    """Walks VIDEO_STORAGE_PATH/VIDEO_STORAGE_PATH_ALERTS on disk to report real bytes used --
-    kept separate from /admin/overview since this is a real filesystem walk (can be slow with a
-    large video backlog), not a cheap SQL query."""
+    """Walks VIDEO_STORAGE_PATH/VIDEO_STORAGE_PATH_ALERTS/ALERT_IMAGES_STORAGE_PATH on disk to
+    report real bytes used -- kept separate from /admin/overview since this is a real filesystem
+    walk (can be slow with a large video backlog), not a cheap SQL query."""
     return {
         "video_storage": admin.dir_size_bytes(config.VIDEO_STORAGE_PATH),
         "video_storage_alerts": admin.dir_size_bytes(config.VIDEO_STORAGE_PATH_ALERTS),
@@ -544,6 +574,11 @@ def admin_disk_usage():
         "video_storage_alerts_by_object_type": admin.dir_size_by_object_type(config.VIDEO_STORAGE_PATH_ALERTS),
         "video_storage_by_camera": admin.dir_size_by_camera(config.VIDEO_STORAGE_PATH),
         "video_storage_alerts_by_camera": admin.dir_size_by_camera(config.VIDEO_STORAGE_PATH_ALERTS),
+        # STORE_ALERT_IMAGES -- same camera-first layout/filename convention (visit-{type}-{id}-...)
+        # video.py already established, so the exact same generic helpers apply unchanged.
+        "alert_images_storage": admin.dir_size_bytes(config.ALERT_IMAGES_STORAGE_PATH),
+        "alert_images_storage_by_object_type": admin.dir_size_by_object_type(config.ALERT_IMAGES_STORAGE_PATH),
+        "alert_images_storage_by_camera": admin.dir_size_by_camera(config.ALERT_IMAGES_STORAGE_PATH),
     }
 
 

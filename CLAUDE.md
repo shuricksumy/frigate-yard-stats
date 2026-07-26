@@ -242,19 +242,25 @@ explicitly. A second mode, `only_media` (defaults to `true`), decides *what* get
   text fields (AI analysis description, embeddings) -- old data stays
   fully searchable via `/events`'/`/visits`' `q` filter and `/search/semantic`, just with the media
   payload gone. Never touches `sightings`/`visit_sightings` at all -- neither table carries media
-  columns of its own. **Which media gets cleared is itself two independent flags**, not an
+  columns of its own. **Which media gets cleared is itself three independent flags**, not an
   all-or-nothing "clear everything media" switch: `delete_video` (default `true`) clears
   `video_path` on both tables and deletes the file off disk; `delete_snapshots` (default `false`)
   clears `raw_events.crop_image_base64` (the per-event still crop, "Event Snapshots" in the admin
-  UI). Video defaults on because it's by far the largest stored payload; still-images default off
+  UI); `delete_alert_images` (default `true`) clears `visits.alert_image_paths` (the alert stage's
+  own gathered high-res crops, when `STORE_ALERT_IMAGES` persisted any -- see "Alert AI stage"
+  above) and deletes those files too. Video and alert images default on because they're the
+  largest stored payloads (alert images can be several JPEGs per visit); still-images default off
   since a still crop is comparatively cheap to keep and often still useful to glance at even once a
-  row is old. Both are independent and composable -- the response's `counts` preview always reports
-  both metrics (`raw_events_video_files`, `raw_events_snapshots`, `visits_video_files`) regardless
-  of which flags are set, so a dry run shows everything that's *available* to clear even if the
-  caller only plans to clear a subset. The admin dashboard's Retention section exposes these as two
-  checkboxes plus a separate, clearly-destructive "Delete ALL" checkbox that switches to
-  `only_media=false` -- checking it visually disables the two media checkboxes, since they no
-  longer mean anything once the whole row is going away. (An earlier version of this feature also
+  row is old. All three are independent and composable -- the response's `counts` preview always
+  reports every metric (`raw_events_video_files`, `raw_events_snapshots`, `visits_video_files`,
+  `visits_alert_images`) regardless of which flags are set, so a dry run shows everything that's
+  *available* to clear even if the caller only plans to clear a subset. `delete_alert_images`
+  follows the exact same visits-only, `object_label`-scoping-never-applies rule `delete_video`
+  already has for visits, for the same reason (a visit can span multiple object types). The admin
+  dashboard's Retention section exposes these as three checkboxes plus a separate,
+  clearly-destructive "Delete ALL" checkbox that switches to `only_media=false` -- checking it
+  visually disables the three media checkboxes, since they no longer mean anything once the whole
+  row is going away. (An earlier version of this feature also
   had `delete_gif`/`delete_puzzled_preview` flags for `visits.preview_gif_base64`/
   `visits.crop_image_base64` -- removed along with the visit-preview grid/GIF feature itself, see
   "Alert AI stage" below.)
@@ -448,7 +454,21 @@ representative event's own crop (there's no visit-level stored image to prefer i
 "Alert AI stage" above). `_build_alert_rows` joins each group's sightings into one labeled line per sighting
 (`"{object_label}: {description}"`, e.g. `"car: orange suv, roof rails, plate 10MO407"` /
 `"person: dark jacket"`), joined with `; ` -- there's no separate summary-flattening step, since
-`description` already is the one-line summary for every object type. `source=events` (the default,
+`description` already is the one-line summary for every object type.
+
+An optional `include_alert_images` param (default `false`, `source=visits` only -- a no-op under
+`source=events`, which has no visit-level image series concept) embeds an additional thumbnail
+strip under each alert row's main image, for whichever visits actually have `STORE_ALERT_IMAGES`
+data (`visits.alert_image_paths`). `db.get_report_data` only joins `visits` at all when this flag
+is set (`LEFT JOIN yard_stats.visits v ON v.id = re.visit_id`, gated behind the param so a caller
+that doesn't want this pays no extra join cost), and `report._alert_images_cell` reads each path
+fresh off disk at report-generation time, base64-encoding it the same way `_img_cell` does for the
+main crop -- a path that's gone (e.g. already cleared by a retention purge since the images were
+gathered) is silently skipped, not fatal to the rest of the report. Off by default since it's a
+real payload-size increase (several extra base64 images per alert row, on top of the same
+double-embed concern this report already solved once for the old n8n version -- see below).
+
+`source=events` (the default,
 `n8n/daily-report.json`) renders one row per sighting with its own Type/Description columns --
 there's no visit grouping concept to apply there, every sighting already stands alone.
 
@@ -607,13 +627,64 @@ Per claimed visit, it:
 3. Calls `_gather_alert_images`, which runs `crop.crop_event_high_res` (see "Cropping" above --
    the same durable, event-id-scoped Frigate clip endpoint/seek-and-crop logic the events stage's
    own non-snapshot crop path already uses, factored out into its own function) once per selected
-   event. **Ephemeral by design**: each image is fetched/cropped, added to the in-memory list sent
-   to the VLM, and then discarded -- nothing is written back to `raw_events`/`visits` for this. A
-   single event's crop failing (e.g. its clip has already rolled off Frigate's retention) is caught
-   and logged, not fatal to the whole visit -- only an empty resulting image list raises (routing
-   to `fail_alert_ai_event`, the same retry-with-a-cap `alert_ai_status` already has).
-4. Calls `ai_worker._chat_request` with the full `images` list and `alert_prompt` -- see "Cloud VLM
+   event, returning `(event, image)` pairs rather than a bare image list (a per-event failure means
+   the two lists can end up different lengths, and the optional disk-persistence step below needs
+   each image's own source event, not just the flat list the VLM call itself uses). **Ephemeral in
+   memory by design**: each image is fetched/cropped, added to the in-memory list sent to the VLM,
+   and then discarded by default -- nothing is written back to `raw_events`/`visits` unless
+   `store_alert_images` opts in (see below). A single event's crop failing (e.g. its clip has
+   already rolled off Frigate's retention) is caught and logged, not fatal to the whole visit --
+   only an empty resulting image list raises (routing to `fail_alert_ai_event`, the same
+   retry-with-a-cap `alert_ai_status` already has).
+4. If `store_alert_images` (see below) resolves true for this visit's representative object type,
+   persists the gathered images to disk (`alert_images.store_alert_images`) and records the
+   resulting paths on `visits.alert_image_paths` (`db.set_visit_alert_image_paths`) -- see
+   "Optional filesystem persistence" below. This runs *before* the chat call, so the images survive
+   on disk even if that call subsequently fails; best-effort and non-fatal (a disk-write failure is
+   logged and swallowed, never blocking the analysis that already has its images in hand).
+5. Calls `ai_worker._chat_request` with the full `images` list and `alert_prompt` -- see "Cloud VLM
    providers" below for how a multi-image call actually reaches the model.
+
+#### Optional filesystem persistence (`STORE_ALERT_IMAGES`/`store_alert_images`)
+
+Off by default -- the gathered images stay purely ephemeral (built, sent to the VLM, discarded),
+matching the "smaller dataset" goal this whole redesign was built around. Turning it on for a
+type persists that type's gathered images to disk, mirroring how video storage already works:
+only the file paths live in Postgres (`visits.alert_image_paths`, comma-joined, same convention as
+`visits.objects`), the actual JPEG bytes live only under `ALERT_IMAGES_STORAGE_PATH` on disk --
+its own bind mount/host path (`ALERT_IMAGES_STORAGE_HOST_PATH`), not a subfolder of either video
+storage location, so this flow's disk usage can be measured/managed independently too. A plain
+per-row resolver (`profile_config.store_alert_images`, same `_resolve`-style tier as
+`crop_disabled`), **not** a claim-filter/thread-gating setting like `store_video`/
+`store_video_alerts` -- persisting is a synchronous side effect inside the existing alert stage
+thread, not a separate poll loop/queue stage, so there's no `any_store_alert_images_enabled`/claim
+filter machinery needed.
+
+`alert_images.store_alert_images(visit, events, images)` writes one file per gathered image under
+`{ALERT_IMAGES_STORAGE_PATH}/{camera}/{YYYY}/{MM}/{DD}/visit-{object_type}-{visit_id}-{index}-
+{event_id}.jpg` -- the same camera-first layout `video.store_visit_clip` already established (so
+`admin.dir_size_bytes`/`dir_size_by_object_type`/`dir_size_by_camera` apply unchanged, no new
+filesystem-walk logic needed). Each file is named after *that specific image's own source event's*
+object type, not the visit's overall representative type -- gives an accurate per-type disk-usage
+breakdown even for a visit spanning distinct types (e.g. a car and a person). Filenames are
+deterministic (visit id + index + event id, not a timestamp), so a retried attempt overwrites the
+same files rather than accumulating duplicates on disk.
+
+`GET /visits/{id}/sightings` exposes `alert_image_count` (how many were stored, 0 if the option
+was off or nothing was stored) alongside the existing `alert_sighting` field, and a new
+`GET /media/alert-image/{visit_id}/{index}` endpoint serves one stored image by its 0-based index
+-- the web UI's Visit lightbox uses these to render a small thumbnail-strip gallery of exactly
+what the alert stage analyzed, each thumbnail opening the full-size image in a new tab (not a
+nested lightbox-within-lightbox). `/reports/generate`'s optional `include_alert_images` param
+(source=visits only) embeds this same series as an additional thumbnail strip under each alert
+row's main image, reading the files fresh off disk at report-generation time (a missing/
+already-purged file is silently skipped, not fatal to the report). `/retention/purge`'s
+`delete_alert_images` flag (default `true`, `only_media=true` mode) clears both the files and the
+column independently of `delete_video`/`delete_snapshots` -- same visits-only scoping `delete_video`
+already has under an `object_label`-scoped purge (never touched, since a visit can span multiple
+object types). `run_retention_cleanup`/`purge_older_than` (the full-row-delete paths) also collect
+and delete any `alert_image_paths` files before their visit rows are removed, same as they already
+do for `video_path`.
 
 `ALERT_AI_MAX_IMAGES` (default `4`, matching the old grid's panel count as a starting point) and
 `ALERT_AI_INITIAL_WAIT_SECONDS` (default `5`, applied once per visit on its very first attempt,
@@ -1724,7 +1795,7 @@ actually shows up on the Postgres data volume, not just row bytes), vector index
 get_vector_index_status()` -- pgvector extension version, `EMBEDDING_DIMENSIONS`, and each HNSW
 index's `indisvalid`/`indisready`), `get_retention_info()` (already existed, reused as-is), and a
 feature-flags summary (`AI_EVENTS_STAGE_ENABLED`/`AI_ALERTS_ENABLED`/`STORE_VIDEO`/
-`STORE_VIDEO_ALERTS`/`CROP_DISABLED`/`TELEGRAM_EVENTS_MODE`/
+`STORE_VIDEO_ALERTS`/`STORE_ALERT_IMAGES`/`CROP_DISABLED`/`TELEGRAM_EVENTS_MODE`/
 `TELEGRAM_ALERTS_MODE`) so "what's currently turned on" is visible at a glance instead of having to
 check `profiles.yaml` by hand. Everything in this call is cheap SQL -- deliberately excludes
 anything that's a real filesystem walk or network call, so the dashboard's main section always
@@ -1745,7 +1816,7 @@ how it's done). `db_size` similarly gains `db_size_by_object_type`
 (`db.get_db_size_by_object_type`) -- an *approximate* per-type Postgres footprint via
 `sum(pg_column_size(t.*))` grouped by that table's own label column. This is a real byte count of
 each row's stored data, but still an approximation of the type's true on-disk footprint: it
-excludes per-row tuple overhead, TOAST storage for the crop/GIF columns' actual out-of-line
+excludes per-row tuple overhead, TOAST storage for the crop column's actual out-of-line
 chunks, and index space entirely -- `get_db_size_info()`'s `pg_total_relation_size` figures remain
 the authoritative whole-table sizes; this is for relative "which type is using the most space"
 comparison, not a precise accounting. The dashboard's "By object type" section combines this with
@@ -1784,30 +1855,34 @@ from a confirmed `false` (Frigate genuinely reported itself offline).
 
 **`GET /admin/disk-usage`** is split out specifically because it *is* a real filesystem walk
 (`admin.dir_size_bytes`, `os.walk` summing real file sizes under `VIDEO_STORAGE_PATH`/
-`VIDEO_STORAGE_PATH_ALERTS`) -- kept separate so a large video backlog's scan time never blocks the
-rest of the dashboard from rendering. A path that doesn't exist (e.g. `VIDEO_STORAGE_PATH_ALERTS`
-when `STORE_VIDEO_ALERTS` has never been turned on) reports as zero bytes rather than an error --
-an unused optional storage location isn't a fault. Also returns
-`video_storage[_alerts]_by_object_type` (`admin.dir_size_by_object_type`) -- the same walk, but
-bucketed by object type parsed from each file's own name (`video.py`'s `store_clip`/
-`store_visit_clip` always name a file `{object_type}-{id}-...` or `visit-{object_type}-{id}-...`,
+`VIDEO_STORAGE_PATH_ALERTS`/`ALERT_IMAGES_STORAGE_PATH`) -- kept separate so a large video backlog's
+scan time never blocks the rest of the dashboard from rendering. A path that doesn't exist (e.g.
+`VIDEO_STORAGE_PATH_ALERTS` when `STORE_VIDEO_ALERTS` has never been turned on, or
+`ALERT_IMAGES_STORAGE_PATH` when `STORE_ALERT_IMAGES` hasn't) reports as zero bytes rather than an
+error -- an unused optional storage location isn't a fault. Also returns
+`video_storage[_alerts]_by_object_type`/`alert_images_storage_by_object_type`
+(`admin.dir_size_by_object_type`) -- the same walk, but bucketed by object type parsed from each
+file's own name (`video.py`'s `store_clip`/`store_visit_clip` and `alert_images.py`'s
+`store_alert_images` all name a file `{object_type}-{id}-...` or `visit-{object_type}-{id}-...`,
 so the type is always either the first hyphen-token or the token right after a leading `visit-`).
 A name that doesn't match this pattern at all buckets under `"unknown"` rather than raising or
 being silently dropped from the total.
 
-Also returns `video_storage[_alerts]_by_camera` (`admin.dir_size_by_camera`) -- unlike the
-object-type breakdown, this needs no filename parsing at all: `video.py`'s `store_clip`/
-`store_visit_clip` now write under a camera-named top-level directory
-(`VIDEO_STORAGE_PATH/{camera}/{YYYY}/{MM}/{DD}/...` -- see "Video storage" below), so the camera is
-just that top-level directory's own name. `admin.dir_size_by_camera` walks one level with
-`os.scandir` to enumerate the top-level directories (the cameras), then `os.walk`s each one to sum
-its bytes -- a file sitting directly at the root (not under any camera directory) isn't itself a
-camera and is correctly excluded from every bucket, unlike `dir_size_by_object_type`'s flat walk
-which has no such root/non-root distinction to make. A clip stored before this layout existed sits
-directly under a year directory instead of a camera one, so it buckets under that year (e.g.
-`"2026"`) rather than a real camera name -- an expected one-time artifact of files predating this
-change, not a bug: nothing migrates existing files into the new layout automatically (see "Video
-storage" below).
+Also returns `video_storage[_alerts]_by_camera`/`alert_images_storage_by_camera`
+(`admin.dir_size_by_camera`) -- unlike the object-type breakdown, this needs no filename parsing at
+all: `video.py`'s `store_clip`/`store_visit_clip` and `alert_images.py`'s `store_alert_images` all
+write under a camera-named top-level directory
+(`VIDEO_STORAGE_PATH/{camera}/{YYYY}/{MM}/{DD}/...` -- see "Video storage" below and "Alert AI
+stage" above), so the camera is just that top-level directory's own name. `admin.dir_size_by_camera`
+walks one level with `os.scandir` to enumerate the top-level directories (the cameras), then
+`os.walk`s each one to sum its bytes -- a file sitting directly at the root (not under any camera
+directory) isn't itself a camera and is correctly excluded from every bucket, unlike
+`dir_size_by_object_type`'s flat walk which has no such root/non-root distinction to make. A clip
+stored before this layout existed sits directly under a year directory instead of a camera one, so
+it buckets under that year (e.g. `"2026"`) rather than a real camera name -- an expected one-time
+artifact of files predating this change, not a bug: nothing migrates existing files into the new
+layout automatically (see "Video storage" below). `alert_images.py`'s layout was camera-first from
+the start, so this only applies to video.
 
 **`GET /admin/embedding-backend/check`** is a live, on-demand smoke test against
 `LLAMA_PROXY_BASE_URL`/`LLAMA_PROXY_EMBED_PATH` (`admin.check_embedding_backend`) -- sends a tiny
@@ -1877,7 +1952,10 @@ why `camera` (unlike `object_label`) also scopes visits.
   gathering high-res per-event crops directly instead (see "Alert AI stage" above); dropping these
   columns is a deferred, separate migration. `alert_ai_status`/`alert_ai_status_changed_at`/
   `alert_ai_attempt_count` (see "Alert AI stage" above) are this visit's own queue stage,
-  entirely independent of any linked raw_event's `ai_status`.
+  entirely independent of any linked raw_event's `ai_status`. `alert_image_paths` (nullable,
+  comma-joined) is the opt-in `STORE_ALERT_IMAGES` persistence of the alert stage's own gathered
+  high-res crops -- only the filesystem paths live here, the JPEG bytes live under
+  `ALERT_IMAGES_STORAGE_PATH` on disk (see "Alert AI stage" above).
 - `sightings` — one row per AI-analyzed event, **any** object label (`object_label`, straight from
   `raw_events.objects` -- car, truck, person, dog, whatever `profiles.yaml` maps). `description` is
   the VLM's plain free-text answer to that label's `event_prompt` -- there is no structured

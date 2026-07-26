@@ -68,6 +68,11 @@
 #     stage's poll thread -- see profile_config.any_store_video_enabled/
 #     any_store_video_alerts_enabled. e.g. a `person` entry could set store_video: false to skip
 #     storing clips for people while cars still get them. Hardcoded fallback: false (both).
+#   store_alert_images -- true/false. Persists the alert stage's own gathered high-res crops to
+#     disk under ALERT_IMAGES_STORAGE_PATH (comma-joined paths on visits.alert_image_paths, never
+#     the image bytes themselves in Postgres) -- off by default, so those images stay ephemeral
+#     unless you opt in. A plain per-row resolver, not a poll-thread gate, since persisting is a
+#     synchronous side effect inside the existing alert stage. Hardcoded fallback: false.
 #   alert_provider / alert_model / alert_chat_path -- same shape as provider/model/chat_path (see
 #     profiles.yaml.example for the full explanation), but scoped to the alert stage only, so one
 #     type's alert analysis (the multi-image series) can route to a different provider than its own
@@ -103,6 +108,7 @@ object_types:
     # frigate_snapshot_enabled: true
     # store_video: true
     # store_video_alerts: true
+    # store_alert_images: true
     event_prompt: >-
       This image shows a single moment from one vehicle sighting. In one or two short sentences,
       describe the vehicle's color, body type (sedan/suv/truck/van/pickup/minivan/etc.), make and

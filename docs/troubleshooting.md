@@ -86,14 +86,20 @@ This stage is owned by n8n, not `ingest-worker` — see [`n8n.md`](n8n.md):
   `defaults:`, not `.env` — so a backlogged row gives up sooner instead of burning attempts on a
   clip that's already gone) are the two real levers here.
 
-## Visit preview (grid/GIF) keeps failing
+## Alert-stage analysis keeps failing (`alert_ai_status = 'failed'`)
 
-Same underlying cause as the video case above, more often — this feature asks Frigate for an
-arbitrary time range, which is exactly the request pattern that's sensitive to your
-`record.continuous.days` setting. See [`frigate.md`](frigate.md#recording-retention--this-genuinely-matters-not-just-a-tuning-knob)
-for the full explanation and `CLAUDE.md`'s "Visit preview" section for the production history
-behind this feature's design. If it's failing consistently rather than occasionally, that setting
-is almost always why.
+The alert stage (`AI_ALERTS_ENABLED`) gathers its high-res images via the same durable,
+event-id-scoped Frigate clip endpoint (`/api/events/{det_id}/clip.mp4`) the events stage's own
+crop uses — not the continuous-recording start/end endpoint, so it's not sensitive to
+`record.continuous.days` the way the old (removed) visit-preview grid feature was. A visit failing
+here consistently usually means every one of its linked events' own clips has already rolled off
+Frigate's `alerts`/`detections` retention window by the time the alert stage got to it — check
+`ALERT_AI_INITIAL_WAIT_SECONDS`/queue backlog (`AI_STAGE_PARALLEL_LIMIT`/`AI_STAGE_STALE_MINUTES`)
+first, same as any other stuck-in-`retry` diagnosis. If `store_alert_images` is on and the visit's
+`alert_ai_status` reaches `done` but no images show up in the web UI/report, check that
+`ALERT_IMAGES_STORAGE_HOST_PATH` is actually bind-mounted and writable (same check as the video
+paths above) — a disk-write failure there is logged but swallowed, non-fatal to the analysis
+itself, so a full/misconfigured mount fails silently from the analysis's own point of view.
 
 ## Telegram messages never arrive
 
@@ -107,7 +113,7 @@ is almost always why.
 - Message your bot at least once first — Telegram bots can't message a chat that's never
   messaged them (see [`configuration.md`](configuration.md#telegram-notifications) for the
   bot-creation steps).
-- A Telegram failure never blocks or fails the crop/video/preview pipeline itself by design — check
+- A Telegram failure never blocks or fails the crop/video/alert-analysis pipeline itself by design — check
   `ingest-worker`'s logs for a warning around the time you expected a message, rather than assuming
   the whole pipeline is broken because a notification didn't show up.
 
