@@ -63,37 +63,16 @@ def test_group_by_visit_keeps_ungrouped_sightings_separate():
     assert len(groups) == 2
 
 
-def test_img_cell_prefers_gif_over_grid_image():
-    cell = report._img_cell(_TINY_JPEG_BASE64, [], [0], "preview-gif-b64")
-    assert "data:image/gif;base64,preview-gif-b64" in cell
-    assert _TINY_JPEG_BASE64 not in cell
-    # No lightbox for the GIF case -- embedding the same bytes a second time would reintroduce the
-    # double-embed bloat this report already avoids for the JPEG case.
-    assert cell.count("<img") == 1
-
-
-def test_img_cell_falls_back_to_grid_image_without_gif():
+def test_img_cell_renders_crop_image_with_lightbox():
     lightboxes = []
     cell = report._img_cell(_TINY_JPEG_BASE64, lightboxes, [0])
     assert f"data:image/jpeg;base64,{_TINY_JPEG_BASE64}" in lightboxes[0]
-    assert "image/gif" not in cell
+    assert cell.count("<img") == 1
 
 
-def test_group_by_visit_carries_preview_gif_from_earliest_sighting():
-    t0 = datetime(2026, 7, 17, 10, 0, 0)
-    t1 = datetime(2026, 7, 17, 10, 0, 5)
-    car = {
-        "visit_id": 42, "raw_event_id": 1, "start_ts": t1, "camera": "outside2",
-        "crop_image_base64": "car-crop", "preview_gif_base64": "visit-gif",
-        "object_label": "car", "description": "orange suv",
-    }
-    person = {
-        "visit_id": 42, "raw_event_id": 2, "start_ts": t0, "camera": "outside2",
-        "crop_image_base64": "person-crop", "preview_gif_base64": "visit-gif",
-        "object_label": "person", "description": "dark jacket",
-    }
-    group = report._group_by_visit([car, person])[0]
-    assert group["preview_gif_base64"] == "visit-gif"
+def test_img_cell_no_image_placeholder():
+    cell = report._img_cell(None, [], [0])
+    assert cell == "(no image)"
 
 
 def test_build_alert_rows_orders_newest_first():
@@ -189,29 +168,25 @@ def test_generate_report_visits_combines_car_and_person_into_one_alert(conn_ok):
         _cleanup(car_id, person_id, visit_id=visit_id)
 
 
-def test_generate_report_include_preview_image_omits_gif(conn_ok):
+def test_generate_report_include_image_false_omits_image(conn_ok):
     raw_id, det_id = _insert_raw_event(objects="car")
     _insert_sighting(raw_id, "car", "silver sedan")
     visit_id = db.record_visit({
         "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
         "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
     })
-    db.mark_visit_thumb_crop_done(visit_id, _TINY_JPEG_BASE64, "visit-gif")
+    db._execute(
+        "UPDATE yard_stats.raw_events SET crop_image_base64 = %s WHERE id = %s",
+        (_TINY_JPEG_BASE64, raw_id),
+    )
     try:
         now = datetime.now(timezone.utc)
         window = (now - timedelta(hours=1), now + timedelta(hours=1))
-        with_gif = report.generate_report(*window, source="visits", include_preview="gif")
-        image_only = report.generate_report(*window, source="visits", include_preview="image")
-        none_mode = report.generate_report(*window, source="visits", include_preview="none")
-        assert "image/gif" in with_gif["html"]
-        assert "image/gif" not in image_only["html"]
-        # Falls back to the visit's own static grid crop, not "(no image)" -- "image" mode only
-        # drops the GIF, not the crop preference source=visits already applies.
-        assert _TINY_JPEG_BASE64 in image_only["html"]
-        # "none" drops the image entirely -- neither the GIF nor the static crop appear.
-        assert "image/gif" not in none_mode["html"]
-        assert _TINY_JPEG_BASE64 not in none_mode["html"]
-        assert "(no image)" in none_mode["html"]
+        with_image = report.generate_report(*window, source="visits", include_image=True)
+        no_image = report.generate_report(*window, source="visits", include_image=False)
+        assert _TINY_JPEG_BASE64 in with_image["html"]
+        assert _TINY_JPEG_BASE64 not in no_image["html"]
+        assert "(no image)" in no_image["html"]
     finally:
         _cleanup(raw_id, visit_id=visit_id)
 

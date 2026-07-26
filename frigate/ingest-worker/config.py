@@ -114,9 +114,9 @@ CROP_FRAME_OFFSET_PCT = 0.5
 # have no effect at all, byte-identical response). Set false (per type, in profiles.yaml) to fall
 # back to this project's original seek-based approach if that trade-off doesn't work for your
 # footage -- CROP_DISABLED/CROP_FRAME_OFFSET_PCT/CROP_PADDING_PCT above only apply once this is
-# false for that type. Events only -- a visit's own composite grid (VISIT_THUMB_CROP_ENABLED) is
-# unaffected either way, since a single Frigate snapshot has no "4 frames of change" equivalent to
-# offer it.
+# false for that type. Events only -- the alert stage's own high-res per-event crops (see
+# alert_ai_worker.py) always use crop.crop_event_high_res regardless of this flag, since a single
+# Frigate snapshot has no per-event-in-a-visit equivalent to offer it.
 FRIGATE_SNAPSHOT_ENABLED = True
 # A second, much smaller copy of the same crop -- for report/preview UIs that would otherwise
 # embed the full MAX_CROP_DIMENSION image inline per row (multiplied across every sighting, that's
@@ -145,8 +145,8 @@ API_KEY = _env("API_KEY")
 
 # -------------------------------------------------
 # Video storage (third queue stage: video_status) -- see video.py / video_worker.py.
-# STORE_VIDEO/STORE_VIDEO_ALERTS/VISIT_THUMB_CROP_ENABLED/VISIT_PREVIEW_FRAME_PERCENTAGES below are
-# deliberately NOT env vars, same reasoning as the crop settings above -- configure them via
+# STORE_VIDEO/STORE_VIDEO_ALERTS below are deliberately NOT env vars, same reasoning as the crop
+# settings above -- configure them via
 # profiles.yaml (a `defaults:` section for a global change, object_types.<label> for one type) --
 # see profile_config.py. The literals below are only the last-resort fallback when profiles.yaml
 # doesn't set a `defaults:` value for that key either -- matches this project's original defaults.
@@ -196,31 +196,6 @@ STORE_VIDEO_ALERTS = False
 VIDEO_STORAGE_PATH_ALERTS = _env("VIDEO_STORAGE_PATH_ALERTS", "/data/video-alerts")
 
 # -------------------------------------------------
-# Visit thumbnail/preview re-crop (fifth queue stage: visits.thumb_crop_status) -- see
-# visit_thumb_worker.py / crop.build_visit_preview. Produces a composite grid image (frames
-# sampled proportionally across the visit's own clip, not a single "best moment" seek to Frigate's
-# thumb_time -- that turned out unreliable, see build_visit_preview's docstring) plus a separate
-# animated GIF for human preview. Only known once the review closes, well after the representative
-# event's own crop already ran, so this is a separate poll-loop stage producing separate artifacts
-# (visits.crop_image_base64/preview_gif_base64), not a replacement for the events-flow crop.
-# -------------------------------------------------
-VISIT_THUMB_CROP_ENABLED = False
-# Technical tuning knobs (see the block above PARALLEL_LIMIT) -- configure via profiles.yaml's
-# `defaults:`, not env vars.
-VISIT_THUMB_CROP_PARALLEL_LIMIT = 1
-# Same head-start reasoning as CROP_INITIAL_WAIT_SECONDS/VIDEO_INITIAL_WAIT_SECONDS -- Frigate may
-# still be finalizing the continuous-recording segment right after the review closes.
-VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS = 5.0
-VISIT_THUMB_CROP_MAX_ATTEMPTS = 3
-VISIT_THUMB_CROP_RETRY_WAIT_SECONDS = 5.0
-# Which 4 points of the visit's own clip duration to sample for the preview grid/GIF, as
-# percentages (0=clip start, 100=clip end) -- e.g. [5, 35, 65, 90] to stay a bit clear of both
-# edges instead of landing exactly on them. Exactly 4 values required -- the grid assembly is a
-# fixed 2x2 layout (crop.build_visit_preview), not a variable-count one. Configure via profiles.yaml
-# (a real YAML list there, not a comma-separated string) -- this literal is only the fallback.
-VISIT_PREVIEW_FRAME_PERCENTAGES = [0.0, 25.0, 50.0, 100.0]
-
-# -------------------------------------------------
 # Telegram notifications -- see telegram.py. Each is a mode, not a bool: "none" (off, the
 # default), "image" (photo/GIF only, no video clip), "video" (video clip only, no photo/GIF), or
 # "all" (both). Splitting photo from video lets you skip uploading large video clips to Telegram
@@ -262,8 +237,8 @@ OBJECT_TYPES = [t.strip() for t in _env("OBJECT_TYPES", "car,truck,person,dog").
 # -------------------------------------------------
 # Internal AI stages (ai_worker.py / alert_ai_worker.py) -- an alternative to
 # n8n/metadata-processor.json, not a replacement for it: that workflow is left untouched in the
-# repo and can be re-enabled in n8n at any time. Off by default, same convention as
-# STORE_VIDEO/VISIT_THUMB_CROP_ENABLED above.
+# repo and can be re-enabled in n8n at any time. Off by default, same convention as STORE_VIDEO
+# above.
 #
 # Two independent stages, each with its own enable flag, queue, and prompt (profiles.yaml's
 # event_prompt vs alert_prompt) -- same "independent switch, shared tuning knobs" split this
@@ -273,15 +248,13 @@ OBJECT_TYPES = [t.strip() for t in _env("OBJECT_TYPES", "car,truck,person,dog").
 #     metadata-processor.json's "Claim Next Batch (API)" node does (via db.claim_ai_batch directly,
 #     not over HTTP), so the two must not run against the same queue at the same time. This is the
 #     renamed former AI_STAGE_ENABLED -- was previously the only stage; splitting it out clarifies
-#     that it only ever analyzed one event's own crop, never a visit's composite grid, regardless
-#     of VISIT_THUMB_CROP_ENABLED (a real gap: the grid was being built but never actually claimed
-#     or analyzed by this stage).
-#   AI_ALERTS_ENABLED -- alert_ai_worker.py, analyzes a visit's own composite grid
-#     (visits.crop_image_base64, built once thumb_crop_status='done') with alert_prompt, storing
-#     the result in visit_sightings -- a separate table from (and independent of) the events
-#     stage's own sightings table. Requires VISIT_THUMB_CROP_ENABLED to actually have anything to
-#     claim; if that's off, this stage just has nothing ready and stays idle, the same graceful
-#     no-op every other stage/object-type mismatch in this project already gets.
+#     that it only ever analyzed one event's own crop, never a visit's own alert-stage series.
+#   AI_ALERTS_ENABLED -- alert_ai_worker.py, analyzes a series of high-res crops (one per selected
+#     raw_event linked to the visit, gathered fresh at processing time via
+#     crop.crop_event_high_res -- see ALERT_AI_MAX_IMAGES below) with alert_prompt, storing the
+#     result in visit_sightings -- a separate table from (and independent of) the events stage's
+#     own sightings table. Needs no other stage to have run first -- a visit is claimable as soon
+#     as it exists (subject to the usual reap-stale/capacity/object-type filters).
 #
 # Both flags are deliberately NOT env vars -- configure via profiles.yaml (`defaults:` for a global
 # change, object_types.<label> for a type that needs to behave differently from the rest, e.g. opt
@@ -307,6 +280,20 @@ AI_STAGE_MAX_ATTEMPTS = 3
 # default) means no cutoff, every eligible row is still claimable regardless of age.
 AI_STAGE_MAX_AGE_HOURS = None
 AI_STAGE_POLL_INTERVAL_SECONDS = 5.0
+# alert_ai_worker-only knobs (the events stage has no equivalent -- it always analyzes exactly one
+# already-stored image, nothing to gather or wait on).
+#
+# Same head-start reasoning as CROP_INITIAL_WAIT_SECONDS/VIDEO_INITIAL_WAIT_SECONDS -- applied once
+# per claimed visit on its first attempt (alert_ai_attempt_count == 0), not once per gathered
+# image, since Frigate may still be finalizing a just-linked event's clip.
+ALERT_AI_INITIAL_WAIT_SECONDS = 5.0
+# Upper bound on how many high-res per-event crops get gathered and sent to the VLM for one
+# visit's alert analysis -- one representative per distinct object type in the visit first, then
+# same-type re-tracks spread across the visit's timespan fill any remaining slots (see
+# alert_ai_worker._select_events_for_alert). 4 matches the old composite grid's panel count as a
+# sane starting default; a visit with lots of tracker re-ID/label-flicker noise would otherwise
+# send an unbounded, cost-scaling number of near-duplicate images for no analytical benefit.
+ALERT_AI_MAX_IMAGES = 4
 # llama_slot_proxy's own base URL, called directly instead of going through n8n -- e.g.
 # http://llama-proxy-host:port. Only required when AI_EVENTS_STAGE_ENABLED or AI_ALERTS_ENABLED is
 # true.
@@ -378,10 +365,6 @@ _PROFILE_DEFAULTS_MAP = {
     "VIDEO_MAX_ATTEMPTS": "video_max_attempts",
     "VIDEO_RETRY_WAIT_SECONDS": "video_retry_wait_seconds",
     "VIDEO_MAX_AGE_HOURS": "video_max_age_hours",
-    "VISIT_THUMB_CROP_PARALLEL_LIMIT": "visit_thumb_crop_parallel_limit",
-    "VISIT_THUMB_CROP_INITIAL_WAIT_SECONDS": "visit_thumb_crop_initial_wait_seconds",
-    "VISIT_THUMB_CROP_MAX_ATTEMPTS": "visit_thumb_crop_max_attempts",
-    "VISIT_THUMB_CROP_RETRY_WAIT_SECONDS": "visit_thumb_crop_retry_wait_seconds",
     "AI_STAGE_PARALLEL_LIMIT": "ai_stage_parallel_limit",
     "AI_STAGE_STALE_MINUTES": "ai_stage_stale_minutes",
     "AI_STAGE_MAX_ATTEMPTS": "ai_stage_max_attempts",
@@ -389,6 +372,8 @@ _PROFILE_DEFAULTS_MAP = {
     "AI_STAGE_POLL_INTERVAL_SECONDS": "ai_stage_poll_interval_seconds",
     "AI_STAGE_DEFAULT_TIMEOUT_SECONDS": "ai_stage_default_timeout_seconds",
     "AI_STAGE_EMBED_TIMEOUT_SECONDS": "ai_stage_embed_timeout_seconds",
+    "ALERT_AI_INITIAL_WAIT_SECONDS": "alert_ai_initial_wait_seconds",
+    "ALERT_AI_MAX_IMAGES": "alert_ai_max_images",
 }
 
 

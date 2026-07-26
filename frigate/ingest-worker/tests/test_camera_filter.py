@@ -87,7 +87,6 @@ def test_review_processed_when_camera_in_allow_list(monkeypatch):
     calls = []
     monkeypatch.setattr(mqtt_ingest.db, "record_visit", lambda review, *a, **k: calls.append(review) or 1)
     monkeypatch.setattr(mqtt_ingest.db, "get_representative_event_for_visit", lambda visit_id: None)
-    monkeypatch.setattr(mqtt_ingest.db, "visit_thumb_crop_will_be_attempted", lambda *a, **k: False)
 
     mqtt_ingest._handle_review_message(_Msg(_review_payload("outside2")))
 

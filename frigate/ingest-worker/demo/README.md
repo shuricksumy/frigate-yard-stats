@@ -92,10 +92,6 @@ pass, e.g. after changing `seed.py`'s data or `record.py`'s steps.
   `datetime.now()` once at import) -- keep every offset under ~50 minutes so everything still
   falls inside the web UI's default "Last 1 hour" filter even if there's a real-world delay between
   seeding and recording (iterating on `record.py` after seeding, etc).
-- Never let a visit's own `crop_image_base64` (the flat composite grid) get set in `seed.py` --
-  only `preview_gif_base64`. The whole point of showing this demo is the richer animated preview;
-  the flat grid is a deliberately unused fallback here (see CLAUDE.md's "Visit preview" section for
-  why it exists in production at all).
 - If you add another real photo, check it for identifiable people/legible plates before using it
   (see `gen_real_frames.py`'s docstring) and record its source/license in `real_photos/SOURCES.md`.
 - `run_demo_server.py` simulates a real Frigate MQTT heartbeat (calls `mqtt_ingest._handle_stats_

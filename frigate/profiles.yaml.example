@@ -26,12 +26,15 @@
 #   event_prompt -- ai_worker.py sends this with ONE single-frame crop (the raw_event's own
 #     region/box, or Frigate's own snapshot when frigate_snapshot_enabled is true). Framed for a
 #     single static moment.
-#   alert_prompt -- alert_ai_worker.py sends this with the visit's own composite grid (4 frames
-#     sampled across the visit's whole span). Framed for both a confident static read (using
-#     whichever of the 4 panels shows a detail most clearly) AND a description of what changed
+#   alert_prompt -- alert_ai_worker.py sends this with a SERIES of separate high-resolution crops,
+#     one per raw_event actually linked to the visit (up to alert_ai_max_images, see the technical
+#     tuning knobs below) -- each built fresh from the record stream at processing time (never
+#     stored), not a fixed 4-frame composite grid. Framed for both a confident static read (using
+#     whichever photo in the series shows a detail most clearly) AND a description of what changed
 #     across the sequence, in the SAME flowing answer -- there's no separate structured field for
 #     "what changed," the prompt just asks for both together, same shape person's prompt already
-#     used before this file went universal.
+#     used before this file went universal. Sending several separate images in one prompt needs a
+#     provider that actually supports multi-image messages -- see alert_provider below.
 # Both prompts are answered as plain free text (no JSON) -- the whole response becomes
 # sightings.description/visit_sightings.description verbatim. This is deliberate: a fixed JSON
 # schema is exactly the kind of per-type structure this redesign removed. If you want a detail
@@ -58,6 +61,18 @@
 # chat_path is llama_proxy-only (ignored for openai/anthropic, which use `model` instead). model
 # is required for openai/anthropic (ignored for llama_proxy, which selects the model via
 # chat_path). Only set the one your chosen provider actually needs.
+#
+# alert_provider / alert_model / alert_chat_path (optional, per type) -- the SAME three concepts
+# as provider/model/chat_path above, but scoped to the alert stage only. Lets one type's alert
+# analysis (the multi-image series) route to a different provider than its own event analysis
+# (always one single image) -- e.g. event_prompt stays on the local llama_proxy for cheap, frequent
+# single-image analysis, while alert_prompt routes to a hosted provider whose multi-image support
+# is actually verified. Omitting these falls back to the plain provider/model/chat_path unchanged --
+# an existing profiles.yaml with no alert_* keys needs no edit. If a type's effective alert
+# provider ends up "llama_proxy" (the default, whether via alert_provider or the fallback), only
+# the FIRST image in the gathered series is ever sent -- multi-image reasoning quality on a
+# self-hosted llama.cpp+mmproj backend is unverified, so this project doesn't assume it works;
+# ai_worker.py logs a warning (once) when this happens so it's not a silent surprise.
 #
 # ---------------------------------------------------------------------------------------------
 # Three complete, mutually-exclusive shapes for wiring up ONE object type's chat call, shown
@@ -138,18 +153,13 @@
 #     legibility, while other types keep using Frigate's own snapshot. Hardcoded fallback:
 #     crop_disabled=false, crop_frame_offset_pct=0.5, crop_padding_pct=0.2,
 #     frigate_snapshot_enabled=true.
-#   store_video / store_video_alerts / visit_thumb_crop_enabled -- true/false. Unlike the AI-stage
-#     flags above, these apply to *any* Frigate label by default (not just ones with a
-#     profiles.yaml prompt entry), so a type can get its own entry here purely to carry one of
-#     these three keys, with no chat_path/prompt at all. Setting any of them true for at least one
-#     type (or in `defaults`) is enough to start that stage's poll thread -- see
-#     profile_config.any_store_video_enabled/any_store_video_alerts_enabled/
-#     any_visit_thumb_crop_enabled. e.g. a `person` entry could set store_video: false to skip
-#     storing clips for people while cars still get them. Hardcoded fallback: false (all three).
-#   visit_preview_frame_percentages -- a real YAML list of exactly 4 numbers (0=clip start, 100=clip
-#     end) -- which 4 points of a visit's own clip to sample for that type's composite grid/GIF.
-#     e.g. a slow-moving `car` visit might want frames spread wider ([0, 30, 65, 100]) than a
-#     `person` visit that's over quickly. Hardcoded fallback: [0, 25, 50, 100].
+#   store_video / store_video_alerts -- true/false. Unlike the AI-stage flags above, these apply to
+#     *any* Frigate label by default (not just ones with a profiles.yaml prompt entry), so a type
+#     can get its own entry here purely to carry one of these two keys, with no chat_path/prompt at
+#     all. Setting either true for at least one type (or in `defaults`) is enough to start that
+#     stage's poll thread -- see profile_config.any_store_video_enabled/
+#     any_store_video_alerts_enabled. e.g. a `person` entry could set store_video: false to skip
+#     storing clips for people while cars still get them. Hardcoded fallback: false (both).
 #
 # `defaults:` ALSO holds a second, unrelated category: plain technical tuning knobs with no
 # per-object-type meaning at all -- queue parallel limits, retry counts, timeouts, poll intervals,
@@ -172,14 +182,18 @@
 #     video_max_attempts (5) / video_retry_wait_seconds (5) / video_max_age_hours (null, no limit)
 #     -- video-download queue tuning, shared by both the events (store_video) and alerts
 #     (store_video_alerts) flows.
-#   visit_thumb_crop_parallel_limit (1) / visit_thumb_crop_initial_wait_seconds (5) /
-#     visit_thumb_crop_max_attempts (3) / visit_thumb_crop_retry_wait_seconds (5) -- visit
-#     preview (composite grid/GIF) queue tuning.
 #   ai_stage_parallel_limit (2) / ai_stage_stale_minutes (5) / ai_stage_max_attempts (3) /
 #     ai_stage_max_age_hours (null, no limit) / ai_stage_poll_interval_seconds (5) -- internal
 #     AI-stage queue tuning, shared between the events and alerts AI stages.
 #   ai_stage_default_timeout_seconds (180) / ai_stage_embed_timeout_seconds (60) -- fallback
 #     chat-completion/embedding-call timeouts for a type that doesn't set its own `timeout_seconds`.
+#   alert_ai_initial_wait_seconds (5) -- same head-start reasoning as crop_initial_wait_seconds/
+#     video_initial_wait_seconds -- applied once per claimed visit on its first attempt, since a
+#     just-linked event's own clip may not be finalized on Frigate's side yet.
+#   alert_ai_max_images (4) -- upper bound on how many high-res per-event crops get gathered and
+#     sent to the VLM for one visit's alert analysis (one representative per distinct object type
+#     in the visit first, then same-type re-tracks fill any remaining slots) -- bounds cost/prompt
+#     size for a visit with lots of tracker re-ID/label-flicker noise.
 #
 # defaults: (optional overall) -- common per-type-setting values applied to every object type that
 # doesn't set its own for that same key (sitting between the per-type overrides above and their
@@ -203,8 +217,6 @@
 #   frigate_snapshot_enabled: true
 #   store_video: false
 #   store_video_alerts: false
-#   visit_thumb_crop_enabled: false
-#   visit_preview_frame_percentages: [0, 25, 50, 100]
 #   # Plain technical tuning knobs -- defaults: ONLY, never per-type (see the block above).
 #   parallel_limit: 2
 #   stale_minutes: 5
@@ -221,10 +233,6 @@
 #   video_max_attempts: 5
 #   video_retry_wait_seconds: 5
 #   video_max_age_hours: null   # null = no limit
-#   visit_thumb_crop_parallel_limit: 1
-#   visit_thumb_crop_initial_wait_seconds: 5
-#   visit_thumb_crop_max_attempts: 3
-#   visit_thumb_crop_retry_wait_seconds: 5
 #   ai_stage_parallel_limit: 2
 #   ai_stage_stale_minutes: 5
 #   ai_stage_max_attempts: 3
@@ -232,6 +240,8 @@
 #   ai_stage_poll_interval_seconds: 5
 #   ai_stage_default_timeout_seconds: 180
 #   ai_stage_embed_timeout_seconds: 60
+#   alert_ai_initial_wait_seconds: 5
+#   alert_ai_max_images: 4
 object_types:
   car: &vehicle_profile
     chat_path: /REPLACE_WITH_VEHICLE_SLOT/v1/chat/completions
@@ -240,7 +250,12 @@ object_types:
     timeout_seconds: 180
     # This entry uses shape 1 (llama_proxy, the default) from the three-way provider comparison
     # near the top of this file -- swap the chat_path line above for shape 2's (openai) or
-    # shape 3's (anthropic) keys to route THIS type to a hosted provider instead.
+    # shape 3's (anthropic) keys to route THIS type to a hosted provider instead. To route only
+    # the ALERT stage to a hosted provider (recommended, since it's the one sending multiple
+    # images in one prompt) while event_prompt stays on the local model, use alert_provider/
+    # alert_model instead, e.g.:
+    # alert_provider: openai
+    # alert_model: gpt-4o
     #
     # Example overrides (commented out -- uncomment/edit to actually use). Left here as a
     # discoverable template rather than only described in prose above.
@@ -254,8 +269,6 @@ object_types:
     # frigate_snapshot_enabled: true
     # store_video: true
     # store_video_alerts: true
-    # visit_thumb_crop_enabled: true
-    # visit_preview_frame_percentages: [0, 25, 50, 100]
     event_prompt: >-
       This image shows a single moment from one vehicle sighting. In one or two short sentences,
       describe the vehicle's color, body type (sedan/suv/truck/van/pickup/minivan/etc.), make and
@@ -265,14 +278,14 @@ object_types:
       detail isn't visible or you're not confident, simply omit it rather than guessing. Do not
       describe your process.
     alert_prompt: >-
-      This image is a 2x2 grid of 4 frames of the SAME vehicle captured moments apart during one
-      visit (not 4 different vehicles) -- use all 4 panels together for the most confident read,
-      since a detail unclear in one panel (angle, glare, motion blur) may be legible in another,
-      e.g. the plate. In one or two short sentences, describe the vehicle's color, body type, make
-      and model if identifiable, notable features, the license plate text if visible/legible in
-      any panel, and what changed or happened across the sequence (e.g. "pulled into the driveway
-      and parked", "drove past left to right", "reversed out and left"). If a detail isn't
-      visible, omit it. Do not mention that the image is a grid. Do not describe your process.
+      These are several high-resolution photos of the SAME vehicle captured at different moments
+      during one visit (not different vehicles) -- use all of them together for the most confident
+      read, since a detail unclear in one photo (angle, glare, motion blur) may be legible in
+      another, e.g. the plate. In one or two short sentences, describe the vehicle's color, body
+      type, make and model if identifiable, notable features, the license plate text if
+      visible/legible in any photo, and what changed or happened across the sequence (e.g. "pulled
+      into the driveway and parked", "drove past left to right", "reversed out and left"). If a
+      detail isn't visible, omit it. Do not describe your process.
   truck: *vehicle_profile
   person:
     chat_path: /REPLACE_WITH_PERSON_SLOT/v1/chat/completions
@@ -283,14 +296,14 @@ object_types:
       identity. Do not describe your process or repeat these instructions -- respond with only
       the one-sentence description.
     alert_prompt: >-
-      This image is a 2x2 grid of 4 frames of the SAME person captured moments apart during one
-      visit (not 4 different people) -- use all 4 panels together, since a detail unclear in one
-      may be visible in another. Describe this person's clothing colors (a static detail, most
-      reliable from whichever panel shows it most clearly) and what they appear to be doing across
-      the sequence -- e.g. walking toward the door, carrying something, getting in/out of a
+      These are several high-resolution photos of the SAME person captured at different moments
+      during one visit (not different people) -- use all of them together, since a detail unclear
+      in one may be visible in another. Describe this person's clothing colors (a static detail,
+      most reliable from whichever photo shows it most clearly) and what they appear to be doing
+      across the sequence -- e.g. walking toward the door, carrying something, getting in/out of a
       vehicle -- in one short sentence covering both. No speculation about identity. Do not
-      mention that the image is a grid. Do not describe your process or repeat these
-      instructions -- respond with only the one-sentence description.
+      describe your process or repeat these instructions -- respond with only the one-sentence
+      description.
   # A fourth type, added purely by adding an entry here -- no schema/code change (see the
   # object_types comment at the top). Demonstrates a real per-type override in context: this one
   # deployment wants dog *event* notifications (a photo per sighting) even though every other type
@@ -306,11 +319,10 @@ object_types:
       describe your process or repeat these instructions -- respond with only the one-sentence
       description.
     alert_prompt: >-
-      This image is a 2x2 grid of 4 frames of the SAME dog captured moments apart during one visit
-      (not 4 different dogs) -- use all 4 panels together, since a detail unclear in one may be
-      visible in another. Describe this dog's breed (a static detail, most reliable from whichever
-      panel shows it most clearly) and what they appear to be doing across the sequence -- e.g.
-      walking toward the door, playing, being walked on a leash -- in one short sentence covering
-      both. No speculation about identity. Do not mention that the image is a grid. Do not
-      describe your process or repeat these instructions -- respond with only the one-sentence
-      description.
+      These are several high-resolution photos of the SAME dog captured at different moments
+      during one visit (not different dogs) -- use all of them together, since a detail unclear in
+      one may be visible in another. Describe this dog's breed (a static detail, most reliable from
+      whichever photo shows it most clearly) and what they appear to be doing across the sequence
+      -- e.g. walking toward the door, playing, being walked on a leash -- in one short sentence
+      covering both. No speculation about identity. Do not describe your process or repeat these
+      instructions -- respond with only the one-sentence description.

@@ -173,365 +173,6 @@ def test_crop_and_scale_disabled_ignores_an_invalid_box(monkeypatch):
     assert result
 
 
-def _fake_run_factory_for_preview(offsets_that_produce_no_output=frozenset()):
-    # Distinguishes the three kinds of ffmpeg calls build_visit_preview makes by their distinctive
-    # flags: "-ss" for a raw frame grab (may produce no output, same truncated-clip behavior
-    # crop_and_scale guards against), "-framerate" for the final GIF assembly, and anything else
-    # (per-panel crop/scale, or the grid xstack assembly) just writes fake bytes to its own output
-    # path (always the last argv element for an ffmpeg invocation).
-    calls = []
-
-    def fake_run(cmd, check, capture_output):
-        calls.append(list(cmd))
-        if "-ss" in cmd:
-            offset = cmd[cmd.index("-ss") + 1]
-            out_path = cmd[-1]
-            if offset in offsets_that_produce_no_output:
-                return  # ffmpeg's real behavior here: exit 0, no file written
-            with open(out_path, "wb") as f:
-                f.write(b"fake-frame-bytes")
-        elif "-framerate" in cmd:
-            with open(cmd[-1], "wb") as f:
-                f.write(b"fake-gif-bytes")
-        else:
-            with open(cmd[-1], "wb") as f:
-                f.write(b"fake-image-bytes")
-
-    return fake_run, calls
-
-
-def test_build_visit_preview_falls_through_to_independent_timestamps_when_local_video_is_too_short(
-    monkeypatch, tmp_path,
-):
-    # A stored visit video can be a short/bad clip too -- alert_video_worker only validates byte
-    # size (VIDEO_MIN_VALID_BYTES=1000 in production, confirmed live -- far below what even a
-    # genuinely short few-second clip weighs), so a bad download can pass that check and get
-    # stored as "done". video_path never changes once set, so treating this as a permanent dead
-    # end would mean the visit's preview could never succeed on any retry -- must fall through to
-    # sampling each of the 4 moments independently against Frigate instead.
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 3.9335)
-    fake_run, calls = _fake_run_factory_for_preview()
-    monkeypatch.setattr(crop.subprocess, "run", fake_run)
-
-    local_video = tmp_path / "visit-163.mp4"
-    local_video.write_bytes(b"fake-clip-bytes")
-    visit = {
-        "id": 163,
-        "start_ts": 1784219191.0,
-        "end_ts": 1784219201.0,  # nominal requested span ~20s -- local "video" claims only 3.9s
-        "cameras": "outside",
-        "video_path": str(local_video),
-    }
-    representative_event = {"det_id": "fake-det-id"}
-
-    grid_b64, gif_b64 = crop.build_visit_preview(visit, representative_event)
-
-    assert grid_b64 and gif_b64
-    grab_calls = [c for c in calls if "-ss" in c]
-    assert len(grab_calls) == 4
-    # Every grab hit Frigate directly, not the (too-short) local file.
-    assert all(c[c.index("-i") + 1] != str(local_video) for c in grab_calls)
-
-
-def test_build_visit_preview_raises_when_local_video_too_short_and_no_independent_frame_found(
-    monkeypatch, tmp_path,
-):
-    # Both fallback layers exhausted: the stored video is too short AND Frigate has nothing at any
-    # of the 4 sampled moments either -- must still raise (routing into the normal retry path).
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 3.9335)
-
-    def fake_run(cmd, check, capture_output):
-        if "-ss" in cmd:
-            return  # every independent-timestamp request also comes back with nothing.
-        raise AssertionError("grid/gif assembly should never run if every frame grab failed")
-
-    monkeypatch.setattr(crop.subprocess, "run", fake_run)
-
-    local_video = tmp_path / "visit-163.mp4"
-    local_video.write_bytes(b"fake-clip-bytes")
-    visit = {
-        "id": 163, "start_ts": 1784219191.0, "end_ts": 1784219201.0,
-        "cameras": "outside", "video_path": str(local_video),
-    }
-    representative_event = {"det_id": "fake-det-id"}
-
-    try:
-        crop.build_visit_preview(visit, representative_event)
-        assert False, "expected ValueError"
-    except ValueError as exc:
-        assert "Could not grab a frame at any" in str(exc)
-
-
-def test_build_visit_preview_uses_local_video_and_samples_actual_duration(monkeypatch, tmp_path):
-    # Once a visit video is already downloaded, proportional sampling is based on its own measured
-    # duration, not the nominal requested window -- Frigate's continuous-recording endpoint pads
-    # an unpredictable amount of extra footage onto EITHER edge of a requested window (confirmed
-    # live in production both ways -- see CLAUDE.md), so anchoring to the file's own duration
-    # sidesteps that regardless of which edge got padded.
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 20.6)
-    fake_run, calls = _fake_run_factory_for_preview()
-    monkeypatch.setattr(crop.subprocess, "run", fake_run)
-
-    local_video = tmp_path / "visit-1.mp4"
-    local_video.write_bytes(b"fake-clip-bytes")
-    visit = {
-        "start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2",
-        "video_path": str(local_video),
-    }
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    grid_b64, gif_b64 = crop.build_visit_preview(visit, representative_event)
-
-    assert grid_b64 and gif_b64
-    grab_calls = [c for c in calls if "-ss" in c]
-    assert len(grab_calls) == 4
-    assert {c[c.index("-i") + 1] for c in grab_calls} == {str(local_video)}
-    # margin=0.3s, usable=20.6-0.6=20.0 -> 0.3 + pct/100*20.0 for pct in (0,25,50,100).
-    offsets = sorted(float(c[c.index("-ss") + 1]) for c in grab_calls)
-    assert offsets == [0.3, 5.3, 10.3, 20.3]
-
-
-def test_build_visit_preview_reuses_already_downloaded_visit_video(monkeypatch, tmp_path):
-    # Regression test: confirmed live that alert_video_worker's own clip download can succeed
-    # (full-length clip) mere seconds before build_visit_preview's independent re-request of the
-    # exact same Frigate URL comes back near-empty -- Frigate's continuous-recording endpoint is a
-    # race against its own segment cleanup, not a stable source you can re-query freely. Once a
-    # visit's video is already stored on disk (video_path set), reuse that file instead of
-    # re-entering the race.
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    monkeypatch.setattr(crop, "_probe_duration_seconds", lambda clip_url: 20.6)
-    fake_run, calls = _fake_run_factory_for_preview()
-    monkeypatch.setattr(crop.subprocess, "run", fake_run)
-
-    local_video = tmp_path / "visit-171.mp4"
-    local_video.write_bytes(b"fake-clip-bytes")
-
-    visit = {
-        "start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2",
-        "video_path": str(local_video),
-    }
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    grid_b64, gif_b64 = crop.build_visit_preview(visit, representative_event)
-
-    assert grid_b64 and gif_b64
-    grab_calls = [c for c in calls if "-ss" in c]
-    assert {c[c.index("-i") + 1] for c in grab_calls} == {str(local_video)}
-
-
-def test_build_visit_preview_fetches_each_sampled_moment_independently_when_no_video_stored_yet(monkeypatch):
-    # video_path absent (STORE_VIDEO_ALERTS off, or the video worker hasn't succeeded yet) --
-    # each of the 4 sampled moments (0/25/50/100% of the visit's own start_ts->end_ts span) is now
-    # requested independently (_panels_from_independent_timestamps), not as one whole-visit-span
-    # request -- a gap at one moment then can't take the other three down with it (see
-    # test_build_visit_preview_reuses_neighbor_frame_when_one_timestamp_has_no_footage).
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    fake_run, calls = _fake_run_factory_for_preview()
-    monkeypatch.setattr(crop.subprocess, "run", fake_run)
-
-    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2", "video_path": None}
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    crop.build_visit_preview(visit, representative_event)
-
-    grab_calls = [c for c in calls if "-ss" in c]
-    assert len(grab_calls) == 4
-    # 4 distinct URLs -- each sampled moment gets its own -5s/+5s window (build_clip_url) around
-    # that specific timestamp, not one request spanning the whole visit.
-    assert {c[c.index("-i") + 1] for c in grab_calls} == {
-        "http://frigate.test:5000/api/outside2/start/1784219186/end/1784219196/clip.mp4",  # 0%
-        "http://frigate.test:5000/api/outside2/start/1784219188/end/1784219198/clip.mp4",  # 25%
-        "http://frigate.test:5000/api/outside2/start/1784219191/end/1784219201/clip.mp4",  # 50%
-        "http://frigate.test:5000/api/outside2/start/1784219196/end/1784219206/clip.mp4",  # 100%
-    }
-    # Each grab targets the middle of its own small window -- the sampled moment itself.
-    assert {float(c[c.index("-ss") + 1]) for c in grab_calls} == {5.0}
-
-
-def test_build_visit_preview_respects_configured_frame_percentages(monkeypatch):
-    # VISIT_PREVIEW_FRAME_PERCENTAGES is deployment-tunable (e.g. "5,35,65,90" to stay a bit clear
-    # of both edges instead of landing exactly on them) -- confirms changing it actually changes
-    # which moments get sampled, not just the default (0,25,50,100).
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    monkeypatch.setattr(config, "VISIT_PREVIEW_FRAME_PERCENTAGES", [5, 35, 65, 90])
-    fake_run, calls = _fake_run_factory_for_preview()
-    monkeypatch.setattr(crop.subprocess, "run", fake_run)
-
-    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    crop.build_visit_preview(visit, representative_event)
-
-    grab_calls = [c for c in calls if "-ss" in c]
-    urls = {c[c.index("-i") + 1] for c in grab_calls}
-    assert urls == {
-        "http://frigate.test:5000/api/outside2/start/1784219186/end/1784219196/clip.mp4",  # 5%
-        "http://frigate.test:5000/api/outside2/start/1784219189/end/1784219199/clip.mp4",  # 35%
-        "http://frigate.test:5000/api/outside2/start/1784219192/end/1784219202/clip.mp4",  # 65%
-        "http://frigate.test:5000/api/outside2/start/1784219195/end/1784219205/clip.mp4",  # 90%
-    }
-
-
-def test_build_visit_preview_frame_percentages_param_overrides_global_config(monkeypatch):
-    # frame_percentages passed explicitly (as visit_thumb_worker.py does once resolved via
-    # profile_config.visit_preview_frame_percentages) wins over config.VISIT_PREVIEW_FRAME_PERCENTAGES
-    # entirely -- a per-type override, not just the global default.
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    monkeypatch.setattr(config, "VISIT_PREVIEW_FRAME_PERCENTAGES", [0, 25, 50, 100])
-    fake_run, calls = _fake_run_factory_for_preview()
-    monkeypatch.setattr(crop.subprocess, "run", fake_run)
-
-    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    crop.build_visit_preview(visit, representative_event, frame_percentages=[5, 35, 65, 90])
-
-    grab_calls = [c for c in calls if "-ss" in c]
-    urls = {c[c.index("-i") + 1] for c in grab_calls}
-    assert urls == {
-        "http://frigate.test:5000/api/outside2/start/1784219186/end/1784219196/clip.mp4",  # 5%
-        "http://frigate.test:5000/api/outside2/start/1784219189/end/1784219199/clip.mp4",  # 35%
-        "http://frigate.test:5000/api/outside2/start/1784219192/end/1784219202/clip.mp4",  # 65%
-        "http://frigate.test:5000/api/outside2/start/1784219195/end/1784219205/clip.mp4",  # 90%
-    }
-
-
-def test_build_visit_preview_returns_distinct_grid_and_gif_images(monkeypatch):
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    fake_run, _ = _fake_run_factory_for_preview()
-    monkeypatch.setattr(crop.subprocess, "run", fake_run)
-
-    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    grid_b64, gif_b64 = crop.build_visit_preview(visit, representative_event)
-
-    assert base64.b64decode(grid_b64) == b"fake-image-bytes"
-    assert base64.b64decode(gif_b64) == b"fake-gif-bytes"
-
-
-def test_build_visit_preview_respects_crop_disabled_for_every_panel(monkeypatch):
-    monkeypatch.setattr(config, "CROP_DISABLED", True)
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    fake_run, calls = _fake_run_factory_for_preview()
-    monkeypatch.setattr(crop.subprocess, "run", fake_run)
-
-    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    crop.build_visit_preview(visit, representative_event)
-
-    # 4 grid panels + 4 full-size GIF frames, all derived from the same 4 raw moments.
-    panel_calls = [c for c in calls if "-vf" in c and "-ss" not in c and "-framerate" not in c]
-    assert len(panel_calls) == 8
-    for c in panel_calls:
-        assert "crop=" not in c[c.index("-vf") + 1]
-        assert "scale=" in c[c.index("-vf") + 1]
-
-
-def test_build_visit_preview_crop_disabled_param_overrides_global_config(monkeypatch):
-    # crop_disabled passed explicitly (True) wins even though the global config default is False --
-    # same per-type-override precedent as frame_percentages above.
-    monkeypatch.setattr(config, "CROP_DISABLED", False)
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    fake_run, calls = _fake_run_factory_for_preview()
-    monkeypatch.setattr(crop.subprocess, "run", fake_run)
-
-    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    crop.build_visit_preview(visit, representative_event, crop_disabled=True)
-
-    panel_calls = [c for c in calls if "-vf" in c and "-ss" not in c and "-framerate" not in c]
-    assert len(panel_calls) == 8
-    for c in panel_calls:
-        assert "crop=" not in c[c.index("-vf") + 1]
-
-
-def test_build_visit_preview_reuses_neighbor_frame_when_one_timestamp_has_no_footage(monkeypatch):
-    # One sampled moment (here, the 50% timestamp's own -5s/+5s window) has genuinely nothing
-    # retained -- Frigate's per-segment retention (record.continuous.days: 0, see CLAUDE.md) means
-    # this is a real, not-transient outcome for some moments, not just an ffmpeg glitch. The gap
-    # reuses the nearest earlier successful frame instead of failing the whole grid over one
-    # missing percentage point.
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-    # The 50% sample's window is start/1784219191/end/1784219201 (see the URL math in
-    # test_build_visit_preview_fetches_each_sampled_moment_independently_when_no_video_stored_yet).
-    no_footage_url = "http://frigate.test:5000/api/outside2/start/1784219191/end/1784219201/clip.mp4"
-    calls = []
-
-    def fake_run(cmd, check, capture_output):
-        calls.append(list(cmd))
-        if "-ss" in cmd:
-            url = cmd[cmd.index("-i") + 1]
-            if url == no_footage_url:
-                return  # ffmpeg's real behavior here: exit 0, no file written -- both attempts.
-            with open(cmd[-1], "wb") as f:
-                f.write(b"fake-frame-bytes")
-        elif "-framerate" in cmd:
-            with open(cmd[-1], "wb") as f:
-                f.write(b"fake-gif-bytes")
-        else:
-            with open(cmd[-1], "wb") as f:
-                f.write(b"fake-image-bytes")
-
-    monkeypatch.setattr(crop.subprocess, "run", fake_run)
-
-    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    grid_b64, gif_b64 = crop.build_visit_preview(visit, representative_event)
-
-    assert grid_b64 and gif_b64
-    # Still 4 panel-crop calls -- the gap (index 2, the 50% sample) was filled by reusing index 1's
-    # (25%) already-successful raw frame rather than being dropped or left empty.
-    panel_calls = [c for c in calls if c[-1].endswith(("panel_1.jpg", "panel_2.jpg"))]
-    assert len(panel_calls) == 2
-    inputs = {c[c.index("-i") + 1] for c in panel_calls}
-    assert len(inputs) == 1  # both panels 1 and 2 were cropped from the same reused raw frame
-
-
-def test_build_visit_preview_raises_when_no_sampled_moment_has_any_footage(monkeypatch):
-    # If literally none of the 4 sampled moments have any retained footage, there's nothing to
-    # reuse -- this must still raise (routing into the normal retry-then-fallback path), not
-    # silently produce an empty/garbage grid.
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0.1, 0.1, 0.2, 0.2]}})
-
-    def fake_run(cmd, check, capture_output):
-        if "-ss" in cmd:
-            return  # every sampled moment comes back with nothing at all.
-        raise AssertionError("grid/gif assembly should never run if every frame grab failed")
-
-    monkeypatch.setattr(crop.subprocess, "run", fake_run)
-
-    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    try:
-        crop.build_visit_preview(visit, representative_event)
-        assert False, "expected ValueError"
-    except ValueError as exc:
-        assert "Could not grab a frame at any" in str(exc)
-
-
-def test_build_visit_preview_raises_on_invalid_box_when_crop_enabled(monkeypatch):
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {"data": {"region": [0, 0, 0, 0.2]}})
-    fake_run, _ = _fake_run_factory_for_preview()
-    monkeypatch.setattr(crop.subprocess, "run", fake_run)
-
-    visit = {"start_ts": 1784219191.0, "end_ts": 1784219201.0, "cameras": "outside2"}
-    representative_event = {"det_id": "1784219191.5-abc123"}
-
-    try:
-        crop.build_visit_preview(visit, representative_event)
-        assert False, "expected ValueError"
-    except ValueError:
-        pass
-
-
 # ---- fetch_frigate_snapshot_base64 / crop_event's FRIGATE_SNAPSHOT_ENABLED branch ----
 
 def test_fetch_frigate_snapshot_base64_returns_encoded_bytes(monkeypatch):
@@ -583,6 +224,60 @@ def test_crop_event_uses_record_stream_crop_when_snapshot_disabled(monkeypatch):
     result = crop.crop_event(raw_event)
 
     assert result == {"crop_image_base64": "record-stream-crop-base64", "sub_label": None, "score": 0.5}
+
+
+def test_crop_event_high_res_fetches_event_and_crops_from_record_stream(monkeypatch):
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
+        "data": {"region": [0.1, 0.1, 0.2, 0.2], "score": 0.5}, "sub_label": None,
+    })
+    captured = {}
+
+    def fake_crop_and_scale(clip_url, offset, box, crop_disabled=None, crop_padding_pct=None):
+        captured["clip_url"] = clip_url
+        captured["offset"] = offset
+        return "high-res-crop-base64"
+    monkeypatch.setattr(crop, "crop_and_scale", fake_crop_and_scale)
+
+    raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
+    result = crop.crop_event_high_res(raw_event)
+
+    assert result == "high-res-crop-base64"
+    assert captured["clip_url"] == f"{config.FRIGATE_API_BASE}/api/events/abc123/clip.mp4"
+    assert captured["offset"] == 50.0  # default CROP_FRAME_OFFSET_PCT (0.5) midpoint
+
+
+def test_crop_event_high_res_reuses_already_fetched_event(monkeypatch):
+    # crop_event's own non-snapshot branch already fetched the Frigate event once (for
+    # sub_label/score) -- passing it through here must skip a second, redundant fetch.
+    def _fail_if_called(det_id):
+        raise AssertionError("fetch_frigate_event should not run when event= is already provided")
+    monkeypatch.setattr(crop, "fetch_frigate_event", _fail_if_called)
+    monkeypatch.setattr(crop, "crop_and_scale", lambda *a, **k: "high-res-crop-base64")
+
+    raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
+    event = {"data": {"region": [0.1, 0.1, 0.2, 0.2]}}
+    result = crop.crop_event_high_res(raw_event, event=event)
+
+    assert result == "high-res-crop-base64"
+
+
+def test_crop_event_uses_record_stream_crop_calls_frigate_event_only_once(monkeypatch):
+    # crop_event's non-snapshot branch must fetch the Frigate event exactly once and reuse it for
+    # both crop_event_high_res's box computation and its own sub_label/score fields -- not fetch
+    # it twice.
+    monkeypatch.setattr(config, "FRIGATE_SNAPSHOT_ENABLED", False)
+    call_count = {"n": 0}
+
+    def counting_fetch(det_id):
+        call_count["n"] += 1
+        return {"data": {"region": [0.1, 0.1, 0.2, 0.2], "score": 0.5}, "sub_label": None}
+    monkeypatch.setattr(crop, "fetch_frigate_event", counting_fetch)
+    monkeypatch.setattr(crop, "crop_and_scale", lambda *a, **k: "record-stream-crop-base64")
+
+    raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
+    crop.crop_event(raw_event)
+
+    assert call_count["n"] == 1
 
 
 def test_crop_event_frigate_snapshot_enabled_param_overrides_global_config(monkeypatch):

@@ -1,6 +1,6 @@
-"""Seeds the demo Postgres with a small, varied synthetic dataset -- events, visits (with
-animated preview GIFs, never the flat composite grid), sightings/visit_sightings with
-deterministic embeddings, and a couple of tiny real mp4 clips for the Video toggle."""
+"""Seeds the demo Postgres with a small, varied synthetic dataset -- events, visits,
+sightings/visit_sightings with deterministic embeddings, and a couple of tiny real mp4 clips for
+the Video toggle."""
 import datetime
 import os
 import subprocess
@@ -51,19 +51,18 @@ def add_sighting(event_id, object_label, description):
     db.complete_sighting(event_id, object_label, description, embedding=embed(description))
 
 
-def insert_visit(camera, objects, minutes_ago, det_ids, gif_b64, video_path=None):
+def insert_visit(camera, objects, minutes_ago, det_ids, video_path=None):
     start = ts(minutes_ago)
     end = start + datetime.timedelta(seconds=42)
     video_status = "done" if video_path else "skipped"
     rows = db._execute(
         """
         INSERT INTO yard_stats.visits
-            (zone, objects, start_ts, end_ts, cameras, camera_count, video_status, video_path,
-             preview_gif_base64, thumb_crop_status)
-        VALUES (%s, %s, %s, %s, %s, 1, %s, %s, %s, 'done')
+            (zone, objects, start_ts, end_ts, cameras, camera_count, video_status, video_path)
+        VALUES (%s, %s, %s, %s, %s, 1, %s, %s)
         RETURNING id
         """,
-        (camera, objects, start, end, camera, video_status, video_path, gif_b64),
+        (camera, objects, start, end, camera, video_status, video_path),
         fetch=True,
     )
     visit_id = rows[0]["id"]
@@ -129,10 +128,9 @@ def main():
     insert_event("driveway", "car", 15, img0, det_id=det_a1)
     insert_event("driveway", "car", 15, img3, det_id=det_a2)
     suv_frames = [g.frame_silver_suv(fmt_osd(ts(15) + datetime.timedelta(seconds=s * 2)), zoom=z) for s, z in enumerate(zoom_steps)]
-    suv_gif = g.gif_base64(suv_frames)
     suv_clip = os.path.join(video_alerts_root, "visit-car-1-demo.mp4")
     make_clip(suv_frames, suv_clip)
-    visit_a = insert_visit("driveway", "car", 15, [det_a1, det_a2], suv_gif, video_path=suv_clip)
+    visit_a = insert_visit("driveway", "car", 15, [det_a1, det_a2], video_path=suv_clip)
     add_visit_sighting(visit_a, "car", "Silver SUV pulled into the driveway, headlights on, roof rails visible, engine shut off after a few seconds.")
 
     # -- Visit B: delivery person walking near the front door and back -- a real photo shot from
@@ -141,9 +139,7 @@ def main():
     det_b1 = f"demo-{uuid.uuid4()}"
     img0 = g.frame_delivery_person(fmt_osd(ts(5)), zoom=zoom_steps[0])
     insert_event("front_door", "person", 5, img0, det_id=det_b1)
-    person_frames = [g.frame_delivery_person(fmt_osd(ts(5) + datetime.timedelta(seconds=s * 2)), zoom=z) for s, z in enumerate(zoom_steps)]
-    person_gif = g.gif_base64(person_frames)
-    visit_b = insert_visit("front_door", "person", 5, [det_b1], person_gif)
+    visit_b = insert_visit("front_door", "person", 5, [det_b1])
     add_visit_sighting(visit_b, "person", "Delivery person wearing a blue jacket walked up to the front door, left a package, and walked back toward the street.")
 
     print("seed complete")

@@ -164,19 +164,12 @@ def test_frigate_snapshot_enabled_uses_type_override_and_falls_back_to_global(mo
     assert profile_config.frigate_snapshot_enabled(CROP_PROFILE, "person") is True
 
 
-def test_visit_preview_frame_percentages_uses_type_override_and_falls_back_to_global(monkeypatch):
-    monkeypatch.setattr(config, "VISIT_PREVIEW_FRAME_PERCENTAGES", [0, 25, 50, 100])
-    profile = {"object_types": {"car": {"visit_preview_frame_percentages": [5, 35, 65, 90]}}}
-    assert profile_config.visit_preview_frame_percentages(profile, "car") == [5, 35, 65, 90]
-    assert profile_config.visit_preview_frame_percentages(profile, "person") == [0, 25, 50, 100]
-
-
-# ---- store_video / store_video_alerts / visit_thumb_crop_enabled claim filters ----
+# ---- store_video / store_video_alerts claim filters ----
 #
 # These gate a whole poll thread (main.py) *and* narrow a claim query (claim_video_batch/
-# claim_visit_video_batch/claim_visit_thumb_crop_batch) -- unlike the AI-stage flags, they apply to
-# any Frigate label by default, so the filter must be an include-or-exclude split, never a plain
-# include-list checked against every "known" label (see profile_config.py's own docstring).
+# claim_visit_video_batch) -- unlike the AI-stage flags, they apply to any Frigate label by
+# default, so the filter must be an include-or-exclude split, never a plain include-list checked
+# against every "known" label (see profile_config.py's own docstring).
 
 def test_claim_filter_returns_no_filter_when_base_enabled_and_no_overrides(monkeypatch):
     monkeypatch.setattr(config, "STORE_VIDEO", True)
@@ -208,17 +201,10 @@ def test_claim_filter_respects_defaults_section_as_the_base(monkeypatch):
     assert profile_config.store_video_claim_filter(profile) == (None, ["person"])
 
 
-def test_store_video_alerts_and_visit_thumb_crop_claim_filters_use_their_own_keys(monkeypatch):
+def test_store_video_alerts_claim_filter_uses_its_own_key(monkeypatch):
     monkeypatch.setattr(config, "STORE_VIDEO_ALERTS", False)
-    monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", True)
-    profile = {
-        "object_types": {
-            "car": {"store_video_alerts": True},
-            "dog": {"visit_thumb_crop_enabled": False},
-        },
-    }
+    profile = {"object_types": {"car": {"store_video_alerts": True}}}
     assert profile_config.store_video_alerts_claim_filter(profile) == (["car"], None)
-    assert profile_config.visit_thumb_crop_claim_filter(profile) == (None, ["dog"])
 
 
 def test_any_store_video_enabled_true_when_base_enabled(monkeypatch):
@@ -238,8 +224,6 @@ def test_any_store_video_enabled_false_when_nothing_enables_it(monkeypatch):
     assert profile_config.any_store_video_enabled({"object_types": {"car": {}}}) is False
 
 
-def test_any_store_video_alerts_and_visit_thumb_crop_enabled(monkeypatch):
+def test_any_store_video_alerts_enabled_via_per_type_opt_in(monkeypatch):
     monkeypatch.setattr(config, "STORE_VIDEO_ALERTS", False)
-    monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", False)
     assert profile_config.any_store_video_alerts_enabled({"object_types": {"car": {"store_video_alerts": True}}}) is True
-    assert profile_config.any_visit_thumb_crop_enabled({"object_types": {"car": {}}}) is False

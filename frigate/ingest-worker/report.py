@@ -14,26 +14,7 @@ def _fmt_time(ts: datetime) -> str:
     return ts.strftime("%Y-%m-%d %H:%M:%S UTC")
 
 
-def _img_cell(
-    image_base64: str | None, lightboxes: list, counter: list, gif_base64: str | None = None,
-) -> str:
-    if gif_base64:
-        # The visit's own animated preview GIF -- the richer artifact, preferred over the static
-        # composite grid whenever it's ready (see db.get_report_data's gif_image_expr). Embedded
-        # once, directly, CSS-constrained to the same on-screen size as the JPEG thumbnail below
-        # rather than also re-encoding a separate smaller copy: unlike a JPEG there's no cheap way
-        # to produce a second, smaller re-encoded GIF here, and a second lightbox <img> pointing at
-        # the exact same base64 bytes would reintroduce the identical double-embed bloat this
-        # report already fixed once for JPEGs (the old n8n version's 42MB report bug). Click-to-
-        # enlarge instead reuses this same <img> element's already-decoded src (showGifModal(this.
-        # src), see generate_report's shared #gif-modal) rather than a second server-rendered <img>
-        # tag -- the browser holds one decoded copy either way, but the static HTML source itself
-        # never carries the base64 text twice.
-        return (
-            f'<img src="data:image/gif;base64,{gif_base64}" alt="preview (animated, click to enlarge)" '
-            'style="max-width:160px;max-height:160px;display:block;cursor:pointer;" '
-            'onclick="showGifModal(this.src)">'
-        )
+def _img_cell(image_base64: str | None, lightboxes: list, counter: list) -> str:
     # Two different sizes, each embedded exactly once: a small on-the-fly thumbnail for the
     # inline preview (generated here, never touching the stored full-quality image), and the
     # original full-size crop only inside the lightbox overlay for the click-to-enlarge view --
@@ -69,7 +50,6 @@ def _group_by_visit(sightings: list) -> list[dict]:
             groups[key] = {
                 "start_ts": row["start_ts"], "camera": row["camera"],
                 "crop_image_base64": row["crop_image_base64"],
-                "preview_gif_base64": row.get("preview_gif_base64"),
                 "sightings": [],
             }
             order.append(key)
@@ -80,7 +60,6 @@ def _group_by_visit(sightings: list) -> list[dict]:
             group["start_ts"] = row["start_ts"]
             group["camera"] = row["camera"]
             group["crop_image_base64"] = row["crop_image_base64"]
-            group["preview_gif_base64"] = row.get("preview_gif_base64")
         group["sightings"].append(row)
 
     return [groups[key] for key in order]
@@ -97,7 +76,7 @@ def _build_alert_rows(sightings: list, lightboxes: list, counter: list) -> str:
         # all of them, joined, rather than picking just one.
         summary = "; ".join(f"{s['object_label']}: {s['description']}" for s in g["sightings"] if s["description"]) or None
         rows.append(
-            f"<tr><td>{_img_cell(g['crop_image_base64'], lightboxes, counter, g['preview_gif_base64'])}</td>"
+            f"<tr><td>{_img_cell(g['crop_image_base64'], lightboxes, counter)}</td>"
             f"<td>{_fmt_time(g['start_ts'])}</td><td>{_esc(g['camera'])}</td>"
             f"<td>{_esc(summary)}</td></tr>"
         )
@@ -105,16 +84,15 @@ def _build_alert_rows(sightings: list, lightboxes: list, counter: list) -> str:
 
 
 def generate_report(
-    start: datetime, end: datetime, source: str = "events", include_preview: str = "gif",
+    start: datetime, end: datetime, source: str = "events", include_image: bool = True,
     object_label: str | None = None,
 ) -> dict:
-    # include_preview is "gif" (default, today's original behavior)/"image"/"none" -- see
-    # db.get_report_data. Both narrower modes already come back with the corresponding field(s)
-    # NULL at the SQL level, so _img_cell's existing fallbacks (grid/crop when there's no GIF,
-    # "(no image)" when there's no image at all) apply with no separate rendering path needed.
-    # object_label (optional) restricts the report to a single Frigate object type, e.g. a
-    # "cars only" report alongside the default "every type" one -- see db.get_report_data.
-    data = db.get_report_data(start, end, source, include_preview, object_label)
+    # include_image=false drops the row image entirely (see db.get_report_data) -- comes back NULL
+    # at the SQL level, so _img_cell's existing "(no image)" fallback applies with no separate
+    # rendering path needed. object_label (optional) restricts the report to a single Frigate
+    # object type, e.g. a "cars only" report alongside the default "every type" one -- see
+    # db.get_report_data.
+    data = db.get_report_data(start, end, source, include_image, object_label)
     sightings = data["sightings"]
 
     lightboxes: list[str] = []
@@ -132,22 +110,7 @@ tr:nth-child(even){background:#f7f7f7;}
 .lightbox{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:1000;text-align:center;}
 .lightbox:target{display:flex;align-items:center;justify-content:center;}
 .lightbox img{max-width:95%;max-height:95%;}
-#gif-modal{display:none;position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.9);z-index:1000;align-items:center;justify-content:center;text-align:center;cursor:pointer;}
-#gif-modal img{max-width:95%;max-height:95%;}
 </style>"""
-
-    # One shared modal + tiny script for every GIF cell's click-to-enlarge, rather than a
-    # per-row lightbox <div> the way the JPEG case gets -- see _img_cell's comment: reusing
-    # the clicked <img>'s own already-decoded src avoids ever writing the GIF's base64 text
-    # into the HTML source a second time. Always included (source="events" never renders a
-    # GIF cell, so it's simply never invoked there, at negligible fixed cost).
-    gif_modal = (
-        '<div id="gif-modal" onclick="this.style.display=\'none\'"><img id="gif-modal-img"></div>'
-        "<script>function showGifModal(src){"
-        "document.getElementById('gif-modal-img').src=src;"
-        "document.getElementById('gif-modal').style.display='flex';"
-        "}</script>"
-    )
 
     # Title/caption note when scoped to one object type -- the table itself needs no separate
     # rendering path (a filtered query just returns fewer rows), only the heading/caption gain a
@@ -187,7 +150,7 @@ tr:nth-child(even){background:#f7f7f7;}
 
     html_doc = (
         f'<!DOCTYPE html><html><head><meta charset="utf-8">{style}</head><body>'
-        f"{body}\n{chr(10).join(lightboxes)}\n{gif_modal}\n</body></html>"
+        f"{body}\n{chr(10).join(lightboxes)}\n</body></html>"
     )
 
     return {

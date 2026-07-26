@@ -18,11 +18,9 @@ once — bring it up in stages so if something looks wrong, you know which piece
    `http://<host>:8080/ui` or via `/events` in Swagger.
 2. **Turn on video storage** (`store_video` in `profiles.yaml`) once step 1 looks right, if you
    want stored clips alongside the crops.
-3. **Turn on the alerts/visits flow** (`store_video_alerts`, `visit_thumb_crop_enabled`, both in
+3. **Turn on the alerts/visits flow** (`store_video_alerts`, `ai_alerts_enabled`, both in
    `profiles.yaml`) once you're comfortable with the events flow — these group multiple detections
-   into one real-world "visit" and are a separate, independently-toggleable layer on top (see
-   [`frigate.md`](frigate.md) for why the visit-preview feature specifically depends on your
-   Frigate recording retention settings).
+   into one real-world "visit" and are a separate, independently-toggleable layer on top.
 4. **Turn on Telegram** whenever you want notifications — independent of everything else.
 5. **Semantic search and the internal AI stages are both separate, later opt-ins** — neither is
    needed to get the core pipeline running. The AI stage itself (`ai_events_stage_enabled`,
@@ -83,8 +81,10 @@ instead — see "Per-object-type overrides" below for the full mechanism.
   `bbox=0`/`timestamp=0`/`h=` query params on the snapshot endpoint have no effect at all). Set to
   `false` to fall back to this project's original seek-based approach if that trade-off doesn't
   work for your footage — `crop_disabled`/`crop_frame_offset_pct`/`crop_padding_pct` only take
-  effect once you do. A visit's own composite grid (`visit_thumb_crop_enabled`) is unaffected
-  either way — a single Frigate snapshot has no multi-frame equivalent to offer it.
+  effect once you do. The alert stage's own high-res per-event crops (see "Internal AI stages"
+  below) always use the seek-based approach regardless of this setting, since a durable, high-res
+  frame is what that stage needs — `FRIGATE_SNAPSHOT_ENABLED` only affects the events stage's own
+  single-frame crop.
 
 All four can be set globally via `profiles.yaml`'s `defaults:` section, or per object type, e.g. to
 have `car` use a seek-based crop with extra padding for plate legibility while everything else
@@ -155,20 +155,6 @@ each camera's own top-level directory to report real on-disk video bytes — thi
 because of the layout above, so a pre-migration file (still under a bare year directory) won't be
 attributed to a real camera name there; it'll show up bucketed under that year instead.
 
-## Visit previews (composite grid + GIF)
-
-`visit_thumb_crop_enabled` (default `false`, in `profiles.yaml` — see "Per-object-type overrides"
-below) turns on a fifth artifact: once a visit (a Frigate review/alert) closes, `ingest-worker`
-samples 4 frames proportionally across that visit's own span and combines them into one composite
-grid image (what actually gets analyzed and shown) plus a separate animated GIF (human preview
-only, in the web UI). `visit_preview_frame_percentages` (default `[0, 25, 50, 100]`, a real YAML
-list in `profiles.yaml`, not a comma-separated string) controls exactly which 4 points get sampled
-— e.g. `[5, 35, 65, 90]` to stay a little clear of both edges. See [`frigate.md`](frigate.md) for
-why this feature's reliability depends on your `record.continuous.days` setting.
-
-Both can be set globally via `defaults:`, or per object type — e.g. a slower-moving `car` visit
-might want frames spread wider than a `person` visit that's over quickly.
-
 ## Telegram notifications
 
 Two more **independent** settings, each a *mode* (`none` / `image` / `video` / `all`), not a bool
@@ -179,9 +165,9 @@ overrides" below):
   `video` sends the clip once it's stored (`store_video`), standalone rather than threaded onto a
   photo that was never sent; `all` sends both (the video as a reply to the earlier photo).
 - `telegram_alerts_mode` — per-*visit* notifications instead. `image` sends one summary message
-  per visit (photo/GIF once the preview is ready, or text-only immediately if
-  `visit_thumb_crop_enabled` is off); `video` sends the visit's own clip (`store_video_alerts`) as
-  a reply to that summary; `all` sends both.
+  per visit immediately (the representative event's own crop as a photo, or text-only if that
+  crop isn't ready yet); `video` sends the visit's own clip (`store_video_alerts`) as a reply to
+  that summary; `all` sends both.
 
 `image` and `video` are independent halves within each mode, not a ladder — setting `video` alone
 does *not* also send the photo/summary; only `all` sends both.
@@ -215,12 +201,11 @@ not `.env` (see "Per-object-type overrides" below):
 a cutoff of your own choosing right now rather than waiting for or reconfiguring the scheduled
 sweep — defaults to a dry run (just shows you counts) until you pass `confirm=true`. `only_media`
 (default `true`) keeps every row and its AI analysis text/plate reads searchable forever; what it
-actually clears is four independent flags, not one all-or-nothing "media" switch: `delete_video`
-(default `true`), `delete_gif` (default `true`), `delete_snapshots` (default `false`),
-`delete_puzzled_preview` (default `false`) — see `web-ui.md` for what each one maps to. Set
-`only_media=false` for the original full-row delete instead (rebuilds the semantic search index
-afterward); the four `delete_*` params are ignored entirely in that mode, since a full row delete
-already covers all of their columns.
+actually clears is two independent flags, not one all-or-nothing "media" switch: `delete_video`
+(default `true`), `delete_snapshots` (default `false`) — see `web-ui.md` for what each one maps to.
+Set `only_media=false` for the original full-row delete instead (rebuilds the semantic search
+index afterward); the two `delete_*` params are ignored entirely in that mode, since a full row
+delete already covers all of their columns.
 
 Two optional, composable scoping params (both also dropdowns on `/ui/admin`) restrict any of the
 above to a subset of your data:
@@ -247,8 +232,9 @@ currently being processed:
 - `telegram_events_mode` / `telegram_alerts_mode`
 - `ai_events_stage_enabled` / `ai_alerts_enabled`
 - `crop_disabled` / `crop_frame_offset_pct` / `crop_padding_pct` / `frigate_snapshot_enabled`
-- `store_video` / `store_video_alerts` / `visit_thumb_crop_enabled`
-- `visit_preview_frame_percentages` (a real YAML list of 4 numbers here, not a comma-separated string)
+- `store_video` / `store_video_alerts`
+- `provider` / `model` / `chat_path` (event-stage VLM routing) and `alert_provider` /
+  `alert_model` / `alert_chat_path` (alert-stage override — see "Hosted VLM providers" below)
 
 Two tiers, checked in this order:
 
@@ -267,11 +253,11 @@ startup rather than per-call:
 - `retention_months` / `retention_check_interval_seconds`
 - `video_parallel_limit` / `video_initial_wait_seconds` / `video_min_valid_bytes` /
   `video_max_attempts` / `video_retry_wait_seconds` / `video_max_age_hours`
-- `visit_thumb_crop_parallel_limit` / `visit_thumb_crop_initial_wait_seconds` /
-  `visit_thumb_crop_max_attempts` / `visit_thumb_crop_retry_wait_seconds`
 - `ai_stage_parallel_limit` / `ai_stage_stale_minutes` / `ai_stage_max_attempts` /
   `ai_stage_max_age_hours` / `ai_stage_poll_interval_seconds`
 - `ai_stage_default_timeout_seconds` / `ai_stage_embed_timeout_seconds`
+- `alert_ai_initial_wait_seconds` (default `5`) / `alert_ai_max_images` (default `4`) — alert-stage
+  only, see "Internal AI stages" below.
 
 For *either* category, if a key is set nowhere, `ingest-worker` falls back to a plain hardcoded
 default in `config.py` (matching this project's original behavior) — there's no third `.env`-backed
@@ -351,10 +337,12 @@ all until you turn at least one of these on (there's no n8n workflow shipped for
   `profiles.yaml`'s `event_prompt`. If you ever build your own n8n workflow against the same
   `/ai-queue/claim` endpoint, don't run it alongside this at once against the same queue (safe
   either way — `FOR UPDATE SKIP LOCKED` prevents a double-claim — just wasteful/confusing).
-- **`ai_alerts_enabled`** — analyzes a visit's own composite grid (4 frames sampled across
-  its span) with `profiles.yaml`'s `alert_prompt`, storing results separately in
-  `visit_sightings`. Requires `visit_thumb_crop_enabled` to be on for that type —
-  without it, no visit ever has a grid ready to analyze, so this stage just stays idle. Can run
+- **`ai_alerts_enabled`** — analyzes a visit with `profiles.yaml`'s `alert_prompt`, storing results
+  separately in `visit_sightings`. Rather than one low-res frame, this stage gathers up to
+  `alert_ai_max_images` (default `4`) genuinely high-resolution crops — one per distinct object
+  type the visit's linked events cover, then temporally-spread re-tracks to fill any remaining
+  slots — built fresh from the record stream at analysis time and discarded right after, never
+  stored. No readiness gate to wait on: a visit is claimable as soon as it exists. Can run
   alongside or instead of `ai_events_stage_enabled` — the two are fully independent queues.
 
 Both can be set globally via `profiles.yaml`'s `defaults:` section, or per object type — e.g. to
@@ -370,12 +358,13 @@ enabled, never every mapped type unconditionally. See "Per-object-type overrides
   `/app/profiles.yaml`, is the path the bind mount lands on; you'd only touch this env var if you
   wanted to point at a differently-named file instead.) This is a flat map — every Frigate object
   label (`car`, `truck`, `person`, or any label you add, e.g. `dog`) gets its own entry with two
-  prompts: `event_prompt` (single static frame) and `alert_prompt` (the 2x2 grid, framed to also
-  describe what changed across the 4 frames, not just static attributes). Both prompts are answered
-  as plain free text — there is no JSON schema or per-field response format, so adding a brand-new
-  object type is purely a `profiles.yaml` edit, never a code change. Labels that should share one
-  model/prompt (e.g. `car` and `truck`) can point at the same YAML anchor instead of duplicating the
-  block. A Frigate object label with no entry in this file is simply never analyzed by either stage.
+  prompts: `event_prompt` (single static frame) and `alert_prompt` (a series of separate high-res
+  photos, framed to also describe what changed across them, not just static attributes). Both
+  prompts are answered as plain free text — there is no JSON schema or per-field response format,
+  so adding a brand-new object type is purely a `profiles.yaml` edit, never a code change. Labels
+  that should share one model/prompt (e.g. `car` and `truck`) can point at the same YAML anchor
+  instead of duplicating the block. A Frigate object label with no entry in this file is simply
+  never analyzed by either stage.
 - `ai_stage_parallel_limit`/`ai_stage_stale_minutes`/`ai_stage_max_attempts`/
   `ai_stage_max_age_hours`/`ai_stage_poll_interval_seconds` — same queue-tuning shape as the crop
   stage above, shared between both stages (each claims from its own separate queue, so this
@@ -411,9 +400,11 @@ two keys to that type's `profiles.yaml` entry, alongside (or instead of) `chat_p
 ```yaml
 object_types:
   car:
-    provider: openai        # or "anthropic"; omit entirely to keep using llama_proxy
-    model: gpt-4o            # or e.g. claude-opus-4-8 for anthropic
-    # max_tokens: 1024       # anthropic only, optional -- see below
+    provider: llama_proxy    # event stage stays local -- multi-image not needed for one frame
+    chat_path: /video/v1/chat/completions
+    alert_provider: openai   # alert stage (the multi-image series) routes to a hosted provider
+    alert_model: gpt-4o      # or e.g. claude-opus-4-8 for anthropic
+    # max_tokens: 1024       # anthropic only, optional -- shared across both stages, see below
     event_prompt: >-
       ...
     alert_prompt: >-
@@ -424,6 +415,18 @@ This is a **per-object-type** choice, exactly like `chat_path` already is — on
 your local model while another routes to a hosted one, in the same file. A type with no `provider`
 key behaves exactly as before (`llama_proxy`, selected via `chat_path`); nothing changes for an
 existing deployment that never sets this.
+
+**The alert stage can route to a different provider than the event stage, for the same type** —
+`alert_provider`/`alert_model`/`alert_chat_path` are optional overrides checked only by
+`alert_ai_worker`, falling back to the plain `provider`/`model`/`chat_path` when omitted. This
+matters specifically because the alert stage sends *several* high-res images in one call (see
+"Internal AI stages" above) while the event stage only ever sends one — `llama_proxy` only ever
+uses the first image handed to it and logs a warning once if given more (multi-image support on a
+self-hosted backend is unverified), so a type wanting genuine multi-image reasoning for its alert
+analysis needs `alert_provider: openai` or `alert_provider: anthropic` specifically — both natively
+support multiple images in one message. A type that never sets any `alert_*` key behaves
+identically for both stages, same "omitting the key preserves old behavior" convention `provider`
+itself established.
 
 | `provider` | Needs in `.env` | Needs in `profiles.yaml` (per type) |
 |---|---|---|
@@ -448,16 +451,18 @@ all. Switching `EMBEDDING_PROVIDER` to `openai` also means setting `EMBEDDING_DI
 regardless of dimension.
 
 **Cost and privacy, briefly:** a hosted provider means that type's cropped images (and, for the
-alerts stage, composite grids) leave your network on every analyzed sighting, billed per request —
-worth weighing against `llama_slot_proxy`'s one-time hardware cost and zero marginal cost per
-sighting. A common middle ground is routing only your highest-value type (e.g. `car`, for plate/
-make/model accuracy) to a hosted provider while everything else stays local.
+alerts stage, the whole gathered series of several high-res crops per visit) leave your network on
+every analyzed sighting, billed per request (and per image, for the alert stage) — worth weighing
+against `llama_slot_proxy`'s one-time hardware cost and zero marginal cost per sighting. A common
+middle ground is routing only your highest-value type (e.g. `car`, for plate/make/model accuracy)
+to a hosted provider while everything else stays local.
 
 ### Which model should I actually use?
 
 There's no single right answer — it depends on what you're optimizing for. Some starting points,
 based on what each provider is actually good at for this project's kind of task (a single cropped
-photo or a 2×2 composite grid, answered as one or two free-text sentences):
+photo for the event stage, or several separate high-res photos in one call for the alert stage,
+answered as one or two free-text sentences):
 
 - **Staying local (`llama_proxy`, the default)** — zero marginal cost, zero data leaving your
   network, and genuinely adequate quality for most of this project's prompts (color/body-type/
@@ -472,13 +477,14 @@ photo or a 2×2 composite grid, answered as one or two free-text sentences):
   body-type/clothing description. Plate-text OCR accuracy varies more than a dedicated OCR model
   would give you — Frigate's own LPR read (`raw_events.sub_label`) is still captured on every row
   regardless of what the VLM says, specifically as a cross-check for exactly this reason.
-- **Claude (`claude-opus-4-8` or `claude-sonnet-5`)** — the more capable option for the *composite
-  grid* prompt specifically (`alert_prompt`, the visit-level "what changed across these 4 frames"
-  task) — reading fine detail across multiple panels and reasoning about what changed between them
-  is closer to genuine visual reasoning than the single-frame `event_prompt` case, and that's
-  where a stronger model's accuracy shows up most. `claude-sonnet-5` is the cheaper, faster choice
-  if `claude-opus-4-8`'s cost/latency isn't worth it for your volume — both are meaningfully more
-  expensive per request than OpenAI's `gpt-4o` tier or a local model's zero marginal cost.
+- **Claude (`claude-opus-4-8` or `claude-sonnet-5`)** — the more capable option for the *alert*
+  prompt specifically (`alert_prompt`, the visit-level "what changed across this series of photos"
+  task, natively multi-image) — reading fine detail across several separate high-res photos and
+  reasoning about what changed between them is closer to genuine visual reasoning than the
+  single-frame `event_prompt` case, and that's where a stronger model's accuracy shows up most.
+  `claude-sonnet-5` is the cheaper, faster choice if `claude-opus-4-8`'s cost/latency isn't worth it
+  for your volume — both are meaningfully more expensive per request than OpenAI's `gpt-4o` tier or
+  a local model's zero marginal cost.
 
 **A practical split**, if you want to try hosted providers without committing everything to one:
 route `car`/`truck`'s `event_prompt` (single-frame, plate-legibility-sensitive) to whichever local

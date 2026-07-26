@@ -21,19 +21,23 @@ footage) — just to show the UI itself in motion. Same recording as an
 - Crops each event out of the recording (via ffmpeg, using Frigate's own detection region) and
   stores the result — no image analysis yet at this point. Optionally stores the clip itself
   (per-event and/or per-visit) and sends Telegram notifications (photo/video per event, or one
-  summary + composite preview grid/GIF per visit).
-- An internal AI-stage poll loop (`ai_worker.py`, off by default) sends the cropped image (or, for
-  a visit, a composite grid of frames sampled across its whole span) to a VLM — locally-hosted by
-  default, or OpenAI/Claude per object type if you'd rather use a hosted provider for one or more
-  types (see [`docs/configuration.md`](docs/configuration.md#hosted-vlm-providers-openai--claude))
-  — using whatever prompt `profiles.yaml` defines for that Frigate object type — a vehicle prompt
-  asking for color/body-type/plate, a person prompt asking for a clothing description, and so on.
+  summary + video per visit).
+- Two internal AI-stage poll loops (off by default): `ai_worker.py` sends each event's own single
+  cropped image to a VLM; `alert_ai_worker.py` gathers a series of several genuinely high-resolution
+  crops from the events linked to a visit (built fresh at analysis time, never stored) and sends
+  those in one call, for a richer read on what happened across the whole visit. Both are
+  locally-hosted by default, or OpenAI/Claude per object type — and per stage, so a type's alert
+  analysis can route to a different provider than its own event analysis — if you'd rather use a
+  hosted provider for one or more types (see
+  [`docs/configuration.md`](docs/configuration.md#hosted-vlm-providers-openai--claude)) — using
+  whatever prompt `profiles.yaml` defines for that Frigate object type — a vehicle prompt asking
+  for color/body-type/plate, a person prompt asking for a clothing description, and so on.
   Frigate's own LPR read is kept alongside whatever the VLM says as a cross-check.
 - A read/query/report/AI-queue API on `ingest-worker` (events, visits, sightings, aggregate stats,
   HTML report generation, plus the AI-stage queue mechanics the internal stage uses and n8n or any
   other caller can use instead) and a natural-language
   Q&A workflow sit on top. The static web report UI shown above (`/ui`, no build step) browses the
-  same data — Events or Visits view, filters, a media lightbox with video/image/preview-GIF toggle.
+  same data — Events or Visits view, filters, a media lightbox with video/image toggle.
 - A configurable retention sweep deletes data (DB rows and any stored video files) past a set age
   (default 12 months) automatically, plus an ad-hoc purge API for a caller-chosen cutoff.
 - An admin dashboard (`/ui/admin`) covers operational health: queue status per stage with a
@@ -66,7 +70,7 @@ Frigate (MQTT frigate/events, every object label: car/truck/person/dog/...
    ▼
 ingest-worker/  (Python, one container, no LLM calls)
    - MQTT subscribers -> Postgres (raw_events unfiltered by label, visits from the review stream)
-   - Poll loops (crop, video, alert-video, visit-preview): claim work race-safely
+   - Poll loops (crop, video, alert-video): claim work race-safely
      (FOR UPDATE SKIP LOCKED), fetch from Frigate, crop/download via ffmpeg, store the result,
      fire-and-forget Telegram notifications
    - Applies its own Postgres schema on startup and runs retention cleanup on a schedule
@@ -77,17 +81,19 @@ ingest-worker/  (Python, one container, no LLM calls)
      at /ui over that same API
    │  (crop_status = 'done')
    ▼
-AI stage (ai_worker.py, an internal ingest-worker poll-loop thread, off by default -- or a custom
-          n8n workflow/script calling the same /ai-queue/* API instead)
-   - claims a batch, calls the VLM per profiles.yaml's prompt for that object type, writes the
-     sighting back
+AI stages (ai_worker.py + alert_ai_worker.py, internal ingest-worker poll-loop threads, off by
+          default -- or a custom n8n workflow/script calling the same /ai-queue/* API instead)
+   - ai_worker.py claims individual events, calls the VLM with that event's own single crop
+   - alert_ai_worker.py claims visits, gathers a series of high-res per-event crops fresh at
+     analysis time (never stored) and calls the VLM with all of them in one request
+   - either way: per profiles.yaml's prompt for that object type, writes the sighting back
    │
    ▼
 Daily/alerts report + Q&A workflows (n8n) -- read-only, call ingest-worker's report/query API
 ```
 
 Three independent retry-with-backoff queue stages live on `raw_events` (crop, video, AI) and two
-more on `visits` (video, preview grid/GIF) — `ingest-worker` owns all of them mechanically,
+more on `visits` (video, alert AI) — `ingest-worker` owns all of them mechanically,
 including the AI stage's own policy (parallel limit, stale/max-age cutoffs, all tunable in
 `profiles.yaml`/`.env`) when using the built-in `ai_worker.py`; an external caller driving the same
 `/ai-queue/*` API instead (e.g. a custom n8n workflow) would decide that policy itself via query
@@ -201,10 +207,10 @@ the most common situations.
 Plate text and clips are treated as semi-sensitive — `ingest-worker` runs a retention sweep
 (`RETENTION_MONTHS`, default 12) on its own schedule, deleting both the DB rows and any stored
 video files, rather than accumulating data indefinitely. `POST /retention/purge` (also exposed as
-five checkboxes on the [admin dashboard](docs/web-ui.md#admin-dashboard)) is an ad-hoc counterpart
+checkboxes on the [admin dashboard](docs/web-ui.md#admin-dashboard)) is an ad-hoc counterpart
 for purging on a caller-chosen cutoff (dry-run by default) — `only_media=true` (the default) keeps
 every row and its AI analysis text/plate reads searchable forever, clearing only the media
-categories you choose (video/GIF on by default, still-image snapshots/grids off by default);
+categories you choose (video on by default, still-image snapshots off by default);
 `only_media=false` deletes the rows entirely. An optional `object_label` and/or `camera` param
 scopes either mode to a single Frigate object type and/or camera. See
 [`frigate/sql/queue-debug.sql`](frigate/sql/queue-debug.sql) for manual checks/fixes/resets if you

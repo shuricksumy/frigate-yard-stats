@@ -23,12 +23,13 @@
 #   event_prompt -- ai_worker.py sends this with ONE single-frame crop (the raw_event's own
 #     region/box, or Frigate's own snapshot when frigate_snapshot_enabled is true). Framed for a
 #     single static moment.
-#   alert_prompt -- alert_ai_worker.py sends this with the visit's own composite grid (4 frames
-#     sampled across the visit's whole span). Framed for both a confident static read (using
-#     whichever of the 4 panels shows a detail most clearly) AND a description of what changed
-#     across the sequence, in the SAME flowing answer -- there's no separate structured field for
-#     "what changed," the prompt just asks for both together, same shape person's prompt already
-#     used before this file went universal.
+#   alert_prompt -- alert_ai_worker.py sends this with a SERIES of separate high-resolution crops,
+#     one per raw_event actually linked to the visit (up to alert_ai_max_images), each built fresh
+#     from the record stream at processing time (never stored), not a fixed 4-frame composite grid.
+#     Framed for both a confident static read (using whichever photo in the series shows a detail
+#     most clearly) AND a description of what changed across the sequence, in the SAME flowing
+#     answer. Sending several separate images in one prompt needs a provider that actually supports
+#     multi-image messages -- see alert_provider/alert_model below.
 # Both prompts are answered as plain free text (no JSON) -- the whole response becomes
 # sightings.description/visit_sightings.description verbatim. This is deliberate: a fixed JSON
 # schema is exactly the kind of per-type structure this redesign removed. If you want a detail
@@ -60,18 +61,22 @@
 #     legibility, while other types keep using Frigate's own snapshot. Hardcoded fallback:
 #     crop_disabled=false, crop_frame_offset_pct=0.5, crop_padding_pct=0.2,
 #     frigate_snapshot_enabled=true.
-#   store_video / store_video_alerts / visit_thumb_crop_enabled -- true/false. Unlike the AI-stage
-#     flags above, these apply to *any* Frigate label by default (not just ones with a
-#     profiles.yaml prompt entry), so a type can get its own entry here purely to carry one of
-#     these three keys, with no chat_path/prompt at all. Setting any of them true for at least one
-#     type (or in `defaults`) is enough to start that stage's poll thread -- see
-#     profile_config.any_store_video_enabled/any_store_video_alerts_enabled/
-#     any_visit_thumb_crop_enabled. e.g. a `person` entry could set store_video: false to skip
-#     storing clips for people while cars still get them. Hardcoded fallback: false (all three).
-#   visit_preview_frame_percentages -- a real YAML list of exactly 4 numbers (0=clip start, 100=clip
-#     end) -- which 4 points of a visit's own clip to sample for that type's composite grid/GIF.
-#     e.g. a slow-moving `car` visit might want frames spread wider ([0, 30, 65, 100]) than a
-#     `person` visit that's over quickly. Hardcoded fallback: [0, 25, 50, 100].
+#   store_video / store_video_alerts -- true/false. Unlike the AI-stage flags above, these apply to
+#     *any* Frigate label by default (not just ones with a profiles.yaml prompt entry), so a type
+#     can get its own entry here purely to carry one of these two keys, with no chat_path/prompt at
+#     all. Setting either true for at least one type (or in `defaults`) is enough to start that
+#     stage's poll thread -- see profile_config.any_store_video_enabled/
+#     any_store_video_alerts_enabled. e.g. a `person` entry could set store_video: false to skip
+#     storing clips for people while cars still get them. Hardcoded fallback: false (both).
+#   alert_provider / alert_model / alert_chat_path -- same shape as provider/model/chat_path (see
+#     profiles.yaml.example for the full explanation), but scoped to the alert stage only, so one
+#     type's alert analysis (the multi-image series) can route to a different provider than its own
+#     event analysis. Omitting these falls back to the plain provider/model/chat_path unchanged. If
+#     the effective alert provider is "llama_proxy" (the default either way), only the first image
+#     in the gathered series is ever sent -- multi-image support on a self-hosted backend is
+#     unverified.
+#   alert_ai_initial_wait_seconds (defaults: only, default 5) / alert_ai_max_images (defaults:
+#     only, default 4) -- alert-stage-only technical tuning knobs, see profiles.yaml.example.
 #
 # defaults: (optional) -- common values applied to every object type that doesn't set its own for
 # that same key, sitting between the per-type overrides above and the hardcoded fallback. Leave it
@@ -98,8 +103,6 @@ object_types:
     # frigate_snapshot_enabled: true
     # store_video: true
     # store_video_alerts: true
-    # visit_thumb_crop_enabled: true
-    # visit_preview_frame_percentages: [0, 25, 50, 100]
     event_prompt: >-
       This image shows a single moment from one vehicle sighting. In one or two short sentences,
       describe the vehicle's color, body type (sedan/suv/truck/van/pickup/minivan/etc.), make and
@@ -109,14 +112,14 @@ object_types:
       detail isn't visible or you're not confident, simply omit it rather than guessing. Do not
       describe your process.
     alert_prompt: >-
-      This image is a 2x2 grid of 4 frames of the SAME vehicle captured moments apart during one
-      visit (not 4 different vehicles) -- use all 4 panels together for the most confident read,
-      since a detail unclear in one panel (angle, glare, motion blur) may be legible in another,
-      e.g. the plate. In one or two short sentences, describe the vehicle's color, body type, make
-      and model if identifiable, notable features, the license plate text if visible/legible in
-      any panel, and what changed or happened across the sequence (e.g. "pulled into the driveway
-      and parked", "drove past left to right", "reversed out and left"). If a detail isn't
-      visible, omit it. Do not mention that the image is a grid. Do not describe your process.
+      These are several high-resolution photos of the SAME vehicle captured at different moments
+      during one visit (not different vehicles) -- use all of them together for the most confident
+      read, since a detail unclear in one photo (angle, glare, motion blur) may be legible in
+      another, e.g. the plate. In one or two short sentences, describe the vehicle's color, body
+      type, make and model if identifiable, notable features, the license plate text if
+      visible/legible in any photo, and what changed or happened across the sequence (e.g. "pulled
+      into the driveway and parked", "drove past left to right", "reversed out and left"). If a
+      detail isn't visible, omit it. Do not describe your process.
   truck: *vehicle_profile
   person:
     chat_path: /REPLACE_WITH_PERSON_SLOT/v1/chat/completions
@@ -126,10 +129,9 @@ object_types:
       they appear to be doing in this one frame, in one short sentence. No speculation about
       identity.
     alert_prompt: >-
-      This image is a 2x2 grid of 4 frames of the SAME person captured moments apart during one
-      visit (not 4 different people) -- use all 4 panels together, since a detail unclear in one
-      may be visible in another. Describe this person's clothing colors (a static detail, most
-      reliable from whichever panel shows it most clearly) and what they appear to be doing across
-      the sequence -- e.g. walking toward the door, carrying something, getting in/out of a
-      vehicle -- in one short sentence covering both. No speculation about identity. Do not
-      mention that the image is a grid.
+      These are several high-resolution photos of the SAME person captured at different moments
+      during one visit (not different people) -- use all of them together, since a detail unclear
+      in one photo may be visible in another. Describe this person's clothing colors (a static
+      detail, most reliable from whichever photo shows it most clearly) and what they appear to be
+      doing across the sequence -- e.g. walking toward the door, carrying something, getting
+      in/out of a vehicle -- in one short sentence covering both. No speculation about identity.

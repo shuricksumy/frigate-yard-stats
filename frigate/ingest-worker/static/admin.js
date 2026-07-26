@@ -65,17 +65,15 @@ function adminApp() {
     skipFailedResult: {},
 
     purgeDays: 60,
-    // Four independently toggleable media categories (only meaningful while purgeDeleteAll is
+    // Two independently toggleable media categories (only meaningful while purgeDeleteAll is
     // false) rather than one all-or-nothing "media" checkbox -- they have very different storage
     // cost and "still worth keeping" answers (a 4K video clip vs. a single still crop). Defaults
     // match this project's own judgment on what's safe to routinely discard.
     purgeDeleteVideo: true,
-    purgeDeleteGif: true,
     purgeDeleteSnapshots: false,
-    purgeDeletePuzzledPreview: false,
     // Full row delete (today's only_media=false) -- a separate, more drastic checkbox rather than
     // the old checkbox's inverse meaning, so its own destructive intent reads clearly at a glance
-    // next to the four (non-destructive-to-rows) media categories above.
+    // next to the two (non-destructive-to-rows) media categories above.
     purgeDeleteAll: false,
     purgeObjectLabel: "",
     purgeCamera: "",
@@ -86,7 +84,7 @@ function adminApp() {
     reportSource: "events",
     reportObjectLabel: "",
     reportHours: 24,
-    reportIncludePreview: "gif",
+    reportIncludeImage: true,
     generatingReport: false,
     reportError: "",
 
@@ -220,7 +218,6 @@ function adminApp() {
         boolFlag("AI alerts stage", f.ai_alerts_enabled),
         boolFlag("Store video", f.store_video),
         boolFlag("Store video (alerts)", f.store_video_alerts),
-        boolFlag("Visit preview", f.visit_thumb_crop_enabled),
         boolFlag("Crop disabled", f.crop_disabled),
         boolFlag("Frigate snapshot (events)", f.frigate_snapshot_enabled),
         modeFlag("Telegram (events)", f.telegram_events_mode),
@@ -258,7 +255,6 @@ function adminApp() {
         { table: "raw_events", stage: "video", counts: sc.raw_events.video_status },
         { table: "raw_events", stage: "ai", counts: sc.raw_events.ai_status },
         { table: "visits", stage: "video", counts: sc.visits.video_status },
-        { table: "visits", stage: "thumb_crop", counts: sc.visits.thumb_crop_status },
         { table: "visits", stage: "alert_ai", counts: sc.visits.alert_ai_status },
       ];
     },
@@ -419,8 +415,7 @@ function adminApp() {
       const onlyMedia = !this.purgeDeleteAll;
       let url = `/retention/purge?older_than_days=${this.purgeDays}&confirm=${confirm}&only_media=${onlyMedia}`;
       if (onlyMedia) {
-        url += `&delete_video=${this.purgeDeleteVideo}&delete_gif=${this.purgeDeleteGif}` +
-               `&delete_snapshots=${this.purgeDeleteSnapshots}&delete_puzzled_preview=${this.purgeDeletePuzzledPreview}`;
+        url += `&delete_video=${this.purgeDeleteVideo}&delete_snapshots=${this.purgeDeleteSnapshots}`;
       }
       if (this.purgeObjectLabel) url += `&object_label=${encodeURIComponent(this.purgeObjectLabel)}`;
       if (this.purgeCamera) url += `&camera=${encodeURIComponent(this.purgeCamera)}`;
@@ -459,9 +454,7 @@ function adminApp() {
         // shows in the preview grid below, but shouldn't be implied as "about to be cleared" here.
         const parts = [];
         if (this.purgeDeleteVideo) parts.push(`${c.raw_events_video_files + c.visits_video_files} video files`);
-        if (this.purgeDeleteGif) parts.push(`${c.visits_gifs} GIFs`);
         if (this.purgeDeleteSnapshots) parts.push(`${c.raw_events_snapshots} event snapshots`);
-        if (this.purgeDeletePuzzledPreview) parts.push(`${c.visits_puzzled_previews} puzzled previews`);
         if (parts.length === 0) {
           this.purgeResult = "Select at least one category to clear (or check \"Delete ALL\").";
           return;
@@ -492,7 +485,7 @@ function adminApp() {
       this.generatingReport = true;
       this.reportError = "";
       try {
-        let url = `/reports/generate?source=${this.reportSource}&hours=${this.reportHours}&include_preview=${this.reportIncludePreview}`;
+        let url = `/reports/generate?source=${this.reportSource}&hours=${this.reportHours}&include_image=${this.reportIncludeImage}`;
         if (this.reportObjectLabel) url += `&object_label=${encodeURIComponent(this.reportObjectLabel)}`;
         const r = await fetch(url, { headers: this._headers() });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);

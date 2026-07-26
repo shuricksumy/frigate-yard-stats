@@ -1,9 +1,9 @@
 -- Debug/maintenance toolkit for both queue tables: raw_events (crop_status owned directly by
--- ingest-worker; ai_status mechanically executed via its /ai-queue/* API -- n8n's Metadata
--- Processor just calls that API, it no longer touches Postgres directly; video_status owned by
--- video_worker.py) and visits (video_status owned by alert_video_worker.py; thumb_crop_status
--- owned by visit_thumb_worker.py -- see the VISITS section below). Run these against
--- postgres-projects / home_automation as needed -- nothing here runs automatically.
+-- ingest-worker; ai_status mechanically executed via its /ai-queue/* API or the internal
+-- ai_worker.py poll loop; video_status owned by video_worker.py) and visits (video_status owned
+-- by alert_video_worker.py; alert_ai_status owned by alert_ai_worker.py -- see the VISITS section
+-- below). Run these against postgres-projects / home_automation as needed -- nothing here runs
+-- automatically.
 
 -- ============================================================================
 -- RAW_EVENTS (events flow -- frigate/events, one row per Frigate object detection)
@@ -21,7 +21,7 @@ FROM yard_stats.raw_events
 WHERE crop_status = 'processing'
 ORDER BY crop_status_changed_at;
 
--- CHECK: what's in flight right now (AI stage -- n8n), and for how long
+-- CHECK: what's in flight right now (AI stage -- ai_worker.py or n8n), and for how long
 SELECT id, camera, objects, det_id, ai_status, ai_status_changed_at, now() - ai_status_changed_at AS age
 FROM yard_stats.raw_events
 WHERE ai_status = 'processing'
@@ -42,7 +42,7 @@ WHERE crop_status IN ('new', 'retry')
 ORDER BY created_at
 LIMIT 50;
 
--- CHECK: events cropped and waiting for n8n's AI stage
+-- CHECK: events cropped and waiting for the AI stage
 SELECT id, camera, objects, det_id, crop_status_changed_at
 FROM yard_stats.raw_events
 WHERE crop_status = 'done' AND ai_status IN ('new', 'retry')
@@ -78,12 +78,12 @@ WHERE id = 1234; -- <-- replace
 -- prompt/bugfix change you want re-run) -- delete its old result first, then reset ai_status, or
 -- the processor would insert a duplicate sighting alongside the old one. crop_status/
 -- crop_image_base64 are untouched -- no need to re-crop just to redo the AI stage.
-DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id = 1234; -- <-- replace, or person_sightings
+DELETE FROM yard_stats.sightings WHERE raw_event_id = 1234; -- <-- replace
 UPDATE yard_stats.raw_events SET ai_status = 'new', ai_attempt_count = 0, ai_status_changed_at = now() WHERE id = 1234; -- <-- replace
 
 -- FIX: fully reprocess one item from scratch, including re-cropping (e.g. after a crop/padding
 -- change in ingest-worker) -- clears the stored crop too so ingest-worker regenerates it.
-DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id = 1234; -- <-- replace, or person_sightings
+DELETE FROM yard_stats.sightings WHERE raw_event_id = 1234; -- <-- replace
 UPDATE yard_stats.raw_events
 SET crop_status = 'new', crop_attempt_count = 0, crop_status_changed_at = now(), crop_image_base64 = NULL,
     ai_status = 'new', ai_attempt_count = 0, ai_status_changed_at = now()
@@ -97,8 +97,7 @@ WHERE id = 1234; -- <-- replace
 CREATE TEMP TABLE targets AS
 SELECT id FROM yard_stats.raw_events ORDER BY created_at DESC LIMIT 20; -- <-- replace N
 
-DELETE FROM yard_stats.vehicle_sightings WHERE raw_event_id IN (SELECT id FROM targets);
-DELETE FROM yard_stats.person_sightings WHERE raw_event_id IN (SELECT id FROM targets);
+DELETE FROM yard_stats.sightings WHERE raw_event_id IN (SELECT id FROM targets);
 UPDATE yard_stats.raw_events SET ai_status = 'new', ai_attempt_count = 0, ai_status_changed_at = now()
 WHERE id IN (SELECT id FROM targets);
 
@@ -106,15 +105,15 @@ DROP TABLE targets;
 
 -- ============================================================================
 -- VISITS (alerts flow -- frigate/reviews) -- separate table, separate queue stages
--- (video_status/thumb_crop_status) from raw_events' crop_status/ai_status/video_status above.
--- See CLAUDE.md's "Visit grouping"/"Visit preview" sections.
+-- (video_status/alert_ai_status) from raw_events' crop_status/ai_status/video_status above.
+-- See CLAUDE.md's "Visit grouping"/"Alert AI stage" sections.
 -- ============================================================================
 
 -- CHECK: current status breakdown
-SELECT objects, video_status, thumb_crop_status, count(*)
+SELECT objects, video_status, alert_ai_status, count(*)
 FROM yard_stats.visits
-GROUP BY objects, video_status, thumb_crop_status
-ORDER BY objects, video_status, thumb_crop_status;
+GROUP BY objects, video_status, alert_ai_status
+ORDER BY objects, video_status, alert_ai_status;
 
 -- CHECK: what's in flight right now (visit video stage -- alert_video_worker), and for how long
 SELECT id, cameras, objects, video_status, video_status_changed_at, now() - video_status_changed_at AS age
@@ -122,17 +121,17 @@ FROM yard_stats.visits
 WHERE video_status = 'processing'
 ORDER BY video_status_changed_at;
 
--- CHECK: what's in flight right now (visit preview/grid stage -- visit_thumb_worker), and for how long
-SELECT id, cameras, objects, thumb_crop_status, thumb_crop_status_changed_at, now() - thumb_crop_status_changed_at AS age
+-- CHECK: what's in flight right now (alert AI stage -- alert_ai_worker), and for how long
+SELECT id, cameras, objects, alert_ai_status, alert_ai_status_changed_at, now() - alert_ai_status_changed_at AS age
 FROM yard_stats.visits
-WHERE thumb_crop_status = 'processing'
-ORDER BY thumb_crop_status_changed_at;
+WHERE alert_ai_status = 'processing'
+ORDER BY alert_ai_status_changed_at;
 
 -- CHECK: recently failed visits, either stage
-SELECT id, cameras, objects, video_status, video_attempt_count, thumb_crop_status, thumb_crop_attempt_count,
-       greatest(video_status_changed_at, thumb_crop_status_changed_at) AS last_changed
+SELECT id, cameras, objects, video_status, video_attempt_count, alert_ai_status, alert_ai_attempt_count,
+       greatest(video_status_changed_at, alert_ai_status_changed_at) AS last_changed
 FROM yard_stats.visits
-WHERE video_status = 'failed' OR thumb_crop_status = 'failed'
+WHERE video_status = 'failed' OR alert_ai_status = 'failed'
 ORDER BY last_changed DESC
 LIMIT 50;
 
@@ -151,26 +150,26 @@ LIMIT 50;
 UPDATE yard_stats.visits SET video_status = 'retry', video_status_changed_at = now()
 WHERE video_status = 'processing';
 
-UPDATE yard_stats.visits SET thumb_crop_status = 'retry', thumb_crop_status_changed_at = now()
-WHERE thumb_crop_status = 'processing';
+UPDATE yard_stats.visits SET alert_ai_status = 'retry', alert_ai_status_changed_at = now()
+WHERE alert_ai_status = 'processing';
 
--- FIX: retry every video-failed / thumb_crop-failed visit (fresh attempt count -- these already
+-- FIX: retry every video-failed / alert-ai-failed visit (fresh attempt count -- these already
 -- used up their max-attempts cap, so without resetting attempt_count they'd just fail again)
 UPDATE yard_stats.visits
 SET video_status = 'retry', video_attempt_count = 0, video_status_changed_at = now()
 WHERE video_status = 'failed';
 
 UPDATE yard_stats.visits
-SET thumb_crop_status = 'retry', thumb_crop_attempt_count = 0, thumb_crop_status_changed_at = now()
-WHERE thumb_crop_status = 'failed';
+SET alert_ai_status = 'retry', alert_ai_attempt_count = 0, alert_ai_status_changed_at = now()
+WHERE alert_ai_status = 'failed';
 
--- FIX: fully regenerate one visit's preview grid/GIF from scratch (e.g. after a
--- crop.build_visit_preview change you want to re-run against real data) -- clears the stored
--- artifacts too so visit_thumb_worker regenerates them.
-UPDATE yard_stats.visits
-SET thumb_crop_status = 'new', thumb_crop_attempt_count = 0, thumb_crop_status_changed_at = now(),
-    crop_image_base64 = NULL, preview_gif_base64 = NULL
-WHERE id = 1234; -- <-- replace
+-- FIX: fully reprocess one visit's alert-AI stage that already has a sighting row (e.g. after a
+-- prompt change you want re-run) -- delete its old result first, then reset alert_ai_status, or
+-- the worker would insert a duplicate sighting alongside the old one. alert_ai_worker gathers its
+-- own high-res crops fresh from Frigate at processing time -- there's no stored artifact to clear
+-- first the way there used to be for the old composite grid.
+DELETE FROM yard_stats.visit_sightings WHERE visit_id = 1234; -- <-- replace
+UPDATE yard_stats.visits SET alert_ai_status = 'new', alert_ai_attempt_count = 0, alert_ai_status_changed_at = now() WHERE id = 1234; -- <-- replace
 
 -- ============================================================================
 -- RESET FROM SCRATCH (destructive -- only for test/dev data, not for production history)
@@ -178,21 +177,21 @@ WHERE id = 1234; -- <-- replace
 
 -- Option A: wipe AI-stage state only (keep crops, re-run just the AI pass on everything)
 -- UPDATE yard_stats.raw_events SET ai_status = 'new', ai_attempt_count = 0, ai_status_changed_at = now();
--- TRUNCATE yard_stats.vehicle_sightings, yard_stats.person_sightings;
+-- TRUNCATE yard_stats.sightings;
 
 -- Option B: wipe everything queue-related, keep the raw_events rows themselves (re-crop and
 -- re-analyze from scratch)
--- TRUNCATE yard_stats.vehicle_sightings, yard_stats.person_sightings;
+-- TRUNCATE yard_stats.sightings;
 -- UPDATE yard_stats.raw_events SET
 --   crop_status = 'new', crop_attempt_count = 0, crop_status_changed_at = now(), crop_image_base64 = NULL,
 --   ai_status = 'new', ai_attempt_count = 0, ai_status_changed_at = now();
 
--- Option B2: same idea, for visits' own video/preview stages (STORE_VIDEO_ALERTS/
--- VISIT_THUMB_CROP_ENABLED) -- independent of Option B above, since these are separate artifacts.
+-- Option B2: same idea, for visits' own video/alert-AI stages (STORE_VIDEO_ALERTS/
+-- AI_ALERTS_ENABLED) -- independent of Option B above, since these are separate artifacts.
+-- TRUNCATE yard_stats.visit_sightings;
 -- UPDATE yard_stats.visits SET
 --   video_status = 'new', video_attempt_count = 0, video_status_changed_at = now(), video_path = NULL,
---   thumb_crop_status = 'new', thumb_crop_attempt_count = 0, thumb_crop_status_changed_at = now(),
---   crop_image_base64 = NULL, preview_gif_base64 = NULL;
+--   alert_ai_status = 'new', alert_ai_attempt_count = 0, alert_ai_status_changed_at = now();
 
 -- Option C: nuke everything in the schema and let ingest-worker rebuild it
 -- DROP SCHEMA IF EXISTS yard_stats CASCADE;

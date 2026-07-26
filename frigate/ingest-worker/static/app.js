@@ -106,7 +106,7 @@ function eventsApp() {
     // strip -- a plain EventSummary has no visitId of its own, so without remembering where we
     // came from, drilling into one connected event stranded you there with no way back to the
     // visit/alert view (openVisitLightbox's own shape: {id, representative_event_id, has_video,
-    // has_image, has_preview_gif, ai_status}). Null whenever the lightbox wasn't reached that way.
+    // has_image, ai_status}). Null whenever the lightbox wasn't reached that way.
     lightboxParentVisit: null,
 
     init() {
@@ -525,30 +525,29 @@ function eventsApp() {
 
     // Whether a card is worth opening the lightbox for -- media (image/video) obviously qualifies,
     // but a row whose media was cleared by a retention purge (only_media mode keeps the row and
-    // every text field, just clears crop_image_base64/video_path/preview_gif_base64) still has its
-    // AI analysis description worth reading, and previously had no way to reach it at all once
+    // every text field, just clears crop_image_base64/video_path) still has its AI analysis
+    // description worth reading, and previously had no way to reach it at all once
     // has_image/has_video both went false. Shared by Events/Visits/Search's card click handlers.
     isOpenable(row) {
       return !!(row.has_image || row.has_video || row.ai_status === "done");
     },
 
     // Routes a clicked search result into the same shared lightbox Events/Visits already use --
-    // same {id, visitId, has_video, has_image, has_preview_gif, ai_status} shape openVisitLightbox
-    // builds below, just sourced from the search result row instead of a VisitSummary/EventSummary
-    // (POST /search already returns these fields for exactly this reason -- see db.py's
-    // semantic_search_combined). A visit-kind result never has its own preview GIF field checked
-    // for events (that artifact doesn't exist at the event level).
+    // same {id, visitId, has_video, has_image, ai_status} shape openVisitLightbox builds below,
+    // just sourced from the search result row instead of a VisitSummary/EventSummary (POST
+    // /search already returns these fields for exactly this reason -- see db.py's
+    // semantic_search_combined).
     openSearchResult(result) {
       if (result.kind === "visit") {
         this.openLightbox({
           id: result.id, visitId: result.id,
           has_video: result.has_video, has_image: result.has_image,
-          has_preview_gif: result.has_preview_gif, ai_status: result.ai_status,
+          ai_status: result.ai_status,
         });
       } else {
         this.openLightbox({
           id: result.id, has_video: result.has_video, has_image: result.has_image,
-          has_preview_gif: false, ai_status: result.ai_status,
+          ai_status: result.ai_status,
         });
       }
     },
@@ -563,7 +562,6 @@ function eventsApp() {
         visitId: visit.id,
         has_video: visit.has_video,
         has_image: visit.has_image,
-        has_preview_gif: visit.has_preview_gif,
         ai_status: visit.ai_status,
       });
     },
@@ -581,7 +579,6 @@ function eventsApp() {
           representative_event_id: current.id,
           has_video: current.has_video,
           has_image: current.has_image,
-          has_preview_gif: current.has_preview_gif,
           ai_status: current.ai_status,
         };
       }
@@ -600,9 +597,8 @@ function eventsApp() {
       return `${path}?api_key=${encodeURIComponent(this.apiKey)}`;
     },
 
-    // Visits get their own image endpoints -- prefers the visit's own thumb_time re-crop
-    // (VISIT_THUMB_CROP_ENABLED) over the representative event's crop, server-side (see
-    // GET /visits/{id}/thumbnail|image), not something the UI needs to branch on itself.
+    // Visits get their own image endpoints -- falls back to the representative event's own
+    // crop server-side (see GET /visits/{id}/thumbnail|image), not something the UI branches on.
     visitThumbnailUrl(visitId, full = false) {
       const path = full ? `/visits/${visitId}/image` : `/visits/${visitId}/thumbnail`;
       return `${path}?api_key=${encodeURIComponent(this.apiKey)}`;
@@ -614,13 +610,6 @@ function eventsApp() {
 
     visitVideoUrl(visitId) {
       return `/media/video/visit/${visitId}?api_key=${encodeURIComponent(this.apiKey)}`;
-    },
-
-    // A visit's animated preview GIF (crop.build_visit_preview's slideshow of frames sampled
-    // proportionally across the visit's own clip) -- human preview only, a separate artifact from
-    // the composite grid image used for the thumbnail/lightbox still and AI analysis.
-    visitPreviewGifUrl(visitId) {
-      return `/visits/${visitId}/preview.gif?api_key=${encodeURIComponent(this.apiKey)}`;
     },
 
     // The lightbox is shared between the Events and Visits views -- lightboxEvent.visitId is
@@ -639,13 +628,12 @@ function eventsApp() {
       return e.visitId ? this.visitThumbnailUrl(e.visitId, true) : this.thumbnailUrl(e.id, true);
     },
 
-    // Points at whichever of video/image/preview-gif is actually being shown right now (same
-    // lightboxMode logic as the toggle buttons) -- the download button always saves what's on
-    // screen, not a fixed choice between them.
+    // Points at whichever of video/image is actually being shown right now (same lightboxMode
+    // logic as the toggle buttons) -- the download button always saves what's on screen, not a
+    // fixed choice between them.
     lightboxDownloadUrl() {
       const e = this.lightboxEvent;
       if (!e) return "";
-      if (this.lightboxMode === "preview" && e.has_preview_gif) return this.visitPreviewGifUrl(e.visitId);
       const showingVideo = e.has_video && this.lightboxMode === "video";
       return showingVideo ? this.lightboxVideoUrl() : this.lightboxImageUrl();
     },
@@ -654,18 +642,15 @@ function eventsApp() {
       const e = this.lightboxEvent;
       if (!e) return "";
       const label = e.visitId ? `visit-${e.visitId}` : `event-${e.id}`;
-      if (this.lightboxMode === "preview" && e.has_preview_gif) return `${label}.gif`;
       const showingVideo = e.has_video && this.lightboxMode === "video";
       return `${label}.${showingVideo ? "mp4" : "jpg"}`;
     },
 
     async openLightbox(event) {
       this.lightboxEvent = event;
-      // Default to the animated preview GIF when available -- richer than either a still frame or
-      // the plain video, since it's already framed to the sampled moments of interest -- then
-      // video, then the still image as a last resort. The toggle buttons (shown whenever more
-      // than one is available) let you switch between them freely.
-      this.lightboxMode = event.has_preview_gif ? "preview" : event.has_video ? "video" : "image";
+      // Default to video when available, the still image as a last resort. The toggle buttons
+      // (shown whenever both are available) let you switch between them freely.
+      this.lightboxMode = event.has_video ? "video" : "image";
       this.lightboxGroups = [];
       this.lightboxConnectedEvents = [];
       // A visit's own ai_status (event.ai_status) only reflects its single earliest-linked

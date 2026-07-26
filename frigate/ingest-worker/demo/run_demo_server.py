@@ -13,7 +13,6 @@ config.AI_EVENTS_STAGE_ENABLED = True
 config.AI_ALERTS_ENABLED = True
 config.STORE_VIDEO = True
 config.STORE_VIDEO_ALERTS = True
-config.VISIT_THUMB_CROP_ENABLED = True
 config.TELEGRAM_EVENTS_MODE = "all"
 config.TELEGRAM_ALERTS_MODE = "all"
 

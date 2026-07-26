@@ -57,7 +57,7 @@ def _insert_event(objects="car", camera="pytest-alert-cam"):
     return rows[0]["id"], rows[0]["det_id"]
 
 
-def _make_visit_with_grid_ready(objects="car", camera="pytest-alert-cam", alert_ai_status="new"):
+def _make_visit(objects="car", camera="pytest-alert-cam", alert_ai_status="new"):
     event_id, det_id = _insert_event(objects=objects, camera=camera)
     visit_id = db.record_visit({
         "camera": camera, "zone": "z", "objects": objects,
@@ -65,9 +65,8 @@ def _make_visit_with_grid_ready(objects="car", camera="pytest-alert-cam", alert_
         "det_ids": [det_id],
     })
     db._execute(
-        "UPDATE yard_stats.visits SET thumb_crop_status = 'done', crop_image_base64 = %s, "
-        "alert_ai_status = %s WHERE id = %s",
-        ("ZmFrZQ==", alert_ai_status, visit_id),
+        "UPDATE yard_stats.visits SET alert_ai_status = %s WHERE id = %s",
+        (alert_ai_status, visit_id),
     )
     return visit_id, event_id
 
@@ -76,6 +75,56 @@ def _cleanup_visit(visit_id, *event_ids):
     db._execute("DELETE FROM yard_stats.visit_sightings WHERE visit_id = %s", (visit_id,))
     db._execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", (list(event_ids),))
     db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
+
+
+# ---- db.get_raw_events_for_visit ----
+
+def test_get_raw_events_for_visit_returns_every_linked_event(conn_ok):
+    camera = f"pytest-alert-visitevents-{uuid.uuid4()}"
+    car_id, car_det = _insert_event(objects="car", camera=camera)
+    person_id, person_det = _insert_event(objects="person", camera=camera)
+    visit_id = db.record_visit({
+        "camera": camera, "zone": "z", "objects": "car,person",
+        "start_time": 1784198451.0, "end_time": 1784198470.0,
+        "det_ids": [car_det, person_det],
+    })
+    try:
+        rows = db.get_raw_events_for_visit(visit_id)
+        assert {r["det_id"] for r in rows} == {car_det, person_det}
+        assert {r["objects"] for r in rows} == {"car", "person"}
+        for r in rows:
+            assert set(r.keys()) >= {"id", "det_id", "objects", "start_ts", "end_ts"}
+    finally:
+        _cleanup_visit(visit_id, car_id, person_id)
+
+
+def test_get_raw_events_for_visit_orders_by_objects_then_start_ts(conn_ok):
+    camera = f"pytest-alert-visitevents-{uuid.uuid4()}"
+    car1_id, car1_det = _insert_event(objects="car", camera=camera)
+    car2_id, car2_det = _insert_event(objects="car", camera=camera)
+    person_id, person_det = _insert_event(objects="person", camera=camera)
+    visit_id = db.record_visit({
+        "camera": camera, "zone": "z", "objects": "car,person",
+        "start_time": 1784198451.0, "end_time": 1784198470.0,
+        "det_ids": [car1_det, car2_det, person_det],
+    })
+    try:
+        rows = db.get_raw_events_for_visit(visit_id)
+        assert [r["objects"] for r in rows] == ["car", "car", "person"]
+    finally:
+        _cleanup_visit(visit_id, car1_id, car2_id, person_id)
+
+
+def test_get_raw_events_for_visit_empty_for_visit_with_no_linked_events(conn_ok):
+    visit_id = db.record_visit({
+        "camera": f"pytest-alert-visitevents-{uuid.uuid4()}", "zone": "z", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0,
+        "det_ids": ["nonexistent-det-id"],
+    })
+    try:
+        assert db.get_raw_events_for_visit(visit_id) == []
+    finally:
+        db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
 
 
 # ---- run_once (per-type ai_alerts_enabled filtering, see profile_config.py) ----
@@ -120,8 +169,8 @@ def test_run_once_includes_type_that_opts_in_despite_global_default_off(monkeypa
 
 # ---- db.claim_alert_ai_batch ----
 
-def test_claim_alert_ai_batch_claims_visit_with_ready_grid(conn_ok):
-    visit_id, event_id = _make_visit_with_grid_ready()
+def test_claim_alert_ai_batch_claims_visit_immediately(conn_ok):
+    visit_id, event_id = _make_visit()
     try:
         claimed = db.claim_alert_ai_batch(["car"], parallel_limit=10, stale_minutes=5)
         claimed_ids = {r["id"] for r in claimed}
@@ -134,23 +183,24 @@ def test_claim_alert_ai_batch_claims_visit_with_ready_grid(conn_ok):
         _cleanup_visit(visit_id, event_id)
 
 
-def test_claim_alert_ai_batch_skips_visit_without_ready_grid(conn_ok):
+def test_claim_alert_ai_batch_claims_visit_with_no_thumb_crop_stage_run(conn_ok):
+    # No pre-built grid needed at all -- a visit is claimable as soon as it exists, since the
+    # alert stage now gathers its own high-res crops directly at processing time.
     event_id, det_id = _insert_event()
     visit_id = db.record_visit({
         "camera": "pytest-alert-cam", "zone": "z", "objects": "car",
         "start_time": 1784198451.0, "end_time": 1784198470.0,
         "det_ids": [det_id],
     })
-    # thumb_crop_status stays at its default ('new'/'skipped') -- grid never marked done.
     try:
         claimed_ids = {r["id"] for r in db.claim_alert_ai_batch(["car"], parallel_limit=10, stale_minutes=5)}
-        assert visit_id not in claimed_ids
+        assert visit_id in claimed_ids
     finally:
         _cleanup_visit(visit_id, event_id)
 
 
 def test_claim_alert_ai_batch_respects_object_types_filter(conn_ok):
-    visit_id, event_id = _make_visit_with_grid_ready(objects="person")
+    visit_id, event_id = _make_visit(objects="person")
     try:
         claimed_ids = {r["id"] for r in db.claim_alert_ai_batch(["car"], parallel_limit=10, stale_minutes=5)}
         assert visit_id not in claimed_ids
@@ -161,7 +211,7 @@ def test_claim_alert_ai_batch_respects_object_types_filter(conn_ok):
 
 
 def test_claim_alert_ai_batch_respects_parallel_limit_via_in_progress_count(conn_ok):
-    visit_id, event_id = _make_visit_with_grid_ready(alert_ai_status="processing")
+    visit_id, event_id = _make_visit(alert_ai_status="processing")
     try:
         # capacity = parallel_limit(1) - in_progress(1) = 0
         claimed = db.claim_alert_ai_batch(["car"], parallel_limit=1, stale_minutes=5)
@@ -173,7 +223,7 @@ def test_claim_alert_ai_batch_respects_parallel_limit_via_in_progress_count(conn
 # ---- db.complete_visit_sighting ----
 
 def test_complete_visit_sighting_marks_alert_ai_status_done(conn_ok):
-    visit_id, event_id = _make_visit_with_grid_ready()
+    visit_id, event_id = _make_visit()
     try:
         db.complete_visit_sighting(visit_id, "car", "orange Dacia Duster, roof rails, pulled in and parked")
         updated = db.get_visit(visit_id)
@@ -189,7 +239,7 @@ def test_complete_visit_sighting_marks_alert_ai_status_done(conn_ok):
 
 
 def test_complete_visit_sighting_works_for_any_object_label(conn_ok):
-    visit_id, event_id = _make_visit_with_grid_ready(objects="person")
+    visit_id, event_id = _make_visit(objects="person")
     try:
         db.complete_visit_sighting(visit_id, "person", "walked to the door")
         updated = db.get_visit(visit_id)
@@ -206,7 +256,7 @@ def test_complete_visit_sighting_works_for_any_object_label(conn_ok):
 # ---- db.fail_alert_ai_event ----
 
 def test_fail_alert_ai_event_retries_below_cap(conn_ok):
-    visit_id, event_id = _make_visit_with_grid_ready()
+    visit_id, event_id = _make_visit()
     try:
         result = db.fail_alert_ai_event(visit_id, max_attempts=3)
         assert result["alert_ai_status"] == "retry"
@@ -216,7 +266,7 @@ def test_fail_alert_ai_event_retries_below_cap(conn_ok):
 
 
 def test_fail_alert_ai_event_fails_at_cap(conn_ok):
-    visit_id, event_id = _make_visit_with_grid_ready()
+    visit_id, event_id = _make_visit()
     try:
         db._execute("UPDATE yard_stats.visits SET alert_ai_attempt_count = 2 WHERE id = %s", (visit_id,))
         result = db.fail_alert_ai_event(visit_id, max_attempts=3)
@@ -229,7 +279,7 @@ def test_fail_alert_ai_event_fails_at_cap(conn_ok):
 # ---- db.get_visit_alert_sighting ----
 
 def test_get_visit_alert_sighting_returns_none_when_not_analyzed(conn_ok):
-    visit_id, event_id = _make_visit_with_grid_ready()
+    visit_id, event_id = _make_visit()
     try:
         assert db.get_visit_alert_sighting(visit_id) is None
     finally:
@@ -237,7 +287,7 @@ def test_get_visit_alert_sighting_returns_none_when_not_analyzed(conn_ok):
 
 
 def test_get_visit_alert_sighting_returns_result(conn_ok):
-    visit_id, event_id = _make_visit_with_grid_ready()
+    visit_id, event_id = _make_visit()
     try:
         db.complete_visit_sighting(visit_id, "car", "red sedan")
         result = db.get_visit_alert_sighting(visit_id)
@@ -261,10 +311,114 @@ def test_parse_alert_sighting_response_person():
     assert fields == {"visit_id": 7, "object_label": "person", "description": "wearing a red jacket, walking toward the door"}
 
 
-# ---- alert_ai_worker.process_claimed_visit (mocked chat call, no real network) ----
+# ---- alert_ai_worker._select_events_for_alert (pure selection logic, no DB/network) ----
+
+def test_select_events_for_alert_one_representative_per_type_when_under_cap():
+    events = [
+        {"id": 1, "objects": "car", "start_ts": 10},
+        {"id": 2, "objects": "person", "start_ts": 20},
+    ]
+    selected = alert_ai_worker._select_events_for_alert(events, max_images=4)
+    assert [e["id"] for e in selected] == [1, 2]
+
+
+def test_select_events_for_alert_truncates_representatives_when_over_cap():
+    events = [
+        {"id": 1, "objects": "car", "start_ts": 10},
+        {"id": 2, "objects": "person", "start_ts": 20},
+        {"id": 3, "objects": "dog", "start_ts": 30},
+    ]
+    selected = alert_ai_worker._select_events_for_alert(events, max_images=2)
+    assert [e["id"] for e in selected] == [1, 2]  # earliest 2 representatives
+
+
+def test_select_events_for_alert_fills_remaining_slots_from_same_type_retracks():
+    events = [
+        {"id": i, "objects": "car", "start_ts": i * 10}
+        for i in range(1, 6)  # 5 re-tracks of the same real car
+    ]
+    selected = alert_ai_worker._select_events_for_alert(events, max_images=3)
+    assert len(selected) == 3
+    ids = [e["id"] for e in selected]
+    assert 1 in ids  # the representative (earliest) is always included
+    assert ids == sorted(ids)  # returned in chronological order
+
+
+def test_select_events_for_alert_round_robins_across_multiple_noisy_types():
+    events = [
+        {"id": 1, "objects": "car", "start_ts": 10},
+        {"id": 2, "objects": "car", "start_ts": 20},
+        {"id": 3, "objects": "car", "start_ts": 30},
+        {"id": 4, "objects": "person", "start_ts": 15},
+        {"id": 5, "objects": "person", "start_ts": 25},
+    ]
+    selected = alert_ai_worker._select_events_for_alert(events, max_images=4)
+    labels = [e["objects"] for e in selected]
+    assert len(selected) == 4
+    assert labels.count("car") >= 1
+    assert labels.count("person") >= 1  # not all 4 slots hogged by one noisy type
+
+
+def test_select_events_for_alert_empty_events_returns_empty():
+    assert alert_ai_worker._select_events_for_alert([], max_images=4) == []
+
+
+def test_select_events_for_alert_single_event_under_cap():
+    events = [{"id": 1, "objects": "car", "start_ts": 10}]
+    assert alert_ai_worker._select_events_for_alert(events, max_images=4) == events
+
+
+# ---- alert_ai_worker._gather_alert_images (per-event failure tolerance) ----
+
+def test_gather_alert_images_skips_individual_failures(monkeypatch):
+    def fake_crop(event, **kwargs):
+        if event["id"] == 2:
+            raise RuntimeError("Frigate clip already rolled off")
+        return f"crop-for-{event['id']}"
+
+    monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", fake_crop)
+    events = [{"id": 1, "det_id": "d1"}, {"id": 2, "det_id": "d2"}, {"id": 3, "det_id": "d3"}]
+    images = alert_ai_worker._gather_alert_images(events)
+    assert images == ["crop-for-1", "crop-for-3"]
+
+
+def test_gather_alert_images_empty_when_all_fail(monkeypatch):
+    def _boom(event, **kwargs):
+        raise RuntimeError("gone")
+    monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", _boom)
+    images = alert_ai_worker._gather_alert_images([{"id": 1, "det_id": "d1"}])
+    assert images == []
+
+
+# ---- alert_ai_worker._resolve_alert_type_config ----
+
+def test_resolve_alert_type_config_falls_back_to_plain_provider_when_alert_keys_absent():
+    type_config = {"provider": "llama_proxy", "chat_path": "/x", "model": "m"}
+    resolved = alert_ai_worker._resolve_alert_type_config(type_config)
+    assert resolved["provider"] == "llama_proxy"
+    assert resolved["chat_path"] == "/x"
+
+
+def test_resolve_alert_type_config_prefers_alert_specific_overrides():
+    type_config = {
+        "provider": "llama_proxy", "chat_path": "/local", "model": "local-model",
+        "alert_provider": "openai", "alert_model": "gpt-4o", "alert_chat_path": "/unused",
+    }
+    resolved = alert_ai_worker._resolve_alert_type_config(type_config)
+    assert resolved["provider"] == "openai"
+    assert resolved["model"] == "gpt-4o"
+    assert resolved["chat_path"] == "/unused"
+
+
+# ---- alert_ai_worker.process_claimed_visit (mocked chat call + crop, no real network/DB) ----
 
 def test_process_claimed_visit_success(monkeypatch):
     monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
+    monkeypatch.setattr(config, "ALERT_AI_INITIAL_WAIT_SECONDS", 0)
+    monkeypatch.setattr(db, "get_raw_events_for_visit", lambda visit_id: [
+        {"id": 100, "det_id": "d1", "objects": "car", "start_ts": 10, "end_ts": 20},
+    ])
+    monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", lambda event, **k: "high-res-base64")
 
     class _Resp:
         def raise_for_status(self):
@@ -275,7 +429,7 @@ def test_process_claimed_visit_success(monkeypatch):
 
     calls = []
 
-    def fake_post(url, **kwargs):
+    def fake_post(url, json=None, **kwargs):
         calls.append(url)
         return _Resp()
 
@@ -285,7 +439,7 @@ def test_process_claimed_visit_success(monkeypatch):
     failed = []
     monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: failed.append((a, k)))
 
-    row = {"id": 9, "objects": "car", "crop_image_base64": "aGVsbG8=", "det_id": "d1"}
+    row = {"id": 9, "objects": "car", "det_id": "d1", "alert_ai_attempt_count": 0}
     alert_ai_worker.process_claimed_visit(row, PROFILE)
 
     assert len(inserted) == 1
@@ -294,10 +448,67 @@ def test_process_claimed_visit_success(monkeypatch):
     assert calls[0] == "http://llama.test/vehicle-slot/v1/chat/completions"
 
 
+def test_process_claimed_visit_sends_one_image_per_selected_event(monkeypatch):
+    # Multi-image sending only actually happens on a hosted provider (llama_proxy only ever sends
+    # the first image, by design -- see test_process_claimed_visit_success for that path), so this
+    # exercises the openai branch specifically.
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(config, "ALERT_AI_INITIAL_WAIT_SECONDS", 0)
+    monkeypatch.setattr(config, "ALERT_AI_MAX_IMAGES", 4)
+    monkeypatch.setattr(db, "get_raw_events_for_visit", lambda visit_id: [
+        {"id": 100, "det_id": "d1", "objects": "car", "start_ts": 10, "end_ts": 12},
+        {"id": 101, "det_id": "d2", "objects": "car", "start_ts": 30, "end_ts": 32},
+    ])
+    monkeypatch.setattr(
+        alert_ai_worker.crop, "crop_event_high_res",
+        lambda event, **k: f"crop-for-{event['id']}",
+    )
+    captured = {}
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, json=None, **kwargs):
+        if url.endswith("/v1/chat/completions"):
+            captured["json"] = json
+            return _Resp({"choices": [{"message": {"content": "orange suv, pulled in and parked"}}]})
+        return _Resp({"data": [{"embedding": [0.1, 0.2]}]})
+
+    monkeypatch.setattr(alert_ai_worker.ai_worker.requests, "post", fake_post)
+    monkeypatch.setattr(db, "complete_visit_sighting", lambda *a, **k: 1)
+    monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: None)
+
+    profile = {
+        "object_types": {
+            "car": {"provider": "openai", "model": "gpt-4o", "alert_prompt": "describe the series"},
+        },
+    }
+    row = {"id": 9, "objects": "car", "det_id": "d1", "alert_ai_attempt_count": 0}
+    alert_ai_worker.process_claimed_visit(row, profile)
+
+    content = captured["json"]["messages"][0]["content"]
+    image_urls = [b["image_url"]["url"] for b in content[1:]]
+    assert image_urls == [
+        "data:image/jpeg;base64,crop-for-100", "data:image/jpeg;base64,crop-for-101",
+    ]
+
+
 def test_process_claimed_visit_routes_to_openai_provider(monkeypatch):
     # Confirms process_claimed_visit threads type_config through ai_worker._chat_request/
     # parse_alert_sighting_response the same way ai_worker.process_claimed_event does.
     monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test")
+    monkeypatch.setattr(config, "ALERT_AI_INITIAL_WAIT_SECONDS", 0)
+    monkeypatch.setattr(db, "get_raw_events_for_visit", lambda visit_id: [
+        {"id": 100, "det_id": "d7", "objects": "car", "start_ts": 10, "end_ts": 20},
+    ])
+    monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", lambda event, **k: "high-res-base64")
     captured = {}
 
     class _Resp:
@@ -324,10 +535,10 @@ def test_process_claimed_visit_routes_to_openai_provider(monkeypatch):
 
     profile = {
         "object_types": {
-            "car": {"provider": "openai", "model": "gpt-4o", "alert_prompt": "describe the grid"},
+            "car": {"provider": "openai", "model": "gpt-4o", "alert_prompt": "describe the series"},
         },
     }
-    row = {"id": 15, "objects": "car", "crop_image_base64": "aGVsbG8=", "det_id": "d7"}
+    row = {"id": 15, "objects": "car", "det_id": "d7", "alert_ai_attempt_count": 0}
     alert_ai_worker.process_claimed_visit(row, profile)
 
     assert not failed
@@ -337,13 +548,61 @@ def test_process_claimed_visit_routes_to_openai_provider(monkeypatch):
     assert captured["json"]["model"] == "gpt-4o"
 
 
+def test_process_claimed_visit_alert_provider_override_wins_over_plain_provider(monkeypatch):
+    # A type whose event_prompt stays on llama_proxy but whose alert_prompt should route to a
+    # hosted provider -- alert_provider/alert_model let that be expressed without a second
+    # profiles.yaml section.
+    monkeypatch.setattr(config, "ALERT_AI_INITIAL_WAIT_SECONDS", 0)
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "sk-ant-test")
+    monkeypatch.setattr(db, "get_raw_events_for_visit", lambda visit_id: [
+        {"id": 100, "det_id": "d1", "objects": "car", "start_ts": 10, "end_ts": 20},
+    ])
+    monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", lambda event, **k: "high-res-base64")
+    captured = {}
+
+    class _Resp:
+        def __init__(self, payload):
+            self._payload = payload
+
+        def raise_for_status(self):
+            pass
+
+        def json(self):
+            return self._payload
+
+    def fake_post(url, json=None, **kwargs):
+        if url.endswith("/v1/messages"):
+            captured.update(url=url, json=json)
+            return _Resp({"content": [{"text": "red sedan, drove past"}]})
+        return _Resp({"data": [{"embedding": [0.1, 0.2]}]})
+
+    monkeypatch.setattr(alert_ai_worker.ai_worker.requests, "post", fake_post)
+    monkeypatch.setattr(db, "complete_visit_sighting", lambda *a, **k: 1)
+    monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: None)
+
+    profile = {
+        "object_types": {
+            "car": {
+                "provider": "llama_proxy", "chat_path": "/local", "event_prompt": "vehicle event prompt",
+                "alert_prompt": "describe the series",
+                "alert_provider": "anthropic", "alert_model": "claude-opus-4-8",
+            },
+        },
+    }
+    row = {"id": 9, "objects": "car", "det_id": "d1", "alert_ai_attempt_count": 0}
+    alert_ai_worker.process_claimed_visit(row, profile)
+
+    assert captured["url"] == f"{config.ANTHROPIC_BASE_URL}/v1/messages"
+    assert captured["json"]["model"] == "claude-opus-4-8"
+
+
 def test_process_claimed_visit_unmapped_object_type_is_skipped(monkeypatch):
     inserted = []
     monkeypatch.setattr(db, "complete_visit_sighting", lambda *a, **k: inserted.append(a))
     failed = []
     monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: failed.append((a, k)))
 
-    row = {"id": 11, "objects": "dog", "crop_image_base64": "x", "det_id": "d2"}
+    row = {"id": 11, "objects": "dog", "det_id": "d2"}
     alert_ai_worker.process_claimed_visit(row, PROFILE)
 
     assert not inserted
@@ -352,6 +611,11 @@ def test_process_claimed_visit_unmapped_object_type_is_skipped(monkeypatch):
 
 def test_process_claimed_visit_chat_failure_routes_to_fail_alert_ai_event(monkeypatch):
     monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
+    monkeypatch.setattr(config, "ALERT_AI_INITIAL_WAIT_SECONDS", 0)
+    monkeypatch.setattr(db, "get_raw_events_for_visit", lambda visit_id: [
+        {"id": 100, "det_id": "d3", "objects": "car", "start_ts": 10, "end_ts": 20},
+    ])
+    monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", lambda event, **k: "high-res-base64")
 
     def _raise(*a, **k):
         raise ConnectionError("backend down")
@@ -360,7 +624,46 @@ def test_process_claimed_visit_chat_failure_routes_to_fail_alert_ai_event(monkey
     failed = []
     monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: failed.append((a, k)))
 
-    row = {"id": 13, "objects": "car", "crop_image_base64": "x", "det_id": "d3"}
+    row = {"id": 13, "objects": "car", "det_id": "d3", "alert_ai_attempt_count": 0}
     alert_ai_worker.process_claimed_visit(row, PROFILE)
 
     assert failed == [((13, config.AI_STAGE_MAX_ATTEMPTS), {})]
+
+
+def test_process_claimed_visit_fails_when_no_images_could_be_gathered(monkeypatch):
+    # Every linked event's high-res crop fails (e.g. Frigate's clip already rolled off for all of
+    # them) -- routes to fail_alert_ai_event rather than sending an empty-image chat request.
+    monkeypatch.setattr(config, "ALERT_AI_INITIAL_WAIT_SECONDS", 0)
+    monkeypatch.setattr(db, "get_raw_events_for_visit", lambda visit_id: [
+        {"id": 100, "det_id": "d4", "objects": "car", "start_ts": 10, "end_ts": 20},
+    ])
+
+    def _boom(event, **k):
+        raise RuntimeError("clip gone")
+    monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", _boom)
+
+    posted = []
+    monkeypatch.setattr(alert_ai_worker.ai_worker.requests, "post", lambda *a, **k: posted.append(1))
+    failed = []
+    monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: failed.append((a, k)))
+
+    row = {"id": 14, "objects": "car", "det_id": "d4", "alert_ai_attempt_count": 0}
+    alert_ai_worker.process_claimed_visit(row, PROFILE)
+
+    assert not posted  # never even reached the chat call
+    assert failed == [((14, config.AI_STAGE_MAX_ATTEMPTS), {})]
+
+
+def test_process_claimed_visit_skips_initial_wait_on_retry(monkeypatch):
+    # attempt_count > 0 means this isn't the first try -- no need to re-apply the head-start wait.
+    monkeypatch.setattr(config, "ALERT_AI_INITIAL_WAIT_SECONDS", 999)  # would time out the test if slept
+    monkeypatch.setattr(db, "get_raw_events_for_visit", lambda visit_id: [
+        {"id": 100, "det_id": "d5", "objects": "car", "start_ts": 10, "end_ts": 20},
+    ])
+    monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", lambda event, **k: "high-res-base64")
+    monkeypatch.setattr(alert_ai_worker.ai_worker, "_chat_request", lambda *a, **k: {"choices": [{"message": {"content": "x"}}]})
+    monkeypatch.setattr(db, "complete_visit_sighting", lambda *a, **k: 1)
+    monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: None)
+
+    row = {"id": 16, "objects": "car", "det_id": "d5", "alert_ai_attempt_count": 1}
+    alert_ai_worker.process_claimed_visit(row, PROFILE)  # must not hang

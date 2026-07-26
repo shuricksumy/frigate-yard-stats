@@ -166,7 +166,6 @@ def test_semantic_search_combined_events_only_matches_semantic_search_sightings(
         row = next(r for r in results if r["id"] == event_id)
         assert row["has_image"] is True
         assert row["has_video"] is False
-        assert row["has_preview_gif"] is False
         assert row["ai_status"] == "done"
     finally:
         _cleanup_event(event_id)
@@ -181,13 +180,12 @@ def test_semantic_search_combined_visits_only(conn_ok):
         assert all(r["kind"] == "visit" for r in results)
         assert visit_id in {r["id"] for r in results}
         # ai_status reflects visits.alert_ai_status ('done', set by complete_visit_sighting) --
-        # has_image/has_video/has_preview_gif are false here since this test never runs the actual
-        # thumb-crop/video workers that would populate those visit columns.
+        # has_image/has_video are false here since this test never runs the actual video worker or
+        # gives the representative event its own crop.
         row = next(r for r in results if r["id"] == visit_id)
         assert row["ai_status"] == "done"
         assert row["has_image"] is False
         assert row["has_video"] is False
-        assert row["has_preview_gif"] is False
     finally:
         _cleanup_visit(visit_id)
 

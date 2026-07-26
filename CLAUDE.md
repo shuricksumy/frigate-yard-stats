@@ -242,26 +242,22 @@ explicitly. A second mode, `only_media` (defaults to `true`), decides *what* get
   text fields (AI analysis description, embeddings) -- old data stays
   fully searchable via `/events`'/`/visits`' `q` filter and `/search/semantic`, just with the media
   payload gone. Never touches `sightings`/`visit_sightings` at all -- neither table carries media
-  columns of its own. **Which media gets cleared is itself four independent flags**, not an
+  columns of its own. **Which media gets cleared is itself two independent flags**, not an
   all-or-nothing "clear everything media" switch: `delete_video` (default `true`) clears
-  `video_path` on both tables and deletes the file off disk; `delete_gif` (default `true`) clears
-  `visits.preview_gif_base64`; `delete_snapshots` (default `false`) clears `raw_events.
-  crop_image_base64` (the per-event still crop, "Event Snapshots" in the admin UI); `delete_
-  puzzled_preview` (default `false`) clears `visits.crop_image_base64` (the composite grid of
-  sampled visit frames -- same column name as `raw_events.crop_image_base64`, but a visually
-  distinct artifact, hence its own flag and its own admin-UI label). Video and GIF default on
-  because they're by far the largest stored payloads (a multi-second clip or animated GIF vs. one
-  JPEG); still-images default off since a still crop/grid is comparatively cheap to keep and often
-  still useful to glance at even once a row is old. All four are independent and composable (e.g.
-  `delete_snapshots=true` alone clears only `raw_events.crop_image_base64`, leaving video/GIF/
-  puzzled-preview untouched) -- the response's `counts` preview always reports all five metrics
-  (`raw_events_video_files`, `raw_events_snapshots`, `visits_video_files`, `visits_puzzled_
-  previews`, `visits_gifs`) regardless of which flags are set, so a dry run shows everything
-  that's *available* to clear even if the caller only plans to clear a subset. The admin
-  dashboard's Retention section exposes these as five checkboxes (four media-category ones plus a
-  separate, clearly-destructive "Delete ALL" checkbox that switches to `only_media=false` --
-  checking it visually disables the four media checkboxes, since they no longer mean anything once
-  the whole row is going away).
+  `video_path` on both tables and deletes the file off disk; `delete_snapshots` (default `false`)
+  clears `raw_events.crop_image_base64` (the per-event still crop, "Event Snapshots" in the admin
+  UI). Video defaults on because it's by far the largest stored payload; still-images default off
+  since a still crop is comparatively cheap to keep and often still useful to glance at even once a
+  row is old. Both are independent and composable -- the response's `counts` preview always reports
+  both metrics (`raw_events_video_files`, `raw_events_snapshots`, `visits_video_files`) regardless
+  of which flags are set, so a dry run shows everything that's *available* to clear even if the
+  caller only plans to clear a subset. The admin dashboard's Retention section exposes these as two
+  checkboxes plus a separate, clearly-destructive "Delete ALL" checkbox that switches to
+  `only_media=false` -- checking it visually disables the two media checkboxes, since they no
+  longer mean anything once the whole row is going away. (An earlier version of this feature also
+  had `delete_gif`/`delete_puzzled_preview` flags for `visits.preview_gif_base64`/
+  `visits.crop_image_base64` -- removed along with the visit-preview grid/GIF feature itself, see
+  "Alert AI stage" below.)
 - **`only_media=false`** -- `db.purge_older_than` (today's original behavior): deletes the rows
   entirely -- same FK-safe child-before-parent delete order as `db.run_retention_cleanup`, extended
   to also delete `visit_sightings` before `visits` (added
@@ -276,8 +272,8 @@ A third, optional `object_label` param restricts either mode to a single Frigate
 retention. Deliberately scoped to `raw_events`/`sightings` only: `visits`/`visit_sightings` are
 **never** touched at all when `object_label` is set (their counts in the response come back `0`),
 since a visit can span multiple distinct object types (`visits.objects` is comma-joined -- see
-"Visit grouping" below) and there's no single-type-safe way to decide a multi-type visit row (or
-its own composite-grid media) belongs to just one type's purge. Omitting `object_label` (the
+"Visit grouping" below) and there's no single-type-safe way to decide a multi-type visit row
+belongs to just one type's purge. Omitting `object_label` (the
 default) still covers `visits`/`visit_sightings` exactly as it did before this param existed --
 only a type-scoped purge narrows to events/sightings alone.
 
@@ -447,10 +443,9 @@ alerts report shows them together rather than as separately-scrolled, unrelated-
 reader has to manually reassociate by timestamp. Grouping key is `visit_id` (added to
 `get_report_data`'s SELECT for exactly this), falling back to the raw_event's own id for a sighting
 that was never grouped into a visit at all (a group of one, same as today). The earliest sighting
-in a group represents its time/camera/image (`crop_image_base64` is already consistently the
-visit's own thumb-crop across every sighting in the group once `VISIT_THUMB_CROP_ENABLED` and done
--- see the `COALESCE` above -- so this only matters for picking which event's own crop to show when
-it isn't). `_build_alert_rows` joins each group's sightings into one labeled line per sighting
+in a group represents its time/camera/image -- `crop_image_base64` always comes from that
+representative event's own crop (there's no visit-level stored image to prefer instead, see
+"Alert AI stage" above). `_build_alert_rows` joins each group's sightings into one labeled line per sighting
 (`"{object_label}: {description}"`, e.g. `"car: orange suv, roof rails, plate 10MO407"` /
 `"person: dark jacket"`), joined with `; ` -- there's no separate summary-flattening step, since
 `description` already is the one-line summary for every object type. `source=events` (the default,
@@ -484,10 +479,10 @@ itself, which happens regardless of which language issues it. `ai_worker.py` is 
 ported straight into `ingest-worker` as a real, testable Python poll-loop stage, following the
 exact same `process_claimed_event`/`run_once`/`run_forever` shape `crop_worker.py`/`video_worker.py`
 already use -- own daemon thread, started conditionally in `main.py`
-(`if config.AI_EVENTS_STAGE_ENABLED`), off by default like `STORE_VIDEO`/`VISIT_THUMB_CROP_ENABLED`.
-This is the **events** stage specifically -- always analyzes a raw_event's own single-frame crop,
-never a visit's composite grid, regardless of `VISIT_THUMB_CROP_ENABLED`; see "Alert AI stage"
-below for the sibling stage that analyzes the grid. (Renamed from the original single
+(`if config.AI_EVENTS_STAGE_ENABLED`), off by default like `STORE_VIDEO`/`AI_ALERTS_ENABLED`.
+This is the **events** stage specifically -- always analyzes a raw_event's own single low-res
+crop/snapshot, never the multiple high-res per-event crops the alert stage gathers; see "Alert AI
+stage" below for the sibling stage that analyzes those. (Renamed from the original single
 `AI_STAGE_ENABLED` once a second, independent stage existed to split from -- see that section for
 why the split happened and the real gap it fixes.) It calls the exact same three `db.py`
 functions n8n's HTTP calls already wrap -- `claim_ai_batch`, `fail_ai_event`,
@@ -525,9 +520,10 @@ e.g. `/spare/v1/chat/completions`, not a `model` field in the request body); two
 share one model/prompt (e.g. `car` and `truck`) just point at the same YAML anchor
 (`&vehicle_profile`/`*vehicle_profile`) rather than needing a grouping concept in the schema.
 `event_prompt` (this stage -- framed for the single static frame it actually receives) and
-`alert_prompt` (the alert stage below -- framed for the composite grid it receives instead) are
-plain free-text instructions, e.g. "describe the vehicle's color, body type, and the license plate
-text if visible" or "describe their clothing colors and what they appear to be doing" -- the model's
+`alert_prompt` (the alert stage below -- framed for the series of separate high-res crops it
+receives instead) are plain free-text instructions, e.g. "describe the vehicle's color, body type,
+and the license plate text if visible" or "describe their clothing colors and what they appear to
+be doing" -- the model's
 answer is stored verbatim as `description`, with **no JSON schema requested and no response
 parsing at all**. This is deliberate, not a simplification left for later: a fixed JSON
 schema/per-field parser is exactly the kind of per-type structure this redesign removed -- adding a
@@ -573,46 +569,68 @@ the single global Postgres connection (`db.get_conn()`) every thread already use
 only touches it briefly, for the claim and the final insert, never while waiting on the VLM/
 embedding response.
 
-### Alert AI stage (`alert_ai_worker.py`) -- analyzes a visit's own composite grid
+### Alert AI stage (`alert_ai_worker.py`) -- analyzes a series of ephemeral high-res per-event crops
 
-#### The bug this fixes
+#### History: single-frame bug, then a composite-grid fix, now superseded
 
-`profiles.yaml`'s original single `prompt` field was already written as if it were analyzing a
-2x2 grid ("This image is a 2x2 grid of 4 frames of the SAME vehicle...") -- but `ai_worker.py`'s
-`run_once` calls `db.claim_ai_batch` with none of `source="visits"`/`only_visit_representative`/
-`require_thumb_crop` set, so it behaves exactly like plain `source=events`: it claims individual
-`raw_events` and always analyzes that event's own single-frame crop (`crop.crop_and_scale`'s
-output, at `CROP_FRAME_OFFSET_PCT`), never `visits.crop_image_base64` (the composite grid). Those
-query params only ever existed for n8n's `POST /ai-queue/claim` -- `ai_worker.py` never wired them
-up. Confirmed live in production: every VLM call this stage made was analyzing a plain single
-frame while being told it was looking at 4 frames of motion, silently producing worse/inconsistent
-results (a "notable_features"/plate read based on one frame passed off as cross-referenced across
-4, a "what changed across the sequence" question a single static frame can't actually answer). Not
-a config toggle that was missed (`require_thumb_crop` defaulting to `false` is itself fine, an
-intentional latency/quality trade-off for n8n callers) -- `ai_worker.py` simply never requested the
-grid at all, under any configuration.
+`profiles.yaml`'s `alert_prompt` was originally written as if it were analyzing a 2x2 grid, but
+`ai_worker.py` never actually requested one -- every alert-stage VLM call was silently analyzing a
+plain single low-res frame while being told it was looking at 4 frames of motion. The fix at the
+time added a genuinely separate stage/queue (`AI_ALERTS_ENABLED`, `visits.alert_ai_status`, this
+same `alert_ai_worker.py`) that built and stored a real composite 2x2 grid image plus a matching
+animated GIF (`visits.crop_image_base64`/`preview_gif_base64`, via `crop.build_visit_preview`,
+sampling 4 frames proportionally across the visit's own clip) -- the grid was what got analyzed,
+the GIF was a human-preview-only artifact for the web UI/Telegram/report. **This grid+GIF design
+has since been removed entirely** (schema columns kept but unwritten -- see the schema-migration
+note near the end of this section -- retention purge, web UI, Telegram, and the report all no
+longer reference either artifact) in favor of the design described below: the fixed 4-frame,
+proportionally-sampled composite was low-resolution and didn't reliably land on the moment worth
+seeing, while a genuine per-event high-res crop (already built by the crop stage for every
+`raw_event`, see "Cropping" above) was sitting right there unused by this stage. `visits.thumb_time`
+and the `VISIT_THUMB_CROP_ENABLED`/`VISIT_PREVIEW_FRAME_PERCENTAGES` knobs described in earlier
+history of this feature no longer exist.
 
-#### The fix: two genuinely separate, independently-toggleable stages
+#### Current design: gather several real high-res crops, ephemerally, per visit
 
-Rather than have one stage try to opportunistically use the grid when available (the n8n-facing
-`require_thumb_crop` approach, which still only produces one sighting per raw_event either way),
-this splits into two real stages with two real prompts, matching this project's existing precedent
-for every other events-vs-alerts split (`STORE_VIDEO`/`STORE_VIDEO_ALERTS`,
-`TELEGRAM_EVENTS_MODE`/`TELEGRAM_ALERTS_MODE`): independent enable flag, independent queue,
-independent poll thread, shared tuning knobs.
+`alert_ai_worker.process_claimed_visit` no longer depends on any stored visit-level image at all.
+Per claimed visit, it:
+
+1. Calls `db.get_raw_events_for_visit(visit_id)` -- a plain read (no claim/lock) of every
+   `raw_events` row Frigate's review actually linked to this visit (`id`, `det_id`, `objects`,
+   `start_ts`, `end_ts`), ordered `(objects, start_ts)`.
+2. Runs `_select_events_for_alert(events, config.ALERT_AI_MAX_IMAGES)` to pick which of those
+   linked events to actually send: one representative per distinct object type first (sorted by
+   `start_ts`), then -- if still under the cap -- fills remaining slots with a temporally-spread
+   re-track from each same-type bucket (taking the middle element of what's left in that bucket
+   each round), so a visit with many re-tracked det_ids of the same object still gets a handful of
+   images spread across the visit's span rather than just its very first and last moments.
+3. Calls `_gather_alert_images`, which runs `crop.crop_event_high_res` (see "Cropping" above --
+   the same durable, event-id-scoped Frigate clip endpoint/seek-and-crop logic the events stage's
+   own non-snapshot crop path already uses, factored out into its own function) once per selected
+   event. **Ephemeral by design**: each image is fetched/cropped, added to the in-memory list sent
+   to the VLM, and then discarded -- nothing is written back to `raw_events`/`visits` for this. A
+   single event's crop failing (e.g. its clip has already rolled off Frigate's retention) is caught
+   and logged, not fatal to the whole visit -- only an empty resulting image list raises (routing
+   to `fail_alert_ai_event`, the same retry-with-a-cap `alert_ai_status` already has).
+4. Calls `ai_worker._chat_request` with the full `images` list and `alert_prompt` -- see "Cloud VLM
+   providers" below for how a multi-image call actually reaches the model.
+
+`ALERT_AI_MAX_IMAGES` (default `4`, matching the old grid's panel count as a starting point) and
+`ALERT_AI_INITIAL_WAIT_SECONDS` (default `5`, applied once per visit on its very first attempt,
+not once per image -- same idea as `CROP_INITIAL_WAIT_SECONDS`/`VIDEO_INITIAL_WAIT_SECONDS` giving
+Frigate a moment to settle) are both global technical-tuning knobs, resolved via
+`config.apply_profile_defaults`'s `defaults:`-section mechanism like every other knob in that
+family (see "Per-object-type overrides" below).
 
 - **`AI_EVENTS_STAGE_ENABLED`** (renamed from `AI_STAGE_ENABLED`) -- `ai_worker.py`, unchanged
-  behavior, now explicitly framed as the events-only stage. Uses `profiles.yaml`'s `event_prompt`.
-- **`AI_ALERTS_ENABLED`** -- `alert_ai_worker.py`, a new stage claiming from **`visits`**, not
-  `raw_events`, via a new sixth queue-state-machine column, `visits.alert_ai_status` (same
+  behavior, explicitly framed as the events-only stage. Uses `profiles.yaml`'s `event_prompt`.
+- **`AI_ALERTS_ENABLED`** -- `alert_ai_worker.py`, this stage, claiming from **`visits`**, not
+  `raw_events`, via its own queue-state-machine column, `visits.alert_ai_status` (same
   `new -> processing -> retry/failed -> done` shape, plus `alert_ai_status_changed_at`/
-  `alert_ai_attempt_count`, `idx_visits_alert_ai_status`). Uses `profiles.yaml`'s `alert_prompt`
-  against `visits.crop_image_base64` (the actual composite grid) -- the image this stage sends is
-  *always* the grid, never opportunistic, since that's the entire point of this stage existing.
-  Requires `VISIT_THUMB_CROP_ENABLED=true` to ever have anything to claim (`db.claim_alert_ai_batch`
-  hard-requires `thumb_crop_status='done'`) -- with it off, this stage just stays idle, the same
-  graceful "nothing to do" treatment an unmapped object type already gets elsewhere in this project,
-  not an error.
+  `alert_ai_attempt_count`, `idx_visits_alert_ai_status`). Uses `profiles.yaml`'s `alert_prompt`.
+  A visit is claimable as soon as it exists (subject to the usual reap-stale/capacity/object-type
+  filters) -- there's no readiness gate on a stored artifact to wait on anymore, since every image
+  this stage sends is gathered fresh at processing time.
 
 Both stages can run at once, on or off independently -- an event's own `ai_status` and its visit's
 `alert_ai_status` are two entirely separate state machines on two separate tables, so the same
@@ -624,20 +642,20 @@ stage) without either blocking or overwriting the other. Both are started condit
 
 `visits.objects` (populated by `record_visit` from Frigate's own `data.objects`, comma-joined --
 `mqtt_ingest.py`'s `",".join(data.get("objects") or [])`) can legitimately span more than one
-distinct type per visit (e.g. `"car,person"` -- see "Visit grouping" above). But the composite grid
-itself is inherently single-object-framed: `crop.build_visit_preview` crops all 4 sampled frames to
-one specific event's own region/box (the representative event's), not "the whole visit." So
-`object_types` filtering for this claim matches against the visit's own **representative** event's
-`objects` (`db.get_representative_event_for_visit`'s definition -- earliest-linked raw_event,
-`ORDER BY start_ts ASC, id ASC LIMIT 1`), joined in via `LATERAL` inside the claim's CTE, not
-`visits.objects` -- a visit spanning both a car and a person still gets exactly one alert analysis,
-of whichever type the grid was actually framed around. (This is a different, narrower matching
-concern from `claim_ai_batch`'s own `(visit_id, objects)` partitioning for `only_visit_representative`
--- that dedups *raw_events* per type per visit for the *events* stage; this alerts-stage claim
-never touches `raw_events.ai_status` or that partitioning at all.) Same reap-stale +
-count-in-progress + CTE-`FOR UPDATE SKIP LOCKED` shape every other claim function in this project
-uses, newest-`start_ts`-first, with the same optional `max_age_hours` throughput safety valve
-`claim_ai_batch`/`claim_video_batch` already have.
+distinct type per visit (e.g. `"car,person"` -- see "Visit grouping" above). `object_types`
+filtering for this claim matches against the visit's own **representative** event's `objects`
+(`db.get_representative_event_for_visit`'s definition -- earliest-linked raw_event, `ORDER BY
+start_ts ASC, id ASC LIMIT 1`), joined in via `LATERAL` inside the claim's CTE, not `visits.objects`
+-- a visit spanning both a car and a person still gets exactly one alert analysis, of whichever
+type the representative event actually is (`_select_events_for_alert`, above, still gathers images
+from every distinct type the visit linked, regardless of which one is "representative" for
+claim-filtering purposes -- those are two separate concerns). (This is a different, narrower
+matching concern from `claim_ai_batch`'s own `(visit_id, objects)` partitioning for
+`only_visit_representative` -- that dedups *raw_events* per type per visit for the *events* stage;
+this alerts-stage claim never touches `raw_events.ai_status` or that partitioning at all.) Same
+reap-stale + count-in-progress + CTE-`FOR UPDATE SKIP LOCKED` shape every other claim function in
+this project uses, newest-`start_ts`-first, with the same optional `max_age_hours` throughput
+safety valve `claim_ai_batch`/`claim_video_batch` already have.
 
 #### Storage: `visit_sightings`, the visit-level twin of `sightings`
 
@@ -647,15 +665,15 @@ uses, newest-`start_ts`-first, with the same optional `max_age_hours` throughput
 + making `raw_event_id` nullable + a source discriminator) specifically because every other
 alerts-vs-events split in this project already keeps the two flows' storage fully separate rather
 than overloading one table/column set for both (`STORE_VIDEO_ALERTS`'s own `video_path`/storage
-directory, `visits.crop_image_base64`/`preview_gif_base64` vs. `raw_events.crop_image_base64`).
-`db.complete_visit_sighting` mirrors `complete_sighting`'s insert-plus-mark-done-in-one-transaction
-shape exactly, just against `visits.alert_ai_status` instead of `raw_events.ai_status`.
-`alert_ai_worker.parse_alert_sighting_response` mirrors `ai_worker.parse_sighting_response` --
-same two-line "take the response content and the representative event's `objects` as-is" shape,
-no parsing of any kind either. `alert_prompt` can (and does, in the shipped vehicle/person
-prompts) ask the model to describe what changed across the 4 sampled frames (e.g. "pulled into
-the driveway and parked") -- that's just part of the free-text `description` now, not a separate
-structured `notes` field the way the old per-type schema had one.
+directory vs. `raw_events.video_path`). `db.complete_visit_sighting` mirrors `complete_sighting`'s
+insert-plus-mark-done-in-one-transaction shape exactly, just against `visits.alert_ai_status`
+instead of `raw_events.ai_status`. `alert_ai_worker.parse_alert_sighting_response` mirrors
+`ai_worker.parse_sighting_response` -- same two-line "take the response content and the
+representative event's `objects` as-is" shape, no parsing of any kind either. `alert_prompt` can
+(and does, in the shipped vehicle/person/dog prompts) ask the model to describe what changed
+across the gathered series (e.g. "pulled into the driveway and parked") -- that's just part of the
+free-text `description` now, not a separate structured `notes` field the way the old per-type
+schema had one.
 
 #### Web UI: `GET /visits/{id}/sightings` gains `alert_sighting`, preferred over the per-event fallback
 
@@ -667,12 +685,24 @@ needs the one fetch it already made. `static/app.js`'s `openLightbox` now prefer
 `data.alert_sighting` when present (labeled "{object_label} (alert analysis)"
 in the lightbox) and only falls back to the per-event `sightings` list when it's `null`
 -- the same "richer artifact when available, graceful fallback otherwise" precedent this project
-already uses for the preview GIF/composite-grid/event-crop chain. This is deliberately a fallback,
-not an exclusive switch: a visit whose alert stage is off, or hasn't finished yet, still shows
-whatever per-event analysis already exists instead of an empty lightbox. On the Events tab (plain
-events, never visits), `GET /events/{id}`'s `sighting` -- the events
-stage's own result -- is unaffected and unchanged; the alert stage/`alert_sighting` field only
-ever applies to the Visits tab.
+already uses elsewhere. This is deliberately a fallback, not an exclusive switch: a visit whose
+alert stage is off, or hasn't finished yet, still shows whatever per-event analysis already exists
+instead of an empty lightbox. On the Events tab (plain events, never visits), `GET /events/{id}`'s
+`sighting` -- the events stage's own result -- is unaffected and unchanged; the alert stage/
+`alert_sighting` field only ever applies to the Visits tab. A visit's own thumbnail/lightbox image
+(`GET /visits/{id}/thumbnail`, `GET /visits/{id}/image`) now always falls back to the
+representative event's own crop (then a frame pulled from the visit's stored video, same
+belt-and-suspenders chain the events endpoint uses) -- there is no visit-level stored image of its
+own left to prefer, now that the grid is gone.
+
+#### Schema migration note
+
+`visits.crop_image_base64`/`preview_gif_base64`/`thumb_crop_status`/
+`thumb_crop_status_changed_at`/`thumb_crop_attempt_count` and `idx_visits_thumb_crop_status`
+remain in `schema.sql` for now, unwritten and unread by any code path -- dropping them is a
+separate, later migration (explicit backup via `backup-postgres-projects.sh` plus explicit
+confirmation first, since it destroys real historical grid/GIF data permanently), not bundled with
+this change.
 
 ### Cloud VLM providers (OpenAI / Claude) as an alternative to `llama_slot_proxy`
 
@@ -680,18 +710,36 @@ Both internal AI stages (`ai_worker.py`/`alert_ai_worker.py`) originally spoke e
 shape for their chat call -- `llama_slot_proxy`'s OpenAI-compatible chat-completions API, model
 selection entirely via `chat_path` (one URL path segment per slot), no `model` field in the body
 at all. That single-provider assumption was lifted into a **per-object-type provider dispatch**:
-`ai_worker._chat_request(type_config, prompt, crop_image_base64, timeout)` now reads
-`type_config["provider"]` (`profiles.yaml`, same tier the always-per-type `chat_path`/
-`event_prompt`/`alert_prompt`/`timeout_seconds` already live at -- **not** `profile_config.py`'s
-two-tier `defaults:`-then-hardcoded-fallback resolver, since there's no sensible profile-wide
-default for "which cloud account" the way there is for e.g. `crop_padding_pct`) and dispatches to
-one of three private request builders: `_llama_proxy_chat_request` (today's original behavior,
-unchanged, and still the default when `provider` is omitted entirely -- an existing deployment's
-`profiles.yaml` needs no edit), `_openai_chat_request`, or `_anthropic_chat_request`.
+`ai_worker._chat_request(type_config, prompt, images, timeout)` (`images: list[str]` -- one or
+several base64 JPEGs, widened from a single image specifically so the alert stage's gathered
+series, see above, can be sent in one call) now reads `type_config["provider"]` (`profiles.yaml`,
+same tier the always-per-type `chat_path`/`event_prompt`/`alert_prompt`/`timeout_seconds` already
+live at -- **not** `profile_config.py`'s two-tier `defaults:`-then-hardcoded-fallback resolver,
+since there's no sensible profile-wide default for "which cloud account" the way there is for e.g.
+`crop_padding_pct`) and dispatches to one of three private request builders:
+`_llama_proxy_chat_request` (today's original behavior, unchanged for the single-image case, and
+still the default when `provider` is omitted entirely -- an existing deployment's `profiles.yaml`
+needs no edit), `_openai_chat_request`, or `_anthropic_chat_request`. OpenAI/Anthropic build one
+image content block per entry in `images`, so a multi-image call is native to those two providers;
+`_llama_proxy_chat_request` only ever sends `images[0]`, logging a warning once
+(`_warned_llama_proxy_multi_image`) if handed more than one -- multi-image support on a self-hosted
+backend is unverified, so this is a graceful degradation rather than an error (see `alert_provider`
+below for how a type actually avoids hitting this path for its alert calls).
 `alert_ai_worker.process_claimed_visit` calls the exact same `ai_worker._chat_request` (it already
 imported `ai_worker` and called its `_chat_request` directly, pre-dating this change) with its own
-`type_config`/`alert_prompt`, so both stages get every provider for free from one dispatch point --
-no alert-stage-specific provider code exists anywhere.
+resolved `type_config`/`alert_prompt`/gathered `images` list, so both stages get every provider for
+free from one dispatch point -- no alert-stage-specific provider code exists anywhere.
+
+**`alert_provider`/`alert_model`/`alert_chat_path`** -- optional per-object-type overrides, same
+tier as `provider`/`model`/`chat_path` above, letting one type's *alert* analysis route to a
+different provider than its own *event* analysis (the natural use case this refactor introduced:
+route event-stage single-frame calls to the existing local `llama_slot_proxy` slot as before, but
+route the alert stage's multi-image series to a hosted provider that actually supports it).
+`alert_ai_worker._resolve_alert_type_config(type_config)` builds an effective config dict with
+`provider`/`model`/`chat_path` overridden by the `alert_*` keys whenever present, falling back to
+the plain keys unchanged when they're absent -- so a `profiles.yaml` that only sets `provider` (no
+`alert_*` overrides) behaves identically for both stages, the same "omitting the key preserves old
+behavior" convention `provider` itself established.
 
 OpenAI's Chat Completions API is close enough to `llama_slot_proxy`'s own (deliberately
 OpenAI-compatible) shape that `_openai_chat_request` reuses the identical message/content-block
@@ -771,43 +819,40 @@ Two families of overridable settings:
   `telegram_events_mode`, `telegram_alerts_mode`, `ai_events_stage_enabled`, `ai_alerts_enabled`
   (the original four), plus `crop_disabled`, `crop_frame_offset_pct`, `crop_padding_pct`,
   `frigate_snapshot_enabled` (the crop-family settings `crop.py`'s `crop_event`/`crop_and_scale`/
-  `build_visit_preview` now accept as optional overrides instead of only ever reading
+  `crop_event_high_res` now accept as optional overrides instead of only ever reading
   `config.CROP_DISABLED`/etc. directly -- `None` still means "use the global config value", so
-  every other caller is unaffected), and `visit_preview_frame_percentages`. None of these have any
-  claim-time/thread implications -- `crop_worker.py` already processes every object type
-  regardless, so resolving per-row is enough.
-- **`store_video` / `store_video_alerts` / `visit_thumb_crop_enabled`** -- these gate a whole poll
-  thread (`main.py`, via `profile_config.any_store_video_enabled`/`any_store_video_alerts_enabled`/
-  `any_visit_thumb_crop_enabled`, same "per-type override can start it even when the global default
-  is off" precedent the two AI-stage flags already established) *and* narrow which rows their claim
-  function is even allowed to look at (`claim_video_batch`/`claim_visit_video_batch`/
-  `claim_visit_thumb_crop_batch`, each now taking optional `object_types`/`exclude_object_types`
-  params). Unlike the AI-stage flags (which only ever apply to types with a `profiles.yaml` prompt
-  entry in the first place), these three apply to *any* Frigate label by default -- so their
-  resolvers (`profile_config.store_video_claim_filter`/etc.) deliberately return an
-  **include-or-exclude split**, never a plain include-list checked against every "known" label:
-  if the effective base (the `defaults` section, else `config.py`'s hardcoded fallback) is enabled,
-  only the explicit per-type opt-outs need excluding (or `(None, None)`, i.e. no filter at all,
-  exactly the unfiltered query this project ran before per-type overrides existed); if the base is
-  disabled, only the explicit per-type opt-ins are eligible. This avoids a real regression an
-  include-list approach would have introduced: `OBJECT_TYPES` (the env var powering the web UI's
-  Type dropdown)
-  has always been cosmetic-only, never a pipeline allow-list, so filtering against it as a
-  completeness enumeration would have silently stopped storing video for any real Frigate label
-  that was never added to it. `claim_visit_video_batch`/`claim_visit_thumb_crop_batch` apply this
+  every other caller is unaffected). None of these have any claim-time/thread implications --
+  `crop_worker.py` already processes every object type regardless, so resolving per-row is enough.
+- **`store_video` / `store_video_alerts`** -- these gate a whole poll thread (`main.py`, via
+  `profile_config.any_store_video_enabled`/`any_store_video_alerts_enabled`, same "per-type
+  override can start it even when the global default is off" precedent the two AI-stage flags
+  already established) *and* narrow which rows their claim function is even allowed to look at
+  (`claim_video_batch`/`claim_visit_video_batch`, each taking optional
+  `object_types`/`exclude_object_types` params). Unlike the AI-stage flags (which only ever apply
+  to types with a `profiles.yaml` prompt entry in the first place), these two apply to *any*
+  Frigate label by default -- so their resolvers (`profile_config.store_video_claim_filter`/etc.)
+  deliberately return an **include-or-exclude split**, never a plain include-list checked against
+  every "known" label: if the effective base (the `defaults` section, else `config.py`'s hardcoded
+  fallback) is enabled, only the explicit per-type opt-outs need excluding (or `(None, None)`, i.e.
+  no filter at all, exactly the unfiltered query this project ran before per-type overrides
+  existed); if the base is disabled, only the explicit per-type opt-ins are eligible. This avoids a
+  real regression an include-list approach would have introduced: `OBJECT_TYPES` (the env var
+  powering the web UI's Type dropdown) has always been cosmetic-only, never a pipeline allow-list,
+  so filtering against it as a completeness enumeration would have silently stopped storing video
+  for any real Frigate label that was never added to it. `claim_visit_video_batch` applies this
   filter via a `LATERAL`-joined representative event (same convention `claim_alert_ai_batch`
   already uses), not `visits.objects`, for the same multi-type-per-visit reason described
   elsewhere in this doc.
 
 `main.py` loads `profiles.yaml` once at startup and threads that same dict down to every worker
-that needs it (`crop_worker`/`video_worker`/`mqtt_ingest`/`visit_thumb_worker`/
-`alert_video_worker`/`ai_worker`/`alert_ai_worker`) rather than each thread re-reading the file
-independently. `ai_worker.run_once`/`alert_ai_worker.run_once` filter which types actually get
-claimed via `profile_config.ai_events_stage_enabled`/`ai_alerts_enabled` per label, so a type that
-doesn't want this stage never gets claimed even while the thread itself is running for other
-types; `video_worker.run_once`/`alert_video_worker.run_once`/`visit_thumb_worker.run_once` do the
-analogous thing via their own `*_claim_filter` functions, additionally skipping the claim call
-entirely (rather than calling it with an always-empty filter) whenever nothing at all is enabled.
+that needs it (`crop_worker`/`video_worker`/`mqtt_ingest`/`alert_video_worker`/`ai_worker`/
+`alert_ai_worker`) rather than each thread re-reading the file independently.
+`ai_worker.run_once`/`alert_ai_worker.run_once` filter which types actually get claimed via
+`profile_config.ai_events_stage_enabled`/`ai_alerts_enabled` per label, so a type that doesn't want
+this stage never gets claimed even while the thread itself is running for other types;
+`video_worker.run_once`/`alert_video_worker.run_once` do the analogous thing via their own
+`*_claim_filter` functions, additionally skipping the claim call entirely (rather than calling it
+with an always-empty filter) whenever nothing at all is enabled.
 
 Telegram's four send functions (`telegram.send_photo`/`send_video`/`send_visit_summary`/
 `send_visit_video`) each gained an optional `mode: str | None = None` parameter -- when a caller
@@ -815,12 +860,12 @@ passes an already-resolved mode (`profile_config.telegram_events_mode`/`telegram
 that wins; omitted (`None`), the function falls back to the matching global `config.
 TELEGRAM_EVENTS_MODE`/`TELEGRAM_ALERTS_MODE` exactly as before this existed. `crop_worker.py`/
 `video_worker.py` resolve against the claimed row's own `objects` label directly. The alerts-flow
-callers (`mqtt_ingest.py`'s immediate summary, `visit_thumb_worker.py`'s deferred summary,
+callers (`mqtt_ingest.py`'s immediate summary, sent right after `record_visit` succeeds, and
 `alert_video_worker.py`'s video reply) all resolve against the visit's own **representative**
 event's `objects` (`db.get_representative_event_for_visit`), not `visits.objects` -- the same
 single-type-per-visit convention `claim_alert_ai_batch` already uses, since a visit can span
 multiple distinct object types (`visits.objects` is comma-joined) but there's still exactly one
-representative event whose type the composite grid/notification is actually framed around.
+representative event whose type the notification is resolved against.
 `mqtt_ingest.py` stores the loaded profile in a module-level `_profile` (set once by
 `start(profile)`) rather than threading it through every MQTT callback argument, since paho-mqtt's
 `on_message` signature is fixed and leaves no room for an extra parameter.
@@ -828,8 +873,8 @@ representative event whose type the composite grid/notification is actually fram
 **A second, unrelated category also lives in `defaults:` now**: plain technical tuning knobs with
 no per-object-type meaning at all -- `parallel_limit`/`stale_minutes`/`max_attempts`/
 `crop_initial_wait_seconds`/`max_crop_dimension`/`thumbnail_max_dimension`/`poll_interval_seconds`,
-`retention_months`/`retention_check_interval_seconds`, the `video_*`/`visit_thumb_crop_*`/
-`ai_stage_*` queue-tuning equivalents, and `ai_stage_default_timeout_seconds`/
+`retention_months`/`retention_check_interval_seconds`, the `video_*`/`ai_stage_*`/`alert_ai_*`
+queue-tuning equivalents, and `ai_stage_default_timeout_seconds`/
 `ai_stage_embed_timeout_seconds` (see `config.py`'s own comment for the exact list and each one's
 hardcoded fallback). These were plain env vars with no override capability at all until now; there
 was never a reason to make them *per-object-type* resolvable (there's no "`PARALLEL_LIMIT` for cars
@@ -862,35 +907,30 @@ to keep behaving identically after upgrading -- the env var is silently ignored 
 rather than assuming the old `.env` values still apply. Same applies to any of the technical tuning
 knobs above that were previously set to a non-default value in `.env`.
 
-**Bug found and fixed while migrating `store_video`/`store_video_alerts`/`visit_thumb_crop_enabled`
-off their env vars**: `db.insert_raw_event`/`db.record_visit` (which decide a freshly-ingested
-row's *initial* `video_status`/`thumb_crop_status` -- `'new'` vs `'skipped'`, see the queue-state-
-machine section above) were still reading the bare `config.STORE_VIDEO`/`config.STORE_VIDEO_ALERTS`/
-`config.VISIT_THUMB_CROP_ENABLED` constants directly, never resolving through `profile_config.py`.
-This gap existed from the very first per-object-type-overrides round (these three settings only
-ever affected which *worker thread* started and which rows a *claim* function could see, never the
-ingest-time initial value) but stayed invisible as long as a matching env var kept the global
-constant in sync with what a deployment actually wanted. Once the env var was removed entirely
-(this round), the constant became a permanently-hardcoded `False` with no way to override it at
-ingest time at all -- confirmed live in production: `profiles.yaml`'s `defaults: {store_video_alerts:
-true, visit_thumb_crop_enabled: true}` correctly started the matching worker threads and correctly
-scoped their claim queries, but every new visit still got `video_status='skipped'`/
-`thumb_crop_status='skipped'` at insert time regardless, so neither worker ever had anything to
-claim -- and since the alerts-flow Telegram summary is gated on thumb-crop reaching a *terminal*
-state (or, when thumb-crop won't be attempted at all, sent immediately -- see `mqtt_ingest.py`
-above), a visit stuck permanently at `'skipped'` never triggers either path, silently killing all
-alerts-flow Telegram notifications with no error anywhere. Fixed by adding plain per-label
-resolvers (`profile_config.store_video_enabled`/`store_video_alerts_enabled`/
-`visit_thumb_crop_enabled`) and threading `profile` into `insert_raw_event`/`record_visit`/
-`visit_thumb_crop_will_be_attempted` (all now optional params, defaulting to `None` for backward
+**Bug found and fixed while migrating `store_video`/`store_video_alerts` off their env vars**:
+`db.insert_raw_event`/`db.record_visit` (which decide a freshly-ingested row's *initial*
+`video_status` -- `'new'` vs `'skipped'`, see the queue-state-machine section above) were still
+reading the bare `config.STORE_VIDEO`/`config.STORE_VIDEO_ALERTS` constants directly, never
+resolving through `profile_config.py`. This gap existed from the very first per-object-type-
+overrides round (these settings only ever affected which *worker thread* started and which rows a
+*claim* function could see, never the ingest-time initial value) but stayed invisible as long as a
+matching env var kept the global constant in sync with what a deployment actually wanted. Once the
+env var was removed entirely (this round), the constant became a permanently-hardcoded `False`
+with no way to override it at ingest time at all -- confirmed live in production: `profiles.yaml`'s
+`defaults: {store_video_alerts: true}` correctly started the matching worker thread and correctly
+scoped its claim query, but every new visit still got `video_status='skipped'` at insert time
+regardless, so the worker never had anything to claim. Fixed by adding plain per-label resolvers
+(`profile_config.store_video_enabled`/`store_video_alerts_enabled`) and threading `profile` into
+`insert_raw_event`/`record_visit` (both optional params, defaulting to `None` for backward
 compatibility). `record_visit` resolves the visit's representative object type via a new
 `_get_representative_object_label_for_det_ids` helper -- the usual `get_representative_event_for_
 visit` can't be used yet at this point, since the visit row (and its `raw_events.visit_id` link)
 doesn't exist until later in the same function; this queries by `det_id` instead, same
-`ORDER BY start_ts ASC, id ASC LIMIT 1` convention. `mqtt_ingest.py`'s `_handle_review_message` was
-restructured to fetch the representative event once, right after `record_visit` succeeds, and
-reuse it for both the thumb-crop-defer decision and the Telegram mode resolution (previously two
-separate concerns that happened to both need the same lookup).
+`ORDER BY start_ts ASC, id ASC LIMIT 1` convention. (This bug predates, and is unrelated to, the
+now-removed visit-preview grid/thumb-crop stage -- see "Alert AI stage" above -- which used to have
+its own analogous per-type resolver and a Telegram-summary-deferral mechanism, both deleted along
+with that feature; `mqtt_ingest.py`'s visit summary is sent immediately now, with no deferral of
+any kind.)
 
 ### Video storage, Telegram notifications, and the web report UI
 
@@ -1300,114 +1340,41 @@ Frigate already rendered, base64-encoded directly. `sub_label`/`score` still com
 back to `false` -- with the new default, there's no frame-seeking or region-cropping happening on
 our side to tune unless you opt back into it.
 
-**Events only, deliberately** -- a visit's own composite grid (`VISIT_THUMB_CROP_ENABLED`,
-`crop.build_visit_preview`) is completely unaffected either way, kept on this project's own
-proportional-sampling-across-the-clip approach. A single Frigate snapshot has no "4 frames of
-change" equivalent to offer a visit's grid -- Frigate's snapshot is one frame, and the whole point
-of the visit-level grid is showing motion/change across a span, which this endpoint can't provide
-regardless of how good that one frame's framing is.
+**Events only, deliberately** -- the events stage is entirely unaffected by anything below; it
+never used the visit-level preview feature this used to gate on.
 
-### Visit preview -- a composite grid + animated GIF sampled across the visit's own clip (fifth queue stage)
+### Visit preview (removed) -- a composite grid + animated GIF, superseded by the alert stage
 
-Frigate exposes a per-review "best frame" judgment as `data.thumb_time` on `/api/review` /
-`frigate/reviews` (confirmed live both ways) -- distinct from `start_time` (a review's `thumb_path`
-filename is just `{start_time}-{suffix}`, an identifier, not the frame timestamp), and clearly
-content/score-dependent rather than a fixed offset: across 8 real reviews sampled live, `thumb_time
-- start_time` ranged from ~0.24s to ~38.5s. Frigate's own `thumb_path` webp (e.g.
-`/clips/review/thumb-{camera}-{start_time}-{suffix}.webp`, reachable directly off Frigate's
-webserver, no auth) is unusably low-res for LPR/attribute work (318x180 in testing) but has no
-bbox/label overlay -- reproducing its framing against the full-res record stream at the same
-`thumb_time` was the original goal of this whole feature.
+This project used to have a fifth queue stage, a visit-level "preview" artifact built specifically
+because the alert AI stage (see above) needed *some* image richer than a single low-res frame to
+analyze. Its history, briefly, since several real production bugs shaped it: Frigate's own
+per-review "best frame" timestamp (`data.thumb_time`) turned out to have no reliable way to
+reproduce against the full-res record stream (its continuous-recording clip endpoint pads an
+*unpredictable*, direction-varying amount of extra footage onto either edge of a requested
+window, confirmed across three separate real visits, each breaking a different anchor-correction
+attempt) -- so the design pivoted to sampling 4 frames proportionally across the clip's own
+measured duration (`VISIT_PREVIEW_FRAME_PERCENTAGES`) instead of chasing one precise "best moment."
+Those 4 frames were combined into a composite 2x2 grid image (`visits.crop_image_base64`, the
+artifact actually analyzed) plus a separate animated GIF (`visits.preview_gif_base64`,
+human-preview-only, served via a since-removed `GET /visits/{id}/preview.gif`, never sent to any
+VLM). Later fixes hardened this against Frigate returning a not-yet-finalized/placeholder clip
+(a probed-duration-vs-nominal-window ratio check) and against its own continuous-recording
+retention window being shorter than the visit's span (replacing one whole-span clip request with
+four independent per-moment requests, each with its own small padding window, so a gap at one
+moment didn't fail the whole grid).
 
-**This was tried and abandoned.** `crop_visit_thumbnail` (the original implementation) seeked to a
-single offset computed from `thumb_time` within a freshly-downloaded visit-scoped continuous-
-recording clip (`video.build_clip_url`, -5s/+5s padding around the visit's own span) -- but
-confirmed live in production, Frigate's continuous-recording clip endpoint pads an *unpredictable*
-amount of extra footage onto **either** edge of the requested window, inconsistently request to
-request:
-- One visit's clip came back *shorter* than requested (a 13s request returned only ~4.06s,
-  confirmed by `ffprobe` -- a genuine motion-based recording gap, likely caused by that camera's
-  `frigate.conf` having `record.continuous.days: 0` at the time). Fixed by probing actual duration
-  and raising if the offset landed within a small safety margin of it.
-- A *different* visit's clip came back *longer* than requested, with the extra ~6.1s **prepended
-  before the start** rather than appended after -- confirmed by pulling Frigate's own review
-  thumbnail (which did show the right moment) and sweeping frames across the actual downloaded
-  clip: the real moment was ~11-13s in, not ~5s. Fixed by anchoring the seek offset from the clip's
-  measured *end* instead of its assumed start.
-- A **third** visit then broke the *end*-anchor fix the same way: its clip had ~4.1s of extra
-  footage appended **after** the requested end instead of before it -- the end-anchored formula
-  computed 10.96s into the clip, but the real moment (confirmed the same way: pulling Frigate's own
-  thumb, sweeping frames) was at 5.26s, almost exactly what the original *start*-anchored formula
-  would have given.
+**This whole feature has been removed** -- schema/DB/GET-endpoint/web-UI/Telegram/report
+references are gone (the columns/index remain unwritten in `schema.sql` for now, see the
+schema-migration note under "Alert AI stage" above) -- in favor of the alert stage gathering a
+series of genuinely high-resolution *per-event* crops directly, ephemerally, at analysis time (see
+"Alert AI stage" above for the current design). The fixed 4-percentage sampling never reliably
+landed on the actual moment worth seeing, and the composite grid's resolution was capped well
+below what a real per-event crop already provides for free -- once the alert stage could gather
+real per-event crops instead, the whole preview-building apparatus (and its several production
+bugs) had no remaining purpose. A visit's own thumbnail/lightbox image now always falls back to
+the representative event's own crop, same as before this feature existed.
 
-Conclusion: **neither a start- nor an end-anchor is reliable** -- Frigate pads whichever edge it
-feels like, request to request, and no fixed manual correction (`VISIT_THUMB_CROP_OFFSET_ADJUST_
-SECONDS`, since removed) can compensate, since the error's size *and direction* varies per visit.
-
-**Current approach**: stop chasing one precise "best moment" against a moving target. `crop.
-build_visit_preview` instead samples **`VISIT_PREVIEW_FRAME_PERCENTAGES`** (default `0,25,50,100`,
-deployment-tunable -- e.g. `5,35,65,90` to stay a bit clear of both edges instead of landing
-exactly on them; must be exactly 4 comma-separated values, since the grid assembly below is a
-fixed 2x2 layout) proportionally across the clip's own **measured** duration
-(`_probe_duration_seconds`) -- covering the visit's whole span regardless of where the real
-footage boundaries land, which sidesteps the edge-padding problem entirely rather than needing yet
-another anchor/correction scheme. The four sampled frames (each cropped to the representative
-event's own `region`/box, or left uncropped under `CROP_DISABLED` -- same `_build_vf_filter`
-helper `crop_and_scale` uses) are combined into:
-- **`visits.crop_image_base64`** -- one composite 2x2 grid image (`ffmpeg` `hstack`/`vstack`), the
-  artifact actually used for AI analysis, the thumbnail, Telegram, and the report. Deliberately a
-  single flat image, not several separate images sent in one VLM prompt -- a chat-completion vision
-  API decodes each `image_url` as an independent input, and whether a given self-hosted backend
-  (this project's `llama_slot_proxy` + Qwen + mmproj included) actually reasons sensibly across
-  multiple images in one prompt depends on that backend's specific chat-template/mmproj support,
-  not just the API shape -- a single composite image sidesteps that uncertainty completely, since
-  every VLM handles exactly one image per input by definition.
-- **`visits.preview_gif_base64`** -- a separate animated GIF (`ffmpeg` image2 sequence input +
-  palette generation) of the same four moments playing as a slideshow, for the web UI lightbox and
-  Telegram only. Never sent to the VLM -- for the same reason multiple separate images weren't
-  used for AI analysis, an animated GIF's `image_url` would just be decoded as its first frame by a
-  standard vision pipeline, conveying no temporal information to a model at all. Served via
-  `GET /visits/{id}/preview.gif`; the web UI's lightbox gets a third toggle button ("Preview",
-  alongside Video/Image) shown whenever `has_preview_gif` is true.
-
-  The GIF's own frames are scaled to the full `MAX_CROP_DIMENSION` (the same cap a normal
-  single-event `crop_image_base64` gets), not the grid's half-size panels -- the two artifacts are
-  built from the same 4 raw frames but sized independently: the grid halves each panel
-  specifically so the assembled 2x2 combination lands near `MAX_CROP_DIMENSION` overall rather than
-  4x it, but the GIF only ever shows one frame at a time, so that constraint doesn't apply to it at
-  all. An earlier version additionally downscaled the GIF to a hardcoded 480px width on top of
-  that (to keep file size down) -- dropped once it was clear that made the human-facing preview
-  (Telegram, the web UI) noticeably blurrier than the actual crop quality for no real benefit.
-
-`thumb_time` is still stored on the visit row (`record_visit`, informational -- Frigate's own
-opinion of the best moment) but no longer read by `build_visit_preview` at all, and no longer gates
-whether a preview will be attempted (`db.visit_thumb_crop_will_be_attempted` used to also require
-`thumb_time is not None`; now it's purely `VISIT_THUMB_CROP_ENABLED`, since the new approach only
-needs `start_ts`/`end_ts`/`cameras`). A schema-migration cleanup that used to force-skip pre-
-existing rows with `thumb_time IS NULL` (correct under the old thumb_time-dependent approach) was
-removed from `schema.sql` accordingly -- such a row can now succeed like any other.
-
-`GET /visits/{id}/thumbnail` prefers the animated GIF over the composite grid -- unlike
-`GET /events/{id}/thumbnail`, which always returns a still JPEG, a visit's grid card in the web
-UI's Visits tab plays the sampled-frames sequence directly (the GIF is already built at a modest
-size, served as-is, no further scaling). Falls back to a scaled-down JPEG of the composite grid,
-then the representative event's own crop (available almost immediately, long before the preview
-can be), then a frame pulled from the visit's own stored video -- same belt-and-suspenders chain as
-the existing per-event thumbnail endpoint. `GET /visits/{id}/image` (the lightbox's dedicated
-"Image" mode) stays grid-only, deliberately -- the lightbox already has a separate "Preview" mode
-for the GIF, so `/image` isn't the place to also prefer it. `GET /visits`' `has_image` reflects
-either source being available (`has_thumb_crop OR` the representative event's own image);
-`has_thumb_crop`/`has_preview_gif`/`thumb_crop_status` are additive fields for observability. The
-web UI's Visits tab uses these visit-scoped endpoints instead of the representative event's
-directly, so the grid/lightbox picks up the better artifact automatically once ready, with no
-client-side fallback logic of its own.
-
-The lightbox's toggle order is Preview/Video/Image (`static/index.html`), and `openLightbox`
-defaults to `'preview'` when `has_preview_gif` is true (falling back to `'video'`, then `'image'`)
--- the GIF is richer than a still frame and already framed to the sampled moments of interest, so
-it's the best default when available, ahead of even the full video.
-
-#### Bug: a media-only retention purge made its own rows permanently unopenable
+#### Bug (still applies): a media-only retention purge made its own rows permanently unopenable
 
 `purge_media_older_than` (see "Query/report/AI-queue API" above) deliberately clears media columns
 but keeps every row and its AI analysis text, specifically so old data stays "fully searchable...
@@ -1428,191 +1395,13 @@ is `'done'`, it reads "media cleared — click for description" instead, so the 
 itself hints that clicking still does something.
 
 The lightbox's own media template had a matching gap once purged-but-analyzed rows became
-openable: `<img :src="lightboxImageUrl()">` rendered unconditionally whenever no video/preview
-applied, with no check that `has_image` was actually true -- would have shown a broken image for
-exactly the rows this fix was meant to make openable. Fixed by adding `lightboxEvent.has_image &&`
-to that template's condition, plus a new sibling `.lightbox-no-media` placeholder (shown only when
-none of `has_image`/`has_video`/`has_preview_gif` are true) explaining the media was likely cleared
-by a retention purge and that the AI analysis below is still preserved. The `.lightbox-info` panel
-itself needed no change -- it was already gated on `visitId || ai_status === 'done'`, independent
-of media presence.
-
-#### Bug: no defense against Frigate's clip endpoint returning a not-yet-finalized/placeholder clip
-
-The pivot to proportional sampling (above) sidestepped the *edge-padding* problem, but confirmed
-live in production it introduced a new, more basic gap: `build_visit_preview` has no check at all
-that the clip it got back is actually complete. A real visit's nominal window (`end_ts+5 -
-(start_ts-5)`) was ~44.6s, but the clip Frigate returned was only ~3.9s -- Frigate's continuous-
-recording endpoint hadn't finished writing that segment yet, the same "not ready" condition
-`video.download_clip`'s `VIDEO_MIN_VALID_BYTES` check exists to catch on the byte-size axis.
-Sampling `VISIT_PREVIEW_FRAME_PERCENTAGES` of that *tiny* duration instead of the visit's real span
-produced 4 frames all crammed within the same ~3.9s window (confirmed by pulling the actual stored
-grid: all 4 panels' burned-in OSD timestamps landed within a 3-second span, nowhere near the
-visit's real ~34.6s of activity) -- silently wrong, `thumb_crop_status` still went `done`, nothing
-signaled it. Diagnosed by comparing the visit's DB-recorded duration (event_count > 1, i.e. a
-multi-event visit expected to span tens of seconds) against the grid's actual sampled timestamps.
-
-Fixed by comparing the probed duration against the nominal requested window before sampling
-anything: if `duration < requested_span * _MIN_DURATION_RATIO` (a fixed `0.5`, not deployment-
-tunable, same treatment as `_DURATION_SAFETY_MARGIN_SECONDS` used to be), raise instead of silently
-proceeding -- routes into the existing retry-then-fallback path
-(`visit_thumb_worker.mark_visit_thumb_crop_retry_or_failed`) so a later retry (once Frigate has
-actually finished writing the segment) can succeed instead. `0.5` is deliberately generous -- this
-guards against an ~11x shortfall like the one found, not the few-seconds segment-boundary jitter
-proportional sampling is already designed to tolerate.
-
-#### Reusing an already-downloaded visit video instead of re-racing Frigate's clip endpoint
-
-The `_MIN_DURATION_RATIO` guard above was framed as catching Frigate "not having finished writing
-the segment yet" -- confirmed live that this is often not a timing race that a later retry
-outlasts, but a race against Frigate's own cleanup of continuous-recording segments (both cameras
-run `record.continuous.days: 0` in `frigate.conf`, so continuous footage only survives in a very
-short-lived rolling buffer before Frigate purges it). Confirmed directly: the identical clip URL,
-requested only 5 seconds apart by two different queue stages, returned a full-length clip the
-first time and a near-empty one the second -- and re-requesting the same URL minutes later
-continued to return the same near-empty result, ruling out "just needs more time." Worse,
-`STORE_VIDEO_ALERTS`'s `alert_video_worker` requests this exact same URL (via
-`video.build_clip_url`) independently, and empirically tends to win that race more often (it only
-needs one successful attempt, shortly after the review closes) -- meaning a full-length clip was
-frequently already sitting on disk (`visits.video_path`) at the exact moments `build_visit_preview`
-was re-losing the same race against Frigate.
-
-Fixed by having `build_visit_preview` prefer that already-downloaded file
-(`visit.get("video_path")`, when the file exists on disk) over re-fetching from Frigate at all --
-confirmed against the two real visits that prompted this fix that in both cases, by the time of the
-grid-building attempt that would have used it, the video worker had already stored a full-length
-clip. This is a pure opportunistic win, not a hard dependency between the two independent
-`STORE_VIDEO_ALERTS`/`VISIT_THUMB_CROP_ENABLED` switches -- each queue stage still re-fetches its
-own fresh copy of the visit row on every attempt (a separate `claim_visit_thumb_crop_batch` call
-per retry pass), so a video that finishes downloading in between two thumb-crop attempts is picked
-up automatically on the next one; `video_path` unset (video storage off, or not yet done) still
-falls back to requesting Frigate directly, exactly as before.
-
-#### When there's no downloaded video: sampling each moment independently instead of one whole-span request
-
-The "requesting Frigate directly" fallback above used to mean one request for the visit's whole
-`start_ts`->`end_ts` span (the same shape `alert_video_worker` uses), then sampling 4 frames out of
-whatever came back -- which meant the `_MIN_DURATION_RATIO` guard's fate was all-or-nothing: if
-Frigate hadn't retained the *entire* window, the whole grid attempt failed, even if some individual
-moments within it were perfectly retrievable. That single-request design was also never guaranteed
-to succeed just because `alert_video_worker` happened to; both independently ask for the same
-range, and per Frigate's own recording model, retention is decided **per recording segment** (each
-~10s), not per review/visit as a whole -- a segment only gets long-lived retention
-(`alerts`/`detections`/`motion`, 5/10/30 days respectively) if something actually triggered one of
-those categories *within that specific segment*; a segment with no fresh trigger only qualifies as
-`continuous`, which is `days: 0` on both cameras here and gets purged almost immediately by
-Frigate's own cleanup. A visit with a mostly-stationary object (little re-triggering) can easily
-have long stretches that were never anything but `continuous`-tagged, gone within seconds, even
-though the review/visit itself is retained as metadata indefinitely.
-
-Fixed by replacing the single whole-span request with `_panels_from_independent_timestamps`: each
-of the 4 `VISIT_PREVIEW_FRAME_PERCENTAGES` points is converted to its own absolute epoch timestamp
-(`visit.start_ts + pct/100 * (end_ts - start_ts)`) and requested as its own tiny window via
-`_grab_frame_near_timestamp` (reusing `build_clip_url`'s own -5s/+5s padding by passing the same
-instant as both `start_ts` and `end_ts`, so the target moment lands ~5s into its own small clip).
-A gap at any one moment (nothing retained right there) no longer takes the other three down with
-it -- it reuses the nearest earlier successful frame instead (a leading gap borrows the first
-success found); only raises if *none* of the 4 moments produced anything at all. This also drops
-the need for `_MIN_DURATION_RATIO`/`_VISIT_PREVIEW_EDGE_MARGIN_SECONDS` entirely on this path --
-there's no single probed duration to sanity-check a nominal window against anymore, since every
-request is already scoped to exactly the moment it wants.
-
-`build_visit_preview`'s already-downloaded-video path (`_panels_from_clip`) can itself now fall
-through to this same independent-timestamp method rather than being a second all-or-nothing dead
-end: `alert_video_worker` only validates a byte-size floor (`VIDEO_MIN_VALID_BYTES`, `1000` bytes
-in this deployment -- confirmed live to be far below what even a genuinely short few-second clip
-weighs), so a bad, too-short download can still pass that check and get stored as `video_path`, at
-which point it never changes again. Without a fallback, `_panels_from_clip`'s own duration-ratio
-check would then raise on *every* retry, forever, even though the more robust independent-timestamp
-method sitting right next to it could very likely still succeed. `build_visit_preview` now catches
-that specific `ValueError` and falls through instead of propagating it. Net effect: the
-already-downloaded video is purely a cheap optimization (one file read instead of 4 HTTP round
-trips) layered on top of the independent-timestamp method, which is the actual source of
-correctness -- it can only make a visit's preview faster, never worse, and `VISIT_THUMB_CROP_ENABLED`
-needs no dependency on `STORE_VIDEO_ALERTS` at all (a visit with no stored video, or none ever
-attempted, still builds a preview entirely from direct-to-Frigate per-moment requests). Verified
-against real production data via `docker exec` (not just mocked unit tests): both the
-already-downloaded-video path and the independent-timestamp path produce correct, real grids from
-the same live visit -- the only difference being the independent path's timestamp spread across
-panels is naturally tighter for a very short visit (it samples proportionally across the visit's
-own real span, not the wider padded window a downloaded clip provides for free).
-
-#### Wired into the AI queue, the alerts report, and Telegram
-
-All three remaining consumers use `crop_image_base64` (the composite grid, once built) exactly as
-they did the old single-frame thumb-crop -- none of them needed to change for the pivot, since
-they only ever cared about "is there a better image than the representative event's own crop
-available yet," not what that image's internal structure is:
-
-- **`POST /ai-queue/claim`** (`db.claim_ai_batch`): whenever a `source=visits` claim's row is a
-  visit's representative event, the response's `crop_image_base64` opportunistically prefers the
-  visit's own composite grid over the representative event's own crop *whenever it's already done
-  by claim time* -- zero latency cost, since this never changes which rows are eligible or when,
-  only which image comes back. The optional `require_thumb_crop` param goes further: it makes the
-  claim itself wait (`AND visit_id IS NOT NULL AND EXISTS (... v.thumb_crop_status = 'done')`) so
-  the grid is *guaranteed* to be the one analyzed, never the representative's own single crop -- a
-  real trade-off (alerts-flow analysis is delayed until the review closes and the preview build
-  finishes) that's opt-in, not the default, since the right answer depends on your traffic.
-  Deliberately scoped to `source=visits` only -- under plain `source=events` (no dedup), several
-  distinct raw_events can share one visit, and overriding all of them with the identical grid image
-  would mean redundant VLM calls analyzing the same picture, not an improvement.
-- **`/reports/generate?source=visits`** (`db.get_report_data`): always prefers the visit's own
-  composite grid via `COALESCE(v.crop_image_base64, re.crop_image_base64)` (`LEFT JOIN
-  yard_stats.visits v ON v.id = re.visit_id AND v.thumb_crop_status = 'done'`) -- unconditional,
-  not opt-in, since a report runs well after the fact on a schedule, so unlike the AI queue there's
-  no real latency cost to just always taking the better image when it exists. `source=events`
-  reports never apply this (matches the AI queue's own scoping decision). The HTML report itself
-  (`report.py`'s `_img_cell`) goes one step further for the *display* choice: it prefers the
-  visit's own `preview_gif_base64` (also selected in `get_report_data`'s `gif_image_expr`, same
-  `source=visits`-only scoping) over that static grid whenever it's ready, same "richer artifact
-  when available" preference Telegram's visit summary already applies -- the static grid alone
-  used to read as a flat "puzzled" 2x2 image in the report even once the nicer animated preview
-  existed. Embedded once, directly, with no separate click-to-enlarge lightbox the way the JPEG
-  grid gets -- there's no cheap way to re-encode a second, smaller GIF the way `crop.
-  scale_image_base64` does for a JPEG, and duplicating the same GIF bytes in a lightbox `<img>`
-  would reintroduce the exact double-embed bloat this report already fixed once (the old n8n
-  version's 42MB report bug, see below). The grid is still what the AI queue actually analyzes
-  either way (see above) -- only this HTML report's own inline preview changed.
-
-  `/reports/generate`'s optional `include_preview` param is a mode, not a bool (same shape as
-  `TELEGRAM_EVENTS_MODE`): `"gif"` (the default) is today's original behavior described above;
-  `"image"` drops only the GIF -- `get_report_data` forces `gif_image_expr` to `NULL` regardless
-  of `thumb_crop_status`, at the SQL level, not just hidden by `report.py`'s rendering, since it's
-  typically the single largest field in this query (a multi-frame animated GIF vs. one flat JPEG
-  grid) -- falling back to the visit's own static composite grid exactly as `_img_cell` already
-  does for a visit whose preview genuinely isn't ready yet; `"none"` goes further and forces
-  `crop_image_expr` to `NULL` too, dropping the row image entirely (for either `source=events` or
-  `source=visits`) -- `_img_cell` already renders `"(no image)"` whenever `crop_image_base64`
-  comes back NULL, so neither narrower mode needs a separate rendering path, only the SQL-level
-  field selection changes. Each mode past the default is a real payload-size reduction, not a
-  cosmetic one -- the dropped field(s) are never fetched from Postgres at all. Exists for a
-  caller like an n8n workflow that emails/messages the report and wants a smaller result --
-  `n8n/alerts-report.json` itself is unchanged (still omits the param, i.e. `"gif"`), since
-  that's just one example caller, not the only one.
-- **`TELEGRAM_ALERTS_MODE`'s visit-summary message** (the `image`/`all` half): deferred, not edited after the fact.
-  `mqtt_ingest._handle_review_message` only sends the summary immediately when
-  `db.visit_thumb_crop_will_be_attempted(review)` is false (i.e. `VISIT_THUMB_CROP_ENABLED` is off)
-  -- otherwise it skips the immediate send entirely, and `visit_thumb_worker.process_claimed_visit`
-  sends it once `thumb_crop_status` reaches a terminal state: `done` -> the animated preview GIF
-  (`telegram.send_visit_summary`'s `gif_base64` param, sent via Telegram's `sendAnimation` so it
-  actually plays -- `sendPhoto`/`sendDocument` would show it as a static first frame or a bare file
-  attachment instead); `failed` (attempts exhausted) -> falls back to the representative event's
-  own crop as a plain photo (`image_base64` param, `sendPhoto`) or text-only, so a visit is never
-  left without its notification just because the preview build never panned out. Deliberately the
-  GIF, not the composite grid, for this one consumer -- Telegram is the human-facing notification,
-  where the animation is more informative than a single still; the AI queue always analyzes the
-  grid (see above), since that's what's actually sent for analysis -- the HTML report's own inline
-  preview also now prefers the GIF the same way Telegram does (see above), independent of this. The
-  immediate-send path
-  in `mqtt_ingest.py` (used when a deferred send won't happen at all) always passes `image_base64`
-  only -- no GIF ever exists yet at that point, since `build_visit_preview` hasn't run.
-  `mark_visit_thumb_crop_retry_or_failed` returns the resulting status specifically so the worker
-  can tell "still retrying, don't send yet" apart from "just went terminal, send now" without
-  re-deriving that from the attempt-count arithmetic itself. This is a genuine behavior change from
-  the original per-event notifications -- the notification now arrives however long the review
-  takes to close plus however long the preview build takes, not near-instantly -- a deliberate
-  trade (quality over speed) rather than the alternative of editing an already-sent photo in place
-  (`editMessageMedia`), which was considered and rejected as more moving parts for the same result.
+openable: `<img :src="lightboxImageUrl()">` rendered unconditionally whenever no video applied,
+with no check that `has_image` was actually true -- would have shown a broken image for exactly
+the rows this fix was meant to make openable. Fixed by adding `lightboxEvent.has_image &&` to that
+template's condition, plus a sibling `.lightbox-no-media` placeholder (shown only when neither
+`has_image`/`has_video` are true) explaining the media was likely cleared by a retention purge and
+that the AI analysis below is still preserved. The `.lightbox-info` panel itself needed no change
+-- it was already gated on `visitId || ai_status === 'done'`, independent of media presence.
 
 ### Camera allow-list
 
@@ -1809,21 +1598,17 @@ that row's own `id` (a raw_event id or visit id -- independent sequences that ca
 this, always searching both, per an explicit product decision that "anything relevant" beats
 picking one flow upfront.
 
-Each result also carries `has_image`/`has_video`/`has_preview_gif`/`ai_status` -- the same fields
+Each result also carries `has_image`/`has_video`/`ai_status` -- the same fields
 `EventSummary`/`VisitSummary` already expose -- computed directly in this query rather than
 requiring a follow-up fetch per clicked result. This was a deliberate design choice over the
 alternative (add a new `GET /visits/{visit_id}` single-item endpoint, since none currently exists,
 and have the frontend fetch full detail on click): computing these fields once, in the same query
 that already joins to the row, is strictly cheaper than a second network round-trip per click, and
 avoids growing the API surface for a need this query can already satisfy. For the visit branch,
-`has_image` mirrors `_build_visits_query`'s own `(has_thumb_crop OR event_has_image)` fallback
-exactly -- `(v.crop_image_base64 IS NOT NULL) OR` a correlated subquery for the representative
-(earliest-linked, same `get_representative_event_for_visit` definition) raw_event's own crop --
-rather than only checking the visit's own thumb-crop column: a visit whose `VISIT_THUMB_CROP_
-ENABLED` grid isn't ready (or is off entirely) still very likely has a servable thumbnail via that
-same fallback chain `GET /visits/{id}/thumbnail` already applies server-side, and a search result
-that hid a genuinely fetchable thumbnail behind `has_image: false` would silently disagree with
-what every other view of the same visit already shows.
+`has_image` mirrors `_build_visits_query`'s own definition exactly -- a correlated subquery for the
+representative (earliest-linked, same `get_representative_event_for_visit` definition) raw_event's
+own crop -- same fallback chain `GET /visits/{id}/thumbnail` already applies server-side, so a
+search result never disagrees with what every other view of the same visit already shows.
 
 The web UI's Search tab (`static/app.js`'s `fetchSearchResults`/`openSearchResult`) reuses the
 existing filter bar rather than inventing a new one -- the same "Search AI analysis" text field
@@ -1833,7 +1618,7 @@ gated to the Events tab only) since they're per-raw_event concepts with no equiv
 is no pagination -- this is a fixed-size ranked top-N grid (`limit`, no `offset`), not a browsable
 list, so the pager is hidden for this tab. Clicking a result routes into the exact same shared
 lightbox (`openLightbox`) Events/Visits already use, building the same `{id, visitId, has_video,
-has_image, has_preview_gif, ai_status}` shape `openVisitLightbox` already constructs for a plain
+has_image, ai_status}` shape `openVisitLightbox` already constructs for a plain
 `VisitSummary` -- no new lightbox code was needed, only a new way to construct its input.
 
 ### Search relevance -- default time window, a `max_distance` cutoff, and a whole-word keyword fallback
@@ -1932,14 +1717,14 @@ still served fine through the mount itself (`/ui/admin.js`, `/ui/style.css`).
 
 **`GET /admin/overview`** is the dashboard's one fast-loading call -- row counts (`raw_events`/
 `visits`/`sightings`/`visit_sightings`), per-stage queue status breakdown (`db.
-get_stage_counts()`: crop/video/ai on `raw_events`, video/thumb_crop/alert_ai on `visits`),
+get_stage_counts()`: crop/video/ai on `raw_events`, video/alert_ai on `visits`),
 embedding coverage (reuses `count_sightings_missing_embedding`), DB size (`db.get_db_size_info()` --
 `pg_database_size` total plus `pg_total_relation_size` per `yard_stats` table, so it matches what
 actually shows up on the Postgres data volume, not just row bytes), vector index health (`db.
 get_vector_index_status()` -- pgvector extension version, `EMBEDDING_DIMENSIONS`, and each HNSW
 index's `indisvalid`/`indisready`), `get_retention_info()` (already existed, reused as-is), and a
 feature-flags summary (`AI_EVENTS_STAGE_ENABLED`/`AI_ALERTS_ENABLED`/`STORE_VIDEO`/
-`STORE_VIDEO_ALERTS`/`VISIT_THUMB_CROP_ENABLED`/`CROP_DISABLED`/`TELEGRAM_EVENTS_MODE`/
+`STORE_VIDEO_ALERTS`/`CROP_DISABLED`/`TELEGRAM_EVENTS_MODE`/
 `TELEGRAM_ALERTS_MODE`) so "what's currently turned on" is visible at a glance instead of having to
 check `profiles.yaml` by hand. Everything in this call is cheap SQL -- deliberately excludes
 anything that's a real filesystem walk or network call, so the dashboard's main section always
@@ -2046,26 +1831,26 @@ documented for manual use, now a real button: resets every row at `{stage}_statu
 to `'retry'` with `{stage}_attempt_count` reset to `0`, so the next poll tick/claim picks it back
 up. `table`/`stage` are validated against a fixed whitelist (`db._REQUEUE_TARGETS`) before ever
 touching SQL -- a `raw_events` row can be requeued for `crop`/`video`/`ai`, a `visits` row for
-`video`/`thumb_crop`/`alert_ai`; an unknown combination is a 400, not a SQL injection surface. The dashboard
+`video`/`alert_ai`; an unknown combination is a 400, not a SQL injection surface. The dashboard
 shows a "Requeue N failed" button next to any stage currently at 1+ failed, matching how this
 session's production incident (34 events failed on an embedding dimension mismatch) was actually
 resolved by hand over SSH before this button existed.
 
 **Embeddings backfill and retention purge are exposed as buttons too, reusing the existing
 endpoints** (`POST /embeddings/backfill?confirm=true&limit=200`, `POST /retention/purge`) -- both
-already had the right dry-run-by-default shape. The retention purge control mirrors the API's five
-independent purge flags directly (`purgeDeleteVideo`/`purgeDeleteGif`/`purgeDeleteSnapshots`/
-`purgeDeletePuzzledPreview`/`purgeDeleteAll` -- see "Query/report/AI-queue API" above for what each
-one clears): the four media checkboxes are disabled (greyed, not just ignored) while "Delete ALL"
-is checked, since they no longer mean anything once the whole row is going away. Checking "Delete
-ALL" switches the effective `only_media` param to `false` and shows the full row-count preview
-plus a starker PERMANENTLY-delete confirmation that also mentions the vector-index rebuild that
-follows; leaving it unchecked keeps `only_media=true` and shows a media-focused preview (video
-file/snapshot/GIF/puzzled-preview counts) with a lighter confirmation listing only the categories
-actually checked ("rows and all AI analysis text are kept"). Confirming with every media checkbox
-unchecked and "Delete ALL" also unchecked is a no-op the UI catches before the confirm dialog even
-opens ("Select at least one category to clear (or check \"Delete ALL\")."), rather than silently
-doing nothing after a scary-sounding dialog. Either way, a native JS `confirm()` dialog spells out
+already had the right dry-run-by-default shape. The retention purge control mirrors the API's two
+independent purge flags directly (`purgeDeleteVideo`/`purgeDeleteSnapshots`/`purgeDeleteAll` -- see
+"Query/report/AI-queue API" above for what each one clears): the two media checkboxes are disabled
+(greyed, not just ignored) while "Delete ALL" is checked, since they no longer mean anything once
+the whole row is going away. Checking "Delete ALL" switches the effective `only_media` param to
+`false` and shows the full row-count preview plus a starker PERMANENTLY-delete confirmation that
+also mentions the vector-index rebuild that follows; leaving it unchecked keeps `only_media=true`
+and shows a media-focused preview (video file/snapshot counts) with a lighter confirmation listing
+only the categories actually checked ("rows and all AI analysis text are kept"). Confirming with
+every media checkbox unchecked and "Delete ALL" also unchecked is a no-op the UI catches before the
+confirm dialog even opens ("Select at least one category to clear (or check \"Delete ALL\")."),
+rather than silently doing nothing after a scary-sounding dialog. Either way, a native JS
+`confirm()` dialog spells out
 exact counts (from a mandatory preview call first) before the real `confirm=true` call fires --
 the same two-step preview-then-confirm flow the API itself already enforces, just made impossible
 to skip from the UI as well, since both modes are irreversible once confirmed. An "Object type"
@@ -2084,13 +1869,14 @@ why `camera` (unlike `object_label`) also scopes visits.
   a row to the `visits` segment Frigate's own review/alert stream grouped it into (see above).
 - `visits` — one row per Frigate review/alert segment (`frigate/reviews`), grouping the
   `raw_events` det_ids Frigate's own tracker considers the same real-world activity. Populated by
-  `db.record_visit`; cross-camera merging is not yet implemented (see above). Also carries
-  `thumb_time` (Frigate's own review "best frame" timestamp, stored but no longer used for
-  cropping -- see below) and, when `VISIT_THUMB_CROP_ENABLED`, its own `crop_image_base64`
-  (composite grid image) plus `preview_gif_base64` (animated GIF, human preview only) and
-  `thumb_crop_status` state machine -- separate artifacts from any linked raw_event's own crop
-  (see "Visit preview" above). `alert_ai_status`/`alert_ai_status_changed_at`/
-  `alert_ai_attempt_count` (see "Alert AI stage" above) are this visit's own sixth queue stage,
+  `db.record_visit`; cross-camera merging is not yet implemented (see above). Carries `thumb_time`
+  (Frigate's own review "best frame" timestamp, informational only -- not read by any code path).
+  `crop_image_base64`/`preview_gif_base64`/`thumb_crop_status`/`thumb_crop_status_changed_at`/
+  `thumb_crop_attempt_count` remain in the schema but are unwritten/unread by any code path -- these
+  backed a now-removed visit-level composite-grid/GIF preview stage, superseded by the alert stage
+  gathering high-res per-event crops directly instead (see "Alert AI stage" above); dropping these
+  columns is a deferred, separate migration. `alert_ai_status`/`alert_ai_status_changed_at`/
+  `alert_ai_attempt_count` (see "Alert AI stage" above) are this visit's own queue stage,
   entirely independent of any linked raw_event's `ai_status`.
 - `sightings` — one row per AI-analyzed event, **any** object label (`object_label`, straight from
   `raw_events.objects` -- car, truck, person, dog, whatever `profiles.yaml` maps). `description` is

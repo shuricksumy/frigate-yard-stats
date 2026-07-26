@@ -107,31 +107,20 @@ def test_send_visit_video_mode_override_wins_over_global_config(monkeypatch, tmp
     assert len(calls) == 1
 
 
-# ---- send_visit_summary's three-way artifact branch: GIF > photo > text-only ----
-# (previously only ever exercised indirectly through visit_thumb_worker mocks that replaced
-# send_visit_summary entirely -- never against the real function's own branching logic)
+# ---- send_visit_summary's two-way artifact branch: photo > text-only ----
 
-def test_send_visit_summary_prefers_gif_when_available(monkeypatch, fake_post):
+def test_send_visit_summary_sends_photo_when_image_available(monkeypatch, fake_post):
     monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "image")
-    telegram.send_visit_summary("outside", "car", 1, gif_base64="Z2lm", image_base64="aW1n")
-    assert len(fake_post) == 1
-    url, kwargs = fake_post[0]
-    assert url[0].endswith("/sendAnimation")
-    assert "animation" in kwargs["files"]
-
-
-def test_send_visit_summary_falls_back_to_photo_without_gif(monkeypatch, fake_post):
-    monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "image")
-    telegram.send_visit_summary("outside", "car", 1, gif_base64=None, image_base64="aW1n")
+    telegram.send_visit_summary("outside", "car", 1, image_base64="aW1n")
     assert len(fake_post) == 1
     url, kwargs = fake_post[0]
     assert url[0].endswith("/sendPhoto")
     assert "photo" in kwargs["files"]
 
 
-def test_send_visit_summary_falls_back_to_text_only_without_gif_or_image(monkeypatch, fake_post):
+def test_send_visit_summary_falls_back_to_text_only_without_image(monkeypatch, fake_post):
     monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "image")
-    telegram.send_visit_summary("outside", "car", 1, gif_base64=None, image_base64=None)
+    telegram.send_visit_summary("outside", "car", 1, image_base64=None)
     assert len(fake_post) == 1
     url, kwargs = fake_post[0]
     assert url[0].endswith("/sendMessage")

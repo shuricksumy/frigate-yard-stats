@@ -12,7 +12,6 @@ import db
 import mqtt_ingest
 import profile_config
 import video_worker
-import visit_thumb_worker
 from api import app
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -44,9 +43,6 @@ def main():
     # check as above.
     if profile_config.any_store_video_alerts_enabled(profile):
         threading.Thread(target=alert_video_worker.run_forever, args=(profile,), name="alert_video_worker", daemon=True).start()
-    # Independent switch, independent thread -- same reasoning as STORE_VIDEO_ALERTS above.
-    if profile_config.any_visit_thumb_crop_enabled(profile):
-        threading.Thread(target=visit_thumb_worker.run_forever, args=(profile,), name="visit_thumb_worker", daemon=True).start()
     # Alternative to n8n/metadata-processor.json (see CLAUDE.md) -- off by default so a fresh
     # deploy still needs n8n for the AI stage until this is deliberately opted into. Checks
     # profile_config.any_ai_events_stage_enabled rather than the bare global flag -- a profiles.yaml

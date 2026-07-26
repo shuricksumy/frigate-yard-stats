@@ -284,16 +284,8 @@
           Delete video files
         </label>
         <label class="checkbox-label" :title="purgeDeleteAll ? 'Ignored while Delete ALL is checked' : ''">
-          <input type="checkbox" x-model="purgeDeleteGif" :disabled="purgeDeleteAll" @change="purgePreview = null">
-          Delete GIF (visit preview)
-        </label>
-        <label class="checkbox-label" :title="purgeDeleteAll ? 'Ignored while Delete ALL is checked' : ''">
           <input type="checkbox" x-model="purgeDeleteSnapshots" :disabled="purgeDeleteAll" @change="purgePreview = null">
           Delete Event Snapshots
-        </label>
-        <label class="checkbox-label" :title="purgeDeleteAll ? 'Ignored while Delete ALL is checked' : ''">
-          <input type="checkbox" x-model="purgeDeletePuzzledPreview" :disabled="purgeDeleteAll" @change="purgePreview = null">
-          Delete puzzled preview (visit grid)
         </label>
         <label class="checkbox-label">
           <input type="checkbox" x-model="purgeDeleteAll" @change="purgePreview = null">
@@ -323,8 +315,6 @@
         <span x-text="'event videos: ' + (purgePreview && purgePreview.counts.raw_events_video_files)"></span>
         <span x-text="'event snapshots: ' + (purgePreview && purgePreview.counts.raw_events_snapshots)"></span>
         <span x-text="'visit videos: ' + (purgePreview && purgePreview.counts.visits_video_files)"></span>
-        <span x-text="'puzzled previews: ' + (purgePreview && purgePreview.counts.visits_puzzled_previews)"></span>
-        <span x-text="'GIFs: ' + (purgePreview && purgePreview.counts.visits_gifs)"></span>
       </div>
       <div x-show="purgePreview && purgeDeleteAll" class="admin-row">
         <span>Would delete:</span>
@@ -361,13 +351,9 @@
           Last (hours)
           <input type="number" min="1" x-model.number="reportHours" style="width:90px">
         </label>
-        <label>
-          Preview
-          <select x-model="reportIncludePreview">
-            <option value="gif">GIF</option>
-            <option value="image">Image only</option>
-            <option value="none">None</option>
-          </select>
+        <label class="checkbox-label">
+          <input type="checkbox" x-model="reportIncludeImage">
+          Include image
         </label>
         <button @click="generateReport()" :disabled="generatingReport">Generate &amp; open</button>
       </div>

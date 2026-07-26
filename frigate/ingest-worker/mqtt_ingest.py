@@ -211,34 +211,30 @@ def _handle_review_message(msg):
 
     # Resolved against the representative event's own single object label (not review["objects"],
     # which can be a comma-joined multi-type list) -- same single-type-per-visit convention
-    # claim_alert_ai_batch already uses. Fetched once here and reused for both the thumb-crop
-    # defer decision below and the Telegram mode resolution, rather than two separate lookups.
+    # claim_alert_ai_batch already uses.
     representative = db.get_representative_event_for_visit(visit_id)
     object_label = representative.get("objects") if representative else None
 
-    # If a thumb-crop re-crop attempt is going to happen for this visit, defer the summary send
-    # entirely to visit_thumb_worker -- it fires once the re-crop resolves (done -> the well-timed
-    # high-res image, or failed -> falls back to the representative event's own crop), rather than
-    # immediately here with whatever the representative event's crop looks like right now. Only
-    # skips the immediate send when a deferred one is actually guaranteed to happen later.
-    if not db.visit_thumb_crop_will_be_attempted(review, _profile, object_label):
-        try:
-            mode = profile_config.telegram_alerts_mode(_profile, object_label)
-            if mode in ("image", "all"):
-                image_base64 = representative.get("crop_image_base64") if representative else None
-                message_id = telegram.send_visit_summary(
-                    review["camera"], review["objects"], len(review["det_ids"]) or 1,
-                    image_base64=image_base64, mode=mode,
-                )
-                if message_id is not None:
-                    # Durable reply-threading target, same idea as raw_events.telegram_photo_message_id
-                    # -- lets alert_video_worker's later video send reply onto this message once the
-                    # visit's clip (STORE_VIDEO_ALERTS) finishes downloading.
-                    db.set_visit_telegram_photo_message_id(visit_id, message_id)
-        except Exception:
-            # Never let a Telegram hiccup take down the MQTT message handler -- same belt-and-
-            # suspenders wrapping as video_worker's send_video call.
-            logger.warning("Telegram visit summary send raised unexpectedly for visit id=%s", visit_id, exc_info=True)
+    # Sent immediately -- there's no more deferred re-crop stage to wait on (the alert-AI stage
+    # gathers its own high-res crops fresh at analysis time, ephemerally, never stored on the visit
+    # row), so the representative event's own crop is always what this summary uses.
+    try:
+        mode = profile_config.telegram_alerts_mode(_profile, object_label)
+        if mode in ("image", "all"):
+            image_base64 = representative.get("crop_image_base64") if representative else None
+            message_id = telegram.send_visit_summary(
+                review["camera"], review["objects"], len(review["det_ids"]) or 1,
+                image_base64=image_base64, mode=mode,
+            )
+            if message_id is not None:
+                # Durable reply-threading target, same idea as raw_events.telegram_photo_message_id
+                # -- lets alert_video_worker's later video send reply onto this message once the
+                # visit's clip (STORE_VIDEO_ALERTS) finishes downloading.
+                db.set_visit_telegram_photo_message_id(visit_id, message_id)
+    except Exception:
+        # Never let a Telegram hiccup take down the MQTT message handler -- same belt-and-
+        # suspenders wrapping as video_worker's send_video call.
+        logger.warning("Telegram visit summary send raised unexpectedly for visit id=%s", visit_id, exc_info=True)
 
 
 def start(profile: dict | None = None) -> mqtt.Client:

@@ -76,15 +76,13 @@ a **Precision (exact)** number field if you want to dial in the exact cutoff val
 Click any card with media to open the lightbox. If more than one artifact is available for that
 row, toggle buttons switch between them:
 
-- **Preview** — a visit's animated GIF (4 sampled moments played as a slideshow) — only shown for
-  visits, and only once `VISIT_THUMB_CROP_ENABLED`'s preview has actually finished building.
 - **Video** — the stored clip, if `STORE_VIDEO`/`STORE_VIDEO_ALERTS` downloaded one — full
   scrubber support (drag to any point), since it's served with range-request support.
-- **Image** — the still crop (or, for a visit, the composite 4-frame grid — same image that's
-  actually sent to the VLM).
+- **Image** — the still crop (for a visit, the representative event's own crop — a visit has no
+  stored image artifact of its own).
 
-Whichever is richest and already available opens by default (Preview, then Video, then Image) —
-the toggle buttons only appear when there's actually more than one to switch between.
+Video opens by default when available, falling back to Image — the toggle button only appears
+when there's actually more than one to switch between.
 
 Below the media, once AI analysis has finished, you'll see the AI's description as a single line of
 plain text (whatever the VLM said in response to that object type's prompt — color/body
@@ -92,11 +90,12 @@ type/plate for a car, clothing/activity for a person, or anything at all for any
 configured — there's no per-field table, just the model's own words). On the Events tab this is
 always the event's own single-frame analysis
 (`AI_EVENTS_STAGE_ENABLED`). On the Visits tab, it prefers that visit's own alert-stage analysis
-of the composite grid instead (`AI_ALERTS_ENABLED`, labeled "... (alert analysis)") — a richer
-result that also describes what changed across the visit, not just a static snapshot — falling
-back to the per-event analysis if the alert stage is off or hasn't finished that visit yet. A
-visit that grouped several distinct object types (e.g. a car and a person) shows each one's
-sighting (per-event fallback only), labeled separately, rather than picking just one.
+instead (`AI_ALERTS_ENABLED`, labeled "... (alert analysis)") — analyzed from a series of separate
+high-res crops gathered from the visit's own linked events (never stored, built fresh for that
+analysis), a richer result that also describes what changed across the visit, not just a static
+snapshot — falling back to the per-event analysis if the alert stage is off or hasn't finished
+that visit yet. A visit that grouped several distinct object types (e.g. a car and a person) shows
+each one's sighting (per-event fallback only), labeled separately, rather than picking just one.
 
 On the Visits tab specifically, below that a "Connected events" strip shows every individual
 det_id Frigate's own tracker grouped into that visit (not just the deduped sighting(s) above) —
@@ -159,37 +158,32 @@ both pages). It shows:
 - **Semantic search coverage** — how many sightings have an embedding vs. don't, with buttons to
   backfill missing ones or reindex the vector database.
 - **Queue health** — a status breakdown (new/processing/retry/failed/done) for every queue stage
-  (crop/video/AI on events, video/preview on visits). Any stage with failed rows gets a "Requeue N
+  (crop/video/AI on events, video/alert AI on visits). Any stage with failed rows gets a "Requeue N
   failed" button — the same fix `frigate/sql/queue-debug.sql` documents for manual psql use, now a
   real button instead of requiring shell access.
 - **Storage** — disk usage for stored video (main and alerts), plus Postgres database size broken
   down per table.
 - **Retention purge** — pick a cutoff in days, then hit Preview to see exactly what would happen,
   and Delete/Clear now, which asks for an explicit confirmation spelling out those same numbers
-  before anything actually changes. Nothing happens from a single click. Five checkboxes control
-  what "purge" actually clears — four independent media categories, plus a separate, clearly
+  before anything actually changes. Nothing happens from a single click. Three checkboxes control
+  what "purge" actually clears — two independent media categories, plus a separate, clearly
   destructive "Delete ALL":
   - **Delete video files** (on by default) — clears stored video clips (`raw_events` and `visits`)
     older than the cutoff, and deletes the files off disk.
-  - **Delete GIF (visit preview)** (on by default) — clears the animated visit preview
-    (`visits.preview_gif_base64`).
   - **Delete Event Snapshots** (off by default) — clears the per-event still crop
     (`raw_events.crop_image_base64`).
-  - **Delete puzzled preview (visit grid)** (off by default) — clears the visit-level composite
-    grid of sampled frames (`visits.crop_image_base64` — a different artifact from an event
-    snapshot despite the same column name on the other table).
   - **Delete ALL (rows, text, and media — permanent)** (off by default) — a separate, more drastic
     switch: instead of clearing media and keeping the row, this deletes the matching events/visits
     (and their sightings) entirely, then rebuilds the semantic search index against whatever
-    remains. Checking it visually disables the four media checkboxes above, since they no longer
+    remains. Checking it visually disables the two media checkboxes above, since they no longer
     mean anything once the whole row is going away.
 
-  Video and GIF default on because they're by far the largest stored payloads; still-images
-  default off since a still crop/grid is comparatively cheap to keep and often still useful to
-  glance at even once a row is old. All four media checkboxes are independent and composable — you
-  can check just "Delete Event Snapshots" alone, for example, and nothing else is touched. Rows,
-  embeddings, and every text field (AI analysis, plate reads) always survive a media-only purge
-  regardless of which boxes are checked — only "Delete ALL" removes the row itself.
+  Video defaults on because it's by far the largest stored payload; still-images default off since
+  a still crop is comparatively cheap to keep and often still useful to glance at even once a row
+  is old. Both media checkboxes are independent and composable — you can check just "Delete Event
+  Snapshots" alone, for example, and nothing else is touched. Rows, embeddings, and every text
+  field (AI analysis, plate reads) always survive a media-only purge regardless of which boxes are
+  checked — only "Delete ALL" removes the row itself.
 
   An "Object type" dropdown (defaults to "All types") restricts any of the above to one Frigate
   label at a time -- e.g. clean up just `dog` events without touching everything else's retention.

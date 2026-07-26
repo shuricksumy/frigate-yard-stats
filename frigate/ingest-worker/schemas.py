@@ -56,9 +56,6 @@ class VisitSummary(BaseModel):
     ai_status: str
     crop_status: str
     video_status: str
-    thumb_crop_status: str
-    has_thumb_crop: bool
-    has_preview_gif: bool
     has_image: bool
     has_video: bool
 
@@ -218,7 +215,6 @@ class TextSearchResult(BaseModel):
     # single-item endpoint to fetch these for a visit-kind result on demand).
     has_image: bool
     has_video: bool
-    has_preview_gif: bool
     ai_status: str
 
 

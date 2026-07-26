@@ -63,20 +63,24 @@ own retention window:
   its own cleanup pass gets to it — it isn't a "keep everything, just briefly" buffer the way the
   name might suggest.
 
-**Why you should care**: this project's alerts/visits flow (`STORE_VIDEO_ALERTS`,
-`VISIT_THUMB_CROP_ENABLED`) asks Frigate for a clip covering an *arbitrary time range* (a whole
-visit's span), not a specific already-tagged event. If part of that range was never anything but
-`continuous`-tagged (e.g. a parked car sitting still for a stretch, not moving enough to
-re-trigger motion), Frigate may have almost nothing left for that portion within seconds of it
-happening — confirmed directly in production, not a hypothetical. This project has code to work
-around it (see `CLAUDE.md`'s "Visit preview" section for the full story), but if you want more
-headroom, raising `continuous.days` to `1` or more gives Frigate an actual short-lived rolling
-buffer to serve those requests from, at the cost of extra disk usage for the full record stream.
+**Why you should care**: this project's `STORE_VIDEO_ALERTS` flow asks Frigate for a clip covering
+an *arbitrary time range* (a whole visit's span), not a specific already-tagged event. If part of
+that range was never anything but `continuous`-tagged (e.g. a parked car sitting still for a
+stretch, not moving enough to re-trigger motion), Frigate may have almost nothing left for that
+portion within seconds of it happening — confirmed directly in production, not a hypothetical.
+This project used to have a second feature with the identical problem (a visit-level preview image
+built from this same whole-span request, worked around with several successive fixes — see
+`CLAUDE.md`'s "Visit preview" section for that history) but it has since been replaced: the alert
+AI stage now gathers its images via each linked event's own per-event crop instead (see below), so
+it no longer depends on this endpoint or its retention quirks at all. `STORE_VIDEO_ALERTS` itself
+is still subject to this — if you want more headroom for that flow specifically, raising
+`continuous.days` to `1` or more gives Frigate an actual short-lived rolling buffer to serve those
+requests from, at the cost of extra disk usage for the full record stream.
 
-The single-event crop (`raw_events.crop_image_base64`, every event gets one) doesn't have this
-problem — it always reads from Frigate's own per-event clip endpoint
-(`/api/events/<id>/clip.mp4`), which is tied to that event's own `alerts`/`detections` retention,
-not the generic continuous-recording endpoint.
+The single-event crop (`raw_events.crop_image_base64`, every event gets one — and the alert AI
+stage's own high-res per-event crops, gathered the same way) doesn't have this problem — it always
+reads from Frigate's own per-event clip endpoint (`/api/events/<id>/clip.mp4`), which is tied to
+that event's own `alerts`/`detections` retention, not the generic continuous-recording endpoint.
 
 ## Zones and `required_zones`
 
@@ -169,5 +173,5 @@ long things typically sit still on your property.
 None of the above is something this project changes for you — it's Frigate's own config, and this
 project only ever *listens* (`frigate/events`, `frigate/reviews` over MQTT) and *reads* (Frigate's
 REST API, for the actual clip bytes). See [`configuration.md`](configuration.md) for how this
-project's own `.env` settings (crop framing, video storage, visit previews) relate to what Frigate
+project's own settings (crop framing, video storage, the alert AI stage) relate to what Frigate
 gives it.

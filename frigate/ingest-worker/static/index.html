@@ -218,31 +218,26 @@
     </div>
   </div>
 
-  <!-- Lightbox: preview GIF by default when available, video otherwise, image as a last resort --
-       toggle buttons (Preview/Video/Image, in that order) let you switch whenever more than one
-       is available. -->
+  <!-- Lightbox: video by default when available, image as a last resort -- toggle buttons
+       (Video/Image) let you switch whenever both are available. -->
   <div class="modal-backdrop" x-show="lightboxEvent" @click.self="closeLightbox()" style="display:none">
     <div class="modal lightbox">
       <button class="close" @click="closeLightbox()">&times;</button>
       <a class="download" x-show="lightboxEvent" style="display:none" :href="lightboxDownloadUrl()" :download="lightboxDownloadFilename()" title="Download">&#8681;</a>
-      <div class="lightbox-toggle" x-show="lightboxEvent && ((lightboxEvent.has_video && lightboxEvent.has_image) || lightboxEvent.has_preview_gif)" style="display:none">
-        <button x-show="lightboxEvent && lightboxEvent.has_preview_gif" :class="{ active: lightboxMode === 'preview' }" @click="lightboxMode = 'preview'">Preview</button>
+      <div class="lightbox-toggle" x-show="lightboxEvent && lightboxEvent.has_video && lightboxEvent.has_image" style="display:none">
         <button x-show="lightboxEvent && lightboxEvent.has_video" :class="{ active: lightboxMode === 'video' }" @click="lightboxMode = 'video'">Video</button>
         <button x-show="lightboxEvent && lightboxEvent.has_image" :class="{ active: lightboxMode === 'image' }" @click="lightboxMode = 'image'">Image</button>
       </div>
-      <template x-if="lightboxEvent && lightboxEvent.has_preview_gif && lightboxMode === 'preview'">
-        <img :src="visitPreviewGifUrl(lightboxEvent.visitId)" alt="visit preview animation">
-      </template>
       <template x-if="lightboxEvent && lightboxEvent.has_video && lightboxMode === 'video'">
         <video controls autoplay :src="lightboxVideoUrl()"></video>
       </template>
-      <template x-if="lightboxEvent && lightboxEvent.has_image && (lightboxMode === 'image' || (!lightboxEvent.has_video && lightboxMode !== 'preview'))">
+      <template x-if="lightboxEvent && lightboxEvent.has_image && (lightboxMode === 'image' || !lightboxEvent.has_video)">
         <img :src="lightboxImageUrl()" alt="event full image">
       </template>
       <!-- A row can still be openable with no media left at all (a retention purge clears
-           crop_image_base64/video_path/preview_gif_base64 but keeps the row and its AI analysis
-           text) -- show a placeholder instead of a broken image/video. -->
-      <div class="lightbox-no-media" x-show="lightboxEvent && !lightboxEvent.has_image && !lightboxEvent.has_video && !lightboxEvent.has_preview_gif" style="display:none">
+           crop_image_base64/video_path but keeps the row and its AI analysis text) -- show a
+           placeholder instead of a broken image/video. -->
+      <div class="lightbox-no-media" x-show="lightboxEvent && !lightboxEvent.has_image && !lightboxEvent.has_video" style="display:none">
         No media available — likely cleared by a retention purge. AI analysis below is still preserved.
       </div>
       <!-- Only shown after drilling into one of a visit's own "Connected events" -- not gated on

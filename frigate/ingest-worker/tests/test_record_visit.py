@@ -90,46 +90,26 @@ def test_record_visit_links_matching_raw_events(conn_ok):
         _cleanup_visit(visit_id)
 
 
-def test_record_visit_stores_thumb_time_and_starts_new_when_enabled(conn_ok, monkeypatch):
-    monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", True)
+def test_record_visit_stores_thumb_time(conn_ok):
+    # thumb_time is Frigate's own "best frame" timestamp for the review -- purely informational,
+    # stored regardless of any other setting (no longer tied to any re-crop feature).
     visit_id = db.record_visit(_review(det_ids=[], thumb_time=1784198455.5))
     try:
         row = db._execute(
-            "SELECT thumb_time, thumb_crop_status FROM yard_stats.visits WHERE id = %s",
-            (visit_id,), fetch=True,
+            "SELECT thumb_time FROM yard_stats.visits WHERE id = %s", (visit_id,), fetch=True,
         )[0]
         assert row["thumb_time"] == 1784198455.5
-        assert row["thumb_crop_status"] == "new"
     finally:
         _cleanup_visit(visit_id)
 
 
-def test_record_visit_skips_thumb_crop_when_disabled(conn_ok, monkeypatch):
-    monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", False)
-    visit_id = db.record_visit(_review(det_ids=[], thumb_time=1784198455.5))
-    try:
-        row = db._execute(
-            "SELECT thumb_time, thumb_crop_status FROM yard_stats.visits WHERE id = %s",
-            (visit_id,), fetch=True,
-        )[0]
-        assert row["thumb_crop_status"] == "skipped"
-    finally:
-        _cleanup_visit(visit_id)
-
-
-def test_record_visit_still_starts_new_when_frigate_omits_thumb_time(conn_ok, monkeypatch):
-    # crop.build_visit_preview samples frames proportionally across the visit's own clip duration
-    # (start_ts/end_ts/cameras only) -- unlike its predecessor (crop_visit_thumbnail, which seeked
-    # to thumb_time specifically and could never succeed without it), a missing thumb_time no
-    # longer means the re-crop can't happen, so this must still start 'new', not 'skipped'.
-    monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", True)
+def test_record_visit_tolerates_missing_thumb_time(conn_ok):
     visit_id = db.record_visit(_review(det_ids=[], thumb_time=None))
     try:
         row = db._execute(
-            "SELECT thumb_crop_status FROM yard_stats.visits WHERE id = %s",
-            (visit_id,), fetch=True,
+            "SELECT thumb_time FROM yard_stats.visits WHERE id = %s", (visit_id,), fetch=True,
         )[0]
-        assert row["thumb_crop_status"] == "new"
+        assert row["thumb_time"] is None
     finally:
         _cleanup_visit(visit_id)
 
@@ -147,19 +127,6 @@ def test_record_visit_resolves_store_video_alerts_from_profile_defaults(conn_ok,
             "SELECT video_status FROM yard_stats.visits WHERE id = %s", (visit_id,), fetch=True,
         )[0]
         assert row["video_status"] == "new"
-    finally:
-        _cleanup_visit(visit_id)
-
-
-def test_record_visit_resolves_visit_thumb_crop_enabled_from_profile_defaults(conn_ok, monkeypatch):
-    monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", False)
-    profile = {"defaults": {"visit_thumb_crop_enabled": True}}
-    visit_id = db.record_visit(_review(det_ids=[]), profile)
-    try:
-        row = db._execute(
-            "SELECT thumb_crop_status FROM yard_stats.visits WHERE id = %s", (visit_id,), fetch=True,
-        )[0]
-        assert row["thumb_crop_status"] == "new"
     finally:
         _cleanup_visit(visit_id)
 
@@ -191,14 +158,6 @@ def test_record_visit_resolves_per_type_override_against_representative_det_id(c
     finally:
         _cleanup_raw_events(raw_id)
         _cleanup_visit(visit_id)
-
-
-def test_visit_thumb_crop_will_be_attempted_resolves_via_profile_config(monkeypatch):
-    monkeypatch.setattr(config, "VISIT_THUMB_CROP_ENABLED", False)
-    profile = {"object_types": {"car": {"visit_thumb_crop_enabled": True}}}
-    assert db.visit_thumb_crop_will_be_attempted({}, profile, "car") is True
-    assert db.visit_thumb_crop_will_be_attempted({}, profile, "person") is False
-    assert db.visit_thumb_crop_will_be_attempted({}, None, None) is False
 
 
 def test_record_visit_does_not_touch_unrelated_raw_events(conn_ok):

@@ -94,7 +94,7 @@ def test_chat_request_openai_provider_sends_model_and_bearer_auth(monkeypatch):
 
     monkeypatch.setattr(ai_worker.requests, "post", fake_post)
     type_config = {"provider": "openai", "model": "gpt-4o"}
-    response = ai_worker._chat_request(type_config, "describe it", "aGVsbG8=", 30)
+    response = ai_worker._chat_request(type_config, "describe it", ["aGVsbG8="], 30)
 
     assert captured["url"] == "https://api.openai.com/v1/chat/completions"
     assert captured["json"]["model"] == "gpt-4o"
@@ -115,7 +115,7 @@ def test_chat_request_anthropic_provider_uses_messages_api_shape(monkeypatch):
 
     monkeypatch.setattr(ai_worker.requests, "post", fake_post)
     type_config = {"provider": "anthropic", "model": "claude-opus-4-8"}
-    ai_worker._chat_request(type_config, "describe it", "aGVsbG8=", 30)
+    ai_worker._chat_request(type_config, "describe it", ["aGVsbG8="], 30)
 
     assert captured["url"] == "https://api.anthropic.com/v1/messages"
     assert captured["json"]["model"] == "claude-opus-4-8"
@@ -137,7 +137,7 @@ def test_chat_request_anthropic_provider_uses_per_type_max_tokens(monkeypatch):
         lambda url, json=None, **k: captured.update(json=json) or _Resp({"content": [{"text": "x"}]}),
     )
     type_config = {"provider": "anthropic", "model": "claude-opus-4-8", "max_tokens": 256}
-    ai_worker._chat_request(type_config, "describe it", "aGVsbG8=", 30)
+    ai_worker._chat_request(type_config, "describe it", ["aGVsbG8="], 30)
     assert captured["json"]["max_tokens"] == 256
 
 
@@ -149,8 +149,72 @@ def test_chat_request_defaults_to_llama_proxy_when_provider_omitted(monkeypatch)
         lambda url, **k: calls.append(url) or _Resp(_chat_response("x")),
     )
     type_config = {"chat_path": "/vehicle-slot/v1/chat/completions"}
-    ai_worker._chat_request(type_config, "describe it", "aGVsbG8=", 30)
+    ai_worker._chat_request(type_config, "describe it", ["aGVsbG8="], 30)
     assert calls == ["http://llama.test/vehicle-slot/v1/chat/completions"]
+
+
+# ---- _chat_request multi-image behavior (alert stage's series of high-res crops) ----
+
+def test_chat_request_openai_sends_one_content_block_per_image(monkeypatch):
+    monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test")
+    captured = {}
+    monkeypatch.setattr(
+        ai_worker.requests, "post",
+        lambda url, json=None, **k: captured.update(json=json) or _Resp(_chat_response("x")),
+    )
+    type_config = {"provider": "openai", "model": "gpt-4o"}
+    ai_worker._chat_request(type_config, "describe it", ["img1", "img2", "img3"], 30)
+
+    content = captured["json"]["messages"][0]["content"]
+    assert content[0] == {"type": "text", "text": "describe it"}
+    assert [b["image_url"]["url"] for b in content[1:]] == [
+        "data:image/jpeg;base64,img1", "data:image/jpeg;base64,img2", "data:image/jpeg;base64,img3",
+    ]
+
+
+def test_chat_request_anthropic_sends_one_content_block_per_image(monkeypatch):
+    monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "sk-ant-test")
+    captured = {}
+    monkeypatch.setattr(
+        ai_worker.requests, "post",
+        lambda url, json=None, **k: captured.update(json=json) or _Resp({"content": [{"text": "x"}]}),
+    )
+    type_config = {"provider": "anthropic", "model": "claude-opus-4-8"}
+    ai_worker._chat_request(type_config, "describe it", ["img1", "img2"], 30)
+
+    content = captured["json"]["messages"][0]["content"]
+    assert content[0] == {"type": "text", "text": "describe it"}
+    assert [b["source"]["data"] for b in content[1:]] == ["img1", "img2"]
+
+
+def test_chat_request_llama_proxy_sends_only_first_image_and_warns_once(monkeypatch):
+    monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
+    monkeypatch.setattr(ai_worker, "_warned_llama_proxy_multi_image", False)
+    captured = {}
+    monkeypatch.setattr(
+        ai_worker.requests, "post",
+        lambda url, json=None, **k: captured.update(json=json) or _Resp(_chat_response("x")),
+    )
+    type_config = {"chat_path": "/vehicle-slot/v1/chat/completions"}
+
+    ai_worker._chat_request(type_config, "describe it", ["img1", "img2"], 30)
+
+    content = captured["json"]["messages"][0]["content"]
+    assert len(content) == 2  # text + exactly one image block
+    assert content[1]["image_url"]["url"] == "data:image/jpeg;base64,img1"
+    assert ai_worker._warned_llama_proxy_multi_image is True
+
+
+def test_chat_request_llama_proxy_single_image_never_warns(monkeypatch):
+    monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
+    monkeypatch.setattr(ai_worker, "_warned_llama_proxy_multi_image", False)
+    monkeypatch.setattr(
+        ai_worker.requests, "post",
+        lambda url, **k: _Resp(_chat_response("x")),
+    )
+    type_config = {"chat_path": "/vehicle-slot/v1/chat/completions"}
+    ai_worker._chat_request(type_config, "describe it", ["img1"], 30)
+    assert ai_worker._warned_llama_proxy_multi_image is False
 
 
 # ---- load_profile ----

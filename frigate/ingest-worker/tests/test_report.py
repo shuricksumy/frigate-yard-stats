@@ -131,26 +131,10 @@ def test_source_visits_still_includes_ungrouped_sighting(conn_ok):
         _cleanup(ungrouped_id)
 
 
-def test_source_visits_prefers_visit_thumb_crop_when_done(conn_ok):
-    # Reports run well after the fact (a scheduled window), so unlike the AI queue there's no
-    # latency cost to always preferring the visit's own well-timed re-crop here.
-    raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
-    _insert_sighting(raw_id)
-    visit_id = db.record_visit({
-        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
-        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
-    })
-    db.mark_visit_thumb_crop_done(visit_id, "visit-crop")
-    try:
-        start, end = _window()
-        data = db.get_report_data(start, end, source="visits")
-        match = next(s for s in data["sightings"] if s["raw_event_id"] == raw_id)
-        assert match["crop_image_base64"] == "visit-crop"
-    finally:
-        _cleanup(raw_id, visit_id=visit_id)
-
-
-def test_source_visits_falls_back_to_representative_crop_when_thumb_crop_not_done(conn_ok):
+def test_source_visits_always_uses_representative_crop(conn_ok):
+    # Visits carry no clearable/preferable image media of their own anymore (the composite grid
+    # was removed entirely -- see CLAUDE.md's "Visit preview") -- source="visits" always uses the
+    # representative event's own crop_image_base64, same as source="events".
     raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
     _insert_sighting(raw_id)
     visit_id = db.record_visit({
@@ -194,92 +178,21 @@ def test_source_visits_includes_sighting_per_distinct_object_type(conn_ok):
         _cleanup(car_id, person_id, car_dup_id, visit_id=visit_id)
 
 
-def test_source_visits_includes_preview_gif_when_done(conn_ok):
+def test_include_image_false_drops_crop_image(conn_ok):
+    # The lightweight-payload opt-out (e.g. n8n wanting a smaller report) -- drops the row image
+    # entirely. report.py's _img_cell already renders "(no image)" whenever crop_image_base64
+    # comes back NULL, so this needs no separate rendering path.
     raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
     _insert_sighting(raw_id)
     visit_id = db.record_visit({
         "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
         "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
     })
-    db.mark_visit_thumb_crop_done(visit_id, "visit-crop", "visit-gif")
     try:
         start, end = _window()
-        data = db.get_report_data(start, end, source="visits")
+        data = db.get_report_data(start, end, source="visits", include_image=False)
         match = next(s for s in data["sightings"] if s["raw_event_id"] == raw_id)
-        assert match["preview_gif_base64"] == "visit-gif"
-    finally:
-        _cleanup(raw_id, visit_id=visit_id)
-
-
-def test_source_visits_preview_gif_null_when_not_done(conn_ok):
-    ungrouped_id, _ = _insert_raw_event()
-    _insert_sighting(ungrouped_id)
-    try:
-        start, end = _window()
-        data = db.get_report_data(start, end, source="visits")
-        match = next(s for s in data["sightings"] if s["raw_event_id"] == ungrouped_id)
-        assert match["preview_gif_base64"] is None
-    finally:
-        _cleanup(ungrouped_id)
-
-
-def test_include_preview_image_drops_gif_but_keeps_visit_crop(conn_ok):
-    # A lightweight-report opt-out (e.g. n8n wanting a smaller payload) -- only the GIF is
-    # dropped; the visit's own composite grid crop (crop_image_expr, unrelated to gif_image_expr)
-    # still comes through exactly as it does with include_preview="gif" (the default).
-    raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
-    _insert_sighting(raw_id)
-    visit_id = db.record_visit({
-        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
-        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
-    })
-    db.mark_visit_thumb_crop_done(visit_id, "visit-crop", "visit-gif")
-    try:
-        start, end = _window()
-        data = db.get_report_data(start, end, source="visits", include_preview="image")
-        match = next(s for s in data["sightings"] if s["raw_event_id"] == raw_id)
-        assert match["preview_gif_base64"] is None
-        assert match["crop_image_base64"] == "visit-crop"
-    finally:
-        _cleanup(raw_id, visit_id=visit_id)
-
-
-def test_include_preview_none_drops_both_image_and_gif(conn_ok):
-    # The smallest-payload mode -- drops the row image entirely (crop included, not just the
-    # GIF), for either source. report.py's _img_cell already renders "(no image)" whenever
-    # crop_image_base64 comes back NULL, so this needs no separate rendering path.
-    raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
-    _insert_sighting(raw_id)
-    visit_id = db.record_visit({
-        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
-        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
-    })
-    db.mark_visit_thumb_crop_done(visit_id, "visit-crop", "visit-gif")
-    try:
-        start, end = _window()
-        data = db.get_report_data(start, end, source="visits", include_preview="none")
-        match = next(s for s in data["sightings"] if s["raw_event_id"] == raw_id)
-        assert match["preview_gif_base64"] is None
         assert match["crop_image_base64"] is None
-    finally:
-        _cleanup(raw_id, visit_id=visit_id)
-
-
-def test_source_events_never_includes_preview_gif(conn_ok):
-    # source="events" (the default) never applies the visit-crop/GIF preference at all -- matches
-    # the crop preference's own scoping decision (only source=visits substitutes either artifact).
-    raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
-    _insert_sighting(raw_id)
-    visit_id = db.record_visit({
-        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
-        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
-    })
-    db.mark_visit_thumb_crop_done(visit_id, "visit-crop", "visit-gif")
-    try:
-        start, end = _window()
-        data = db.get_report_data(start, end)
-        match = next(s for s in data["sightings"] if s["raw_event_id"] == raw_id)
-        assert match["preview_gif_base64"] is None
     finally:
         _cleanup(raw_id, visit_id=visit_id)
 
@@ -315,20 +228,3 @@ def test_object_label_omitted_includes_every_type(conn_ok):
         _cleanup(car_id, person_id)
 
 
-def test_source_events_never_uses_visit_thumb_crop(conn_ok):
-    # source="events" (the default) never applies the visit-crop preference at all -- matches
-    # claim_ai_batch's own scoping decision (only source=visits substitutes the crop).
-    raw_id, det_id = _insert_raw_event(crop_image_base64="representative-crop")
-    _insert_sighting(raw_id)
-    visit_id = db.record_visit({
-        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
-        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
-    })
-    db.mark_visit_thumb_crop_done(visit_id, "visit-crop")
-    try:
-        start, end = _window()
-        data = db.get_report_data(start, end)
-        match = next(s for s in data["sightings"] if s["raw_event_id"] == raw_id)
-        assert match["crop_image_base64"] == "representative-crop"
-    finally:
-        _cleanup(raw_id, visit_id=visit_id)

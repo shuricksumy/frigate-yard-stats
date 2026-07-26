@@ -86,21 +86,19 @@ def run_retention_now():
 def purge_old_records(
     older_than_days: int = Query(..., ge=1, description="Delete/clear data with start_ts older than this many days"),
     confirm: bool = Query(False, description="Must be true to actually delete. Omitted/false previews counts only -- no rows are removed"),
-    only_media: bool = Query(True, description="Default true: keeps every row and all its text/structured AI analysis (including embeddings) -- only clears the media categories selected below, so old data stays searchable with just the media gone. false: deletes the rows entirely (raw_events, visits, and their dependent sightings) -- today's original full purge -- and rebuilds the vector search index afterward against whatever data remains. When false, the four delete_* params below are ignored entirely (a full row delete already covers all of their columns)."),
+    only_media: bool = Query(True, description="Default true: keeps every row and all its text/structured AI analysis (including embeddings) -- only clears the media categories selected below, so old data stays searchable with just the media gone. false: deletes the rows entirely (raw_events, visits, and their dependent sightings) -- today's original full purge -- and rebuilds the vector search index afterward against whatever data remains. When false, the delete_* params below are ignored entirely (a full row delete already covers all of their columns)."),
     delete_video: bool = Query(True, description="only_media=true only: delete stored video clip files off disk and clear video_path (raw_events and visits)."),
-    delete_gif: bool = Query(True, description="only_media=true only: clear visits.preview_gif_base64 (the animated visit preview)."),
     delete_snapshots: bool = Query(False, description="only_media=true only: clear raw_events.crop_image_base64 (the per-event still crop, aka 'Event Snapshots')."),
-    delete_puzzled_preview: bool = Query(False, description="only_media=true only: clear visits.crop_image_base64 (the flat composite grid of sampled visit frames)."),
-    object_label: str | None = Query(None, description="Restrict this purge to a single Frigate object label (e.g. 'car'). Only ever affects raw_events and their sightings -- visits/visit_sightings are never touched when this is set, since a visit can span multiple distinct object types and there's no single-type-safe way to decide the visit row (or its own composite-grid media) belongs to just one type's purge. Omit for the existing all-types behavior, which does cover visits/visit_sightings same as before this param existed."),
+    object_label: str | None = Query(None, description="Restrict this purge to a single Frigate object label (e.g. 'car'). Only ever affects raw_events and their sightings -- visits/visit_sightings are never touched when this is set, since a visit can span multiple distinct object types and there's no single-type-safe way to decide the visit row belongs to just one type's purge. Omit for the existing all-types behavior, which does cover visits/visit_sightings same as before this param existed."),
     camera: str | None = Query(None, description="Restrict this purge to a single Frigate camera. Unlike object_label, this DOES apply to visits/visit_sightings too -- visit grouping is per-camera only, so a visit's own `cameras` column is always a single, unambiguous value. Composes with object_label (both can be set at once)."),
 ):
     """Ad-hoc bulk purge with a caller-chosen cutoff, independent of the scheduled
     RETENTION_MONTHS sweep -- e.g. to clear out a backlog of old test data, reclaim space sooner
     than the configured retention window, or (only_media=true, the default) strip old
     media while keeping every row's AI analysis text and plate reads searchable indefinitely.
-    only_media mode is itself four independently toggleable categories (delete_video/delete_gif/
-    delete_snapshots/delete_puzzled_preview) rather than one all-or-nothing "media" concept, since
-    they have very different storage cost and "still worth keeping" answers. Unlike /retention/run,
+    only_media mode is itself two independently toggleable categories (delete_video/
+    delete_snapshots) rather than one all-or-nothing "media" concept, since they have very
+    different storage cost and "still worth keeping" answers. Unlike /retention/run,
     the cutoff here is caller-controlled and the delete has no undo, so this requires X-API-Key and
     defaults to a dry run: call once without confirm=true to see how many rows/files would be
     affected, then again with confirm=true to actually apply it."""
@@ -108,14 +106,12 @@ def purge_old_records(
     if only_media:
         counts = db.purge_media_older_than(
             cutoff, execute=confirm, object_label=object_label, camera=camera,
-            delete_video=delete_video, delete_gif=delete_gif,
-            delete_snapshots=delete_snapshots, delete_puzzled_preview=delete_puzzled_preview,
+            delete_video=delete_video, delete_snapshots=delete_snapshots,
         )
         return {
             "cutoff": cutoff, "dry_run": not confirm, "only_media": True, "object_label": object_label,
             "camera": camera,
-            "delete_video": delete_video, "delete_gif": delete_gif,
-            "delete_snapshots": delete_snapshots, "delete_puzzled_preview": delete_puzzled_preview,
+            "delete_video": delete_video, "delete_snapshots": delete_snapshots,
             "counts": counts,
         }
     counts = db.purge_older_than(cutoff, execute=confirm, object_label=object_label, camera=camera)
@@ -295,22 +291,16 @@ def get_event_image(event_id: int):
 
 @app.get("/visits/{visit_id}/thumbnail", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
 def get_visit_thumbnail(visit_id: int):
-    """A small on-the-fly image for the Visits view grid -- prefers the visit's own animated
-    preview GIF (VISIT_THUMB_CROP_ENABLED, crop.build_visit_preview) so the grid card itself plays
-    the sampled-frames sequence, already built at a modest size so it's served as-is; falls back to
-    a scaled-down JPEG of the composite grid image, then the representative event's own crop
-    (available almost immediately, long before the preview can be), then a frame from the visit's
-    own stored video, same belt-and-suspenders reasoning as GET /events/{id}/thumbnail. Accepts
-    X-API-Key header or ?api_key= query param since this is loaded directly by an <img> tag."""
+    """A small on-the-fly image for the Visits view grid -- prefers the representative event's own
+    crop (available almost immediately after the event is cropped), falling back to a frame from
+    the visit's own stored video, same belt-and-suspenders reasoning as GET /events/{id}/thumbnail.
+    Accepts X-API-Key header or ?api_key= query param since this is loaded directly by an <img>
+    tag."""
     visit = db.get_visit(visit_id)
     if visit is None:
         raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
-    if visit.get("preview_gif_base64"):
-        return Response(content=base64.b64decode(visit["preview_gif_base64"]), media_type="image/gif")
-    image_base64 = visit.get("crop_image_base64")
-    if not image_base64:
-        representative = db.get_representative_event_for_visit(visit_id)
-        image_base64 = representative.get("crop_image_base64") if representative else None
+    representative = db.get_representative_event_for_visit(visit_id)
+    image_base64 = representative.get("crop_image_base64") if representative else None
     if image_base64:
         thumbnail_base64 = crop.scale_image_base64(image_base64, config.THUMBNAIL_MAX_DIMENSION)
         return Response(content=base64.b64decode(thumbnail_base64), media_type="image/jpeg")
@@ -322,37 +312,19 @@ def get_visit_thumbnail(visit_id: int):
 @app.get("/visits/{visit_id}/image", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
 def get_visit_image(visit_id: int):
     """Full-size image as raw JPEG bytes -- same source preference as GET /visits/{id}/thumbnail
-    (visit's own composite preview grid, then the representative event's crop, then a frame from
-    the visit's stored video), used by the web report's lightbox when viewing a Visits-view card.
-    Accepts X-API-Key header or ?api_key= query param since this is loaded directly by an <img>
-    tag."""
+    (representative event's crop, then a frame from the visit's stored video), used by the web
+    report's lightbox when viewing a Visits-view card. Accepts X-API-Key header or ?api_key= query
+    param since this is loaded directly by an <img> tag."""
     visit = db.get_visit(visit_id)
     if visit is None:
         raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
-    image_base64 = visit.get("crop_image_base64")
-    if not image_base64:
-        representative = db.get_representative_event_for_visit(visit_id)
-        image_base64 = representative.get("crop_image_base64") if representative else None
+    representative = db.get_representative_event_for_visit(visit_id)
+    image_base64 = representative.get("crop_image_base64") if representative else None
     if image_base64:
         return Response(content=base64.b64decode(image_base64), media_type="image/jpeg")
     if visit.get("video_path") and os.path.isfile(visit["video_path"]):
         return Response(content=video.extract_frame_jpeg(visit["video_path"]), media_type="image/jpeg")
     raise HTTPException(status_code=404, detail=f"No crop image or video for visit {visit_id}")
-
-
-@app.get("/visits/{visit_id}/preview.gif", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
-def get_visit_preview_gif(visit_id: int):
-    """The visit's animated preview GIF (crop.build_visit_preview's slideshow of frames sampled
-    proportionally across the visit's own clip) -- human preview only, a separate artifact from
-    crop_image_base64 (the single composite grid image used for AI analysis/thumbnails/reports).
-    404s until VISIT_THUMB_CROP_ENABLED and thumb_crop_status='done'. Accepts X-API-Key header or
-    ?api_key= query param since this would be loaded directly by an <img> tag."""
-    visit = db.get_visit(visit_id)
-    if visit is None:
-        raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
-    if not visit.get("preview_gif_base64"):
-        raise HTTPException(status_code=404, detail=f"No preview GIF for visit {visit_id}")
-    return Response(content=base64.b64decode(visit["preview_gif_base64"]), media_type="image/gif")
 
 
 @app.get("/media/video/{event_id}", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
@@ -419,7 +391,7 @@ def generate_report(
     end: datetime | None = None,
     hours: float = Query(24, gt=0, description="Used when start/end aren't both given -- window is the last N hours"),
     source: str = Query("events", pattern="^(events|visits)$", description="'events' (default) includes every sighting independently -- today's exact behavior. 'visits' dedups the same way POST /ai-queue/claim's source=visits does: only the sighting for a visit's earliest-linked raw_event, plus every sighting whose raw_event was never grouped into a visit -- for an alerts-scoped report where one real-world visit shouldn't show up once per det_id."),
-    include_preview: str = Query("gif", pattern="^(none|image|gif)$", description="'gif' (default) embeds a visit's animated preview GIF inline when it's ready (today's behavior; only differs from 'image' under source=visits). 'image' skips fetching/embedding the GIF entirely, falling back to the static composite grid/event crop. 'none' skips the row image entirely (crop included), for both source=events and source=visits. Each narrower mode is a real payload-size reduction, not just a rendering change -- the dropped field(s) are never even fetched from Postgres."),
+    include_image: bool = Query(True, description="False skips the row image entirely, for a caller that wants the smallest possible payload -- the field is never even fetched from Postgres in that mode."),
     object_label: str | None = Query(None, description="Restrict the report to a single Frigate object label (e.g. 'car') -- for a per-type report alongside the default report covering every type. Omit for no filter (today's behavior)."),
 ):
     """Builds the same HTML report daily-report.json used to build itself in a Code node --
@@ -427,7 +399,7 @@ def generate_report(
     on-the-fly thumbnail (never touching the stored full-quality crop); the full-size image is
     still available via the report's click-to-enlarge lightbox, embedded once, not twice."""
     resolved_start, resolved_end = _resolve_window(start, end, hours)
-    return report.generate_report(resolved_start, resolved_end, source, include_preview, object_label)
+    return report.generate_report(resolved_start, resolved_end, source, include_image, object_label)
 
 
 @app.post("/ai-queue/claim", response_model=schemas.ClaimResponse, tags=["ai-queue"], dependencies=[Depends(require_api_key)])
@@ -439,7 +411,6 @@ def claim_ai_batch(
     require_video: bool = Query(False, description="If true, only claim rows that also have a stored video ready (video_status='done'), not just a crop image. Default false -- an image is always guaranteed regardless (crop_status='done' is required either way); this only narrows further for a workflow that wants both artifacts before processing. The VLM call itself still only ever uses the image."),
     source: str = Query("events", pattern="^(events|visits)$", description="'events' (default) analyzes every eligible raw_event independently -- today's exact behavior. 'visits' skips duplicate det_ids already grouped into a visit by Frigate's review/alert stream -- only the earliest (representative) raw_event per visit is claimed, plus every raw_event never grouped into a visit at all (unless visits_only is also set). Lets you A/B whether per-event or per-visit analysis produces better/less-redundant results; completion (POST /sightings/*) is identical either way, since this only changes which rows are eligible to claim, not ai_status semantics."),
     visits_only: bool = Query(False, description="Only meaningful when source=visits. If true, never claim a raw_event that Frigate's review/alert stream never grouped into a visit at all (visit_id IS NULL) -- strictly limits this call to actual alert/visit activity. Default false keeps source=visits' existing fallback: ungrouped events are still claimed so they don't sit unanalyzed forever if only a visits-scoped workflow is active."),
-    require_thumb_crop: bool = Query(False, description="Only meaningful when source=visits. If true, only claim a visit's representative event once that visit's own high-res re-crop at Frigate's thumb_time has finished (VISIT_THUMB_CROP_ENABLED, thumb_crop_status='done') -- guarantees the claimed crop_image_base64 is always the well-timed thumb-crop, never the representative event's own possibly-badly-timed one, at the cost of real latency (the re-crop only starts once the review closes). Default false: still opportunistically prefers the thumb-crop whenever it already happens to be done by claim time, just doesn't wait for it."),
 ):
     """Replaces n8n's old Reap Stale Processing Items / Count In-Progress Items / Check Capacity /
     Claim Next Batch nodes with one call: reaps stale rows, computes available capacity, and
@@ -453,7 +424,6 @@ def claim_ai_batch(
         types, parallel_limit, stale_minutes, max_age_hours, require_video,
         only_visit_representative=(source == "visits"),
         visits_only=visits_only,
-        require_thumb_crop=require_thumb_crop,
     )
     return {"events": events}
 
@@ -554,7 +524,6 @@ def admin_overview():
             "ai_alerts_enabled": config.AI_ALERTS_ENABLED,
             "store_video": config.STORE_VIDEO,
             "store_video_alerts": config.STORE_VIDEO_ALERTS,
-            "visit_thumb_crop_enabled": config.VISIT_THUMB_CROP_ENABLED,
             "crop_disabled": config.CROP_DISABLED,
             "frigate_snapshot_enabled": config.FRIGATE_SNAPSHOT_ENABLED,
             "telegram_events_mode": config.TELEGRAM_EVENTS_MODE,
@@ -598,7 +567,7 @@ def admin_reindex_vector():
 @app.post("/admin/queue/requeue-failed", tags=["admin"], dependencies=[Depends(require_api_key)])
 def admin_requeue_failed(
     table: str = Query(..., description="'raw_events' or 'visits'"),
-    stage: str = Query(..., description="raw_events: 'crop'/'video'/'ai'. visits: 'video'/'thumb_crop'."),
+    stage: str = Query(..., description="raw_events: 'crop'/'video'/'ai'. visits: 'video'/'alert_ai'."),
 ):
     """Resets every row currently stuck at {stage}_status='failed' back to 'retry' with a fresh
     attempt count, so the next poll tick/claim picks it back up -- the exact fix
@@ -614,7 +583,7 @@ def admin_requeue_failed(
 @app.post("/admin/queue/skip-failed", tags=["admin"], dependencies=[Depends(require_api_key)])
 def admin_skip_failed(
     table: str = Query(..., description="'raw_events' or 'visits'"),
-    stage: str = Query(..., description="raw_events: 'crop'/'video'/'ai'. visits: 'video'/'thumb_crop'."),
+    stage: str = Query(..., description="raw_events: 'crop'/'video'/'ai'. visits: 'video'/'alert_ai'."),
     days: int = Query(7, ge=1, description="Mark {stage}_status='failed' rows older than this many days as 'skipped' instead of retrying them."),
 ):
     """The other lever for a stuck 'failed' bucket, alongside requeue-failed above -- some

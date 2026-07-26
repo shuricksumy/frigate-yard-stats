@@ -134,11 +134,3 @@ def to_base64_jpeg(img, quality=87):
     buf = io.BytesIO()
     img.convert("RGB").save(buf, format="JPEG", quality=quality)
     return base64.b64encode(buf.getvalue()).decode()
-
-
-def gif_base64(frames, duration_ms=450):
-    import base64
-    buf = io.BytesIO()
-    imgs = [f.convert("P", palette=Image.ADAPTIVE) for f in frames]
-    imgs[0].save(buf, format="GIF", save_all=True, append_images=imgs[1:], duration=duration_ms, loop=0, optimize=True)
-    return base64.b64encode(buf.getvalue()).decode()

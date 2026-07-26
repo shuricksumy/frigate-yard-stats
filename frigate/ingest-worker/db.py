@@ -139,7 +139,7 @@ def get_table_row_counts() -> dict:
 
 
 def get_stage_counts() -> dict:
-    # Per-stage status breakdown (crop/video/ai on raw_events; video/thumb_crop on visits) for the
+    # Per-stage status breakdown (crop/video/ai on raw_events; video/alert_ai on visits) for the
     # admin dashboard's queue-health section -- table/column names below are always one of the
     # fixed literals passed by this function's own callers below, never caller-supplied, so
     # building the query with an f-string carries no injection risk.
@@ -159,7 +159,6 @@ def get_stage_counts() -> dict:
         },
         "visits": {
             "video_status": _counts("visits", "video_status"),
-            "thumb_crop_status": _counts("visits", "thumb_crop_status"),
             "alert_ai_status": _counts("visits", "alert_ai_status"),
         },
     }
@@ -223,7 +222,7 @@ def get_db_size_by_object_type() -> dict:
     # rows, grouped by that table's label column. This is a real byte count of each row's stored
     # data (not a rough estimate), but it's still an approximation of the table's true on-disk
     # footprint: it doesn't include per-row overhead (tuple header, alignment padding), TOAST
-    # storage for the crop_image_base64/preview_gif_base64 columns' actual out-of-line chunks, or
+    # storage for the crop_image_base64 column's actual out-of-line chunks, or
     # index space at all -- get_db_size_info()'s pg_total_relation_size figures remain the
     # authoritative whole-table sizes; this is for relative "which type is using the most space"
     # comparison, not a precise accounting.
@@ -254,7 +253,6 @@ _REQUEUE_TARGETS = {
     ("raw_events", "video"): ("yard_stats.raw_events", "video_status", "video_attempt_count", "video_status_changed_at"),
     ("raw_events", "ai"): ("yard_stats.raw_events", "ai_status", "ai_attempt_count", "ai_status_changed_at"),
     ("visits", "video"): ("yard_stats.visits", "video_status", "video_attempt_count", "video_status_changed_at"),
-    ("visits", "thumb_crop"): ("yard_stats.visits", "thumb_crop_status", "thumb_crop_attempt_count", "thumb_crop_status_changed_at"),
     ("visits", "alert_ai"): ("yard_stats.visits", "alert_ai_status", "alert_ai_attempt_count", "alert_ai_status_changed_at"),
 }
 
@@ -539,29 +537,6 @@ def get_visit(visit_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
-def visit_thumb_crop_will_be_attempted(
-    review: dict, profile: dict | None = None, object_label: str | None = None,
-) -> bool:
-    # Shared by record_visit (to set the initial thumb_crop_status) and mqtt_ingest's
-    # _handle_review_message (to decide whether the Telegram visit-summary send should fire
-    # immediately or be deferred to visit_thumb_worker -- see there for why). Used to also require
-    # review.get("thumb_time") is not None, back when crop.build_visit_preview's predecessor
-    # (crop_visit_thumbnail) seeked to thumb_time specifically -- that approach was abandoned (see
-    # CLAUDE.md) in favor of sampling frames proportionally across the visit's own clip duration,
-    # which needs only start_ts/end_ts/cameras, not thumb_time at all. thumb_time is still stored
-    # on the visit row (informational -- Frigate's own opinion of the best moment) but no longer
-    # gates whether a preview can be built.
-    #
-    # Resolved via profile_config (type override -> profiles.yaml `defaults:` -> config.py
-    # hardcoded fallback) against the visit's representative object type, not a bare
-    # config.VISIT_THUMB_CROP_ENABLED read -- this setting has no env var backing it at all any
-    # more (see config.py), so reading the bare constant here would silently ignore a
-    # profiles.yaml override/default and always see the hardcoded False. `review` itself is
-    # unused now (kept as a parameter for call-site compatibility/API stability) -- the decision
-    # is entirely `profile`/`object_label` driven.
-    return profile_config.visit_thumb_crop_enabled(profile, object_label)
-
-
 def _get_representative_object_label_for_det_ids(det_ids: list) -> str | None:
     # Same "earliest linked raw_event" representative definition as get_representative_event_for_
     # visit, but matched by det_id instead of visit_id -- used by record_visit, which needs this
@@ -591,22 +566,17 @@ def record_visit(review: dict, profile: dict | None = None) -> int | None:
     # top of this (same zone, overlapping time window, different camera) is a separate, not-yet-
     # built layer. Insert + link in one transaction, same pattern as complete_sighting.
     #
-    # store_video_alerts/visit_thumb_crop_enabled are resolved against the visit's own
-    # representative object type (same single-type-per-visit convention claim_alert_ai_batch
-    # already uses for a visit that can span multiple distinct types) -- computed here via det_ids
-    # since the visit row (and its raw_events.visit_id link, which get_representative_event_for_
-    # visit relies on) doesn't exist yet at this point.
+    # store_video_alerts is resolved against the visit's own representative object type (same
+    # single-type-per-visit convention claim_alert_ai_batch already uses for a visit that can span
+    # multiple distinct types) -- computed here via det_ids since the visit row (and its
+    # raw_events.visit_id link, which get_representative_event_for_visit relies on) doesn't exist
+    # yet at this point.
     representative_label = _get_representative_object_label_for_det_ids(review["det_ids"])
     # video_status starts 'skipped' (not 'new') when store_video_alerts resolves to off for this
     # visit's representative type -- same reasoning as insert_raw_event's initial_video_status: a
     # cheap flag set once at insert, so the visit video queue's WHERE clause never even considers
     # these rows while the feature is disabled.
     initial_video_status = "new" if profile_config.store_video_alerts_enabled(profile, representative_label) else "skipped"
-    # Same reasoning for thumb_crop_status -- no longer conditioned on thumb_time being present
-    # (see visit_thumb_crop_will_be_attempted).
-    initial_thumb_crop_status = (
-        "new" if visit_thumb_crop_will_be_attempted(review, profile, representative_label) else "skipped"
-    )
     conn = get_conn()
     conn.autocommit = False
     try:
@@ -614,14 +584,12 @@ def record_visit(review: dict, profile: dict | None = None) -> int | None:
             cur.execute(
                 """
                 INSERT INTO yard_stats.visits
-                    (zone, objects, start_ts, end_ts, cameras, camera_count, video_status,
-                     thumb_time, thumb_crop_status)
-                VALUES (%s, %s, to_timestamp(%s), to_timestamp(%s), %s, 1, %s, %s, %s)
+                    (zone, objects, start_ts, end_ts, cameras, camera_count, video_status, thumb_time)
+                VALUES (%s, %s, to_timestamp(%s), to_timestamp(%s), %s, 1, %s, %s)
                 RETURNING id
                 """,
                 (review["zone"], review["objects"], review["start_time"], review["end_time"],
-                 review["camera"], initial_video_status, review.get("thumb_time"),
-                 initial_thumb_crop_status),
+                 review["camera"], initial_video_status, review.get("thumb_time")),
             )
             visit_id = cur.fetchone()["id"]
             if review["det_ids"]:
@@ -646,8 +614,7 @@ def get_representative_event_for_visit(visit_id: int) -> dict | None:
     # The visit's earliest-linked raw_event (same "representative" definition as list_visits) --
     # used right after record_visit to grab a crop image for the Telegram visit-summary
     # notification, if one's already available (the crop stage may not have finished by the time
-    # the review closes -- see telegram.send_visit_summary), and by visit_thumb_worker.py, which
-    # additionally needs det_id to look up that event's region/box for the re-crop.
+    # the review closes -- see telegram.send_visit_summary).
     rows = _execute(
         """
         SELECT id, camera, objects, crop_image_base64, det_id
@@ -659,6 +626,26 @@ def get_representative_event_for_visit(visit_id: int) -> dict | None:
         (visit_id,), fetch=True,
     )
     return rows[0] if rows else None
+
+
+def get_raw_events_for_visit(visit_id: int) -> list[dict]:
+    # Every raw_event linked to a visit, with det_id/start_ts/end_ts -- what alert_ai_worker needs
+    # to gather a high-res crop per selected event (crop.crop_event_high_res, keyed by det_id/
+    # start_ts/end_ts). Deliberately a plain read, not a claim/lock function -- this stage never
+    # touches raw_events.ai_status at all (see claim_alert_ai_batch), so there's no state to guard
+    # here, just fresh data fetched every time a claimed visit is processed. list_events(visit_id=)
+    # isn't reusable for this since its own SELECT doesn't include det_id (it's a web-UI-facing
+    # query with a different column set). Ordered by (objects, start_ts) so the object-type-dedup
+    # selection alert_ai_worker does in Python can group same-type rows together for free.
+    return _execute(
+        """
+        SELECT id, det_id, objects, start_ts, end_ts
+        FROM yard_stats.raw_events
+        WHERE visit_id = %s
+        ORDER BY objects, start_ts
+        """,
+        (visit_id,), fetch=True,
+    )
 
 
 def set_visit_telegram_photo_message_id(visit_id: int, message_id: int) -> None:
@@ -781,110 +768,6 @@ def mark_visit_video_retry_or_failed(visit_id: int, max_attempts: int) -> None:
         """,
         (max_attempts, visit_id),
     )
-
-
-def reap_stale_visit_thumb_crop_processing() -> None:
-    _execute(
-        """
-        UPDATE yard_stats.visits
-        SET thumb_crop_status = 'retry', thumb_crop_status_changed_at = now()
-        WHERE thumb_crop_status = 'processing'
-          AND thumb_crop_status_changed_at < now() - (%s * interval '1 minute')
-        """,
-        (config.STALE_MINUTES,),
-    )
-
-
-def count_visit_thumb_crop_in_progress() -> int:
-    rows = _execute(
-        "SELECT count(*)::int AS c FROM yard_stats.visits WHERE thumb_crop_status = 'processing'",
-        fetch=True,
-    )
-    return rows[0]["c"] if rows else 0
-
-
-def claim_visit_thumb_crop_batch(
-    limit: int,
-    object_types: list[str] | None = None,
-    exclude_object_types: list[str] | None = None,
-) -> list:
-    # Mirrors claim_visit_video_batch's CTE-claim shape (same FOR UPDATE SKIP LOCKED reason,
-    # newest-first) -- fifth queue stage, on visits.thumb_crop_status. See visit_thumb_worker.py.
-    # object_types/exclude_object_types: same representative-event LATERAL-join include/exclude
-    # filter as claim_visit_video_batch -- see its comment for why this isn't a plain include-list
-    # against every known label.
-    type_clause = ""
-    join_clause = ""
-    params: list = []
-    if object_types is not None or exclude_object_types is not None:
-        join_clause = """
-            JOIN LATERAL (
-                SELECT re.objects FROM yard_stats.raw_events re
-                WHERE re.visit_id = v.id
-                ORDER BY re.start_ts ASC, re.id ASC
-                LIMIT 1
-            ) rep ON true
-        """
-        if object_types is not None:
-            type_clause = "AND rep.objects = ANY(%s)"
-            params.append(object_types)
-        else:
-            type_clause = "AND NOT (rep.objects = ANY(%s))"
-            params.append(exclude_object_types)
-    params.append(limit)
-    return _execute(
-        f"""
-        WITH claimable AS (
-            SELECT v.id FROM yard_stats.visits v
-            {join_clause}
-            WHERE v.thumb_crop_status IN ('new', 'retry')
-            {type_clause}
-            ORDER BY v.start_ts DESC
-            LIMIT %s
-            FOR UPDATE SKIP LOCKED
-        )
-        UPDATE yard_stats.visits
-        SET thumb_crop_status = 'processing', thumb_crop_status_changed_at = now()
-        FROM claimable
-        WHERE yard_stats.visits.id = claimable.id
-        RETURNING yard_stats.visits.*
-        """,
-        params,
-        fetch=True,
-    )
-
-
-def mark_visit_thumb_crop_done(visit_id: int, crop_image_base64: str, preview_gif_base64: str | None = None) -> None:
-    _execute(
-        """
-        UPDATE yard_stats.visits
-        SET thumb_crop_status = 'done', thumb_crop_status_changed_at = now(),
-            crop_image_base64 = %s, preview_gif_base64 = %s
-        WHERE id = %s
-        """,
-        (crop_image_base64, preview_gif_base64, visit_id),
-    )
-
-
-def mark_visit_thumb_crop_retry_or_failed(visit_id: int, max_attempts: int) -> dict:
-    # Returns the resulting status (not just None like the video-queue equivalent) so
-    # visit_thumb_worker can tell whether this was the final attempt -- if so, the deferred
-    # Telegram visit-summary send (see mqtt_ingest.visit_thumb_crop_will_be_attempted) needs to
-    # fire now, falling back to the representative event's own crop, since the re-crop will never
-    # succeed for this visit.
-    rows = _execute(
-        """
-        UPDATE yard_stats.visits
-        SET thumb_crop_attempt_count = thumb_crop_attempt_count + 1,
-            thumb_crop_status = CASE WHEN thumb_crop_attempt_count + 1 >= %s THEN 'failed' ELSE 'retry' END,
-            thumb_crop_status_changed_at = now()
-        WHERE id = %s
-        RETURNING thumb_crop_status, thumb_crop_attempt_count
-        """,
-        (max_attempts, visit_id),
-        fetch=True,
-    )
-    return rows[0]
 
 
 def reap_stale_processing() -> None:
@@ -1314,9 +1197,7 @@ def purge_media_older_than(
     object_label: str | None = None,
     camera: str | None = None,
     delete_video: bool = True,
-    delete_gif: bool = True,
     delete_snapshots: bool = False,
-    delete_puzzled_preview: bool = False,
 ) -> dict:
     # POST /retention/purge's only_media=true mode (the default) -- clears stored media for rows
     # older than cutoff, but keeps the rows themselves and every text field on them (AI analysis,
@@ -1324,16 +1205,13 @@ def purge_media_older_than(
     # sightings/visit_sightings at all -- those tables carry no media columns of their own, only
     # text.
     #
-    # Four independently toggleable categories, not one all-or-nothing "media" concept -- the four
-    # columns this touches have very different storage cost and "do I still want this" answers
-    # (a 4K video clip vs. a single still crop): video (raw_events.video_path + visits.video_path,
-    # the actual files on disk), gif (visits.preview_gif_base64, the animated visit preview),
-    # snapshots (raw_events.crop_image_base64, "Event Snapshots" -- the per-event still), and
-    # puzzled_preview (visits.crop_image_base64, the flat composite grid -- the visit-level
-    # counterpart to a snapshot, named for how it reads to a human: several moments tiled into one
-    # "puzzled" image). Defaults (video/gif on, snapshots/puzzled_preview off) match this project's
-    # own judgment on which artifacts are safe to routinely discard (large, rarely revisited) vs.
-    # which are worth keeping longer (small, still useful for a quick visual check).
+    # Two independently toggleable categories -- video (raw_events.video_path + visits.video_path,
+    # the actual files on disk) and snapshots (raw_events.crop_image_base64, "Event Snapshots" --
+    # the per-event still). Defaults (video on, snapshots off) match this project's own judgment on
+    # which artifacts are safe to routinely discard (large, rarely revisited) vs. which are worth
+    # keeping longer (small, still useful for a quick visual check). (The visit-level composite
+    # grid/GIF this used to also cover were removed entirely -- see CLAUDE.md's "Visit preview";
+    # visits carry no clearable image media of their own anymore, only video.)
     #
     # object_label (optional), same scoping decision as purge_older_than: only raw_events (a
     # single-type-per-row concept) are filtered by it -- visits (which can span multiple object
@@ -1352,7 +1230,7 @@ def purge_media_older_than(
     visits_camera_clause = "AND cameras = %s" if camera else ""
     visits_camera_params = [camera] if camera else []
 
-    # Preview counts are always computed for all four categories regardless of which are actually
+    # Preview counts are always computed for both categories regardless of which are actually
     # selected -- lets the admin dashboard show the full picture before the caller decides what to
     # check, without a separate round-trip per checkbox toggle. Only the checked categories are
     # actually touched below when execute=True.
@@ -1367,14 +1245,6 @@ def purge_media_older_than(
         )[0]["c"],
         "visits_video_files": 0 if object_label else _execute(
             f"SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s AND video_path IS NOT NULL {visits_camera_clause}",
-            [cutoff, *visits_camera_params], fetch=True,
-        )[0]["c"],
-        "visits_puzzled_previews": 0 if object_label else _execute(
-            f"SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s AND crop_image_base64 IS NOT NULL {visits_camera_clause}",
-            [cutoff, *visits_camera_params], fetch=True,
-        )[0]["c"],
-        "visits_gifs": 0 if object_label else _execute(
-            f"SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s AND preview_gif_base64 IS NOT NULL {visits_camera_clause}",
             [cutoff, *visits_camera_params], fetch=True,
         )[0]["c"],
     }
@@ -1415,33 +1285,22 @@ def purge_media_older_than(
                 [cutoff, *type_params, *camera_params],
             )
 
-        # visits: video_path, crop_image_base64 (puzzled preview grid), preview_gif_base64 (GIF) --
-        # never touched at all when object_label is set, same reasoning as the counts above.
-        if not object_label:
-            v_sets, v_wheres = [], []
-            if delete_video:
-                v_sets.append("video_path = NULL")
-                v_wheres.append("video_path IS NOT NULL")
-            if delete_puzzled_preview:
-                v_sets.append("crop_image_base64 = NULL")
-                v_wheres.append("crop_image_base64 IS NOT NULL")
-            if delete_gif:
-                v_sets.append("preview_gif_base64 = NULL")
-                v_wheres.append("preview_gif_base64 IS NOT NULL")
-            if v_sets:
-                _execute(
-                    f"""
-                    UPDATE yard_stats.visits SET {', '.join(v_sets)}
-                    WHERE start_ts < %s AND ({' OR '.join(v_wheres)}) {visits_camera_clause}
-                    """,
-                    [cutoff, *visits_camera_params],
-                )
+        # visits: video_path only now -- never touched at all when object_label is set, same
+        # reasoning as the counts above.
+        if not object_label and delete_video:
+            _execute(
+                f"""
+                UPDATE yard_stats.visits SET video_path = NULL
+                WHERE start_ts < %s AND video_path IS NOT NULL {visits_camera_clause}
+                """,
+                [cutoff, *visits_camera_params],
+            )
 
         counts["video_files_deleted"] = deleted_files
         logger.info(
-            "Media-only purge executed (cutoff=%s, object_label=%s, camera=%s, delete_video=%s, delete_gif=%s, "
-            "delete_snapshots=%s, delete_puzzled_preview=%s, counts=%s)",
-            cutoff, object_label, camera, delete_video, delete_gif, delete_snapshots, delete_puzzled_preview, counts,
+            "Media-only purge executed (cutoff=%s, object_label=%s, camera=%s, delete_video=%s, "
+            "delete_snapshots=%s, counts=%s)",
+            cutoff, object_label, camera, delete_video, delete_snapshots, counts,
         )
 
     return counts
@@ -1649,9 +1508,6 @@ def _build_visits_query(
                 v.start_ts AS visit_start_ts, v.end_ts AS visit_end_ts,
                 v.video_status AS visit_video_status,
                 (v.video_path IS NOT NULL) AS visit_has_video,
-                v.thumb_crop_status,
-                (v.crop_image_base64 IS NOT NULL) AS has_thumb_crop,
-                (v.preview_gif_base64 IS NOT NULL) AS has_preview_gif,
                 re.id AS event_id, re.ai_status, re.crop_status,
                 (re.crop_image_base64 IS NOT NULL) AS event_has_image,
                 row_number() OVER (PARTITION BY v.id ORDER BY re.start_ts ASC, re.id ASC) AS rn,
@@ -1663,9 +1519,8 @@ def _build_visits_query(
         SELECT visit_id AS id, zone, objects, cameras, camera_count,
                visit_start_ts AS start_ts, visit_end_ts AS end_ts, event_count,
                event_id AS representative_event_id, ai_status, crop_status,
-               visit_video_status AS video_status, thumb_crop_status, has_thumb_crop,
-               has_preview_gif,
-               (has_thumb_crop OR event_has_image) AS has_image, visit_has_video AS has_video
+               visit_video_status AS video_status,
+               event_has_image AS has_image, visit_has_video AS has_video
         FROM linked
         WHERE rn = 1
         ORDER BY visit_start_ts DESC
@@ -1804,7 +1659,6 @@ def claim_ai_batch(
     require_video: bool = False,
     only_visit_representative: bool = False,
     visits_only: bool = False,
-    require_thumb_crop: bool = False,
 ) -> list:
     # Replaces what used to be four separate n8n nodes (Reap Stale Processing Items, Count
     # In-Progress Items, Check Capacity, Claim Next Batch) with one call. Same FOR UPDATE SKIP
@@ -1883,44 +1737,12 @@ def claim_ai_batch(
             visit_clause = f"AND visit_id IS NOT NULL AND {representative_subquery}"
         else:
             visit_clause = f"AND (visit_id IS NULL OR {representative_subquery})"
-    # require_thumb_crop=true only ever narrows further when only_visit_representative is also set
-    # (thumb-crops only exist on visits, and only the representative row is ever eligible either
-    # way) -- waits for the visit's own well-timed re-crop (VISIT_THUMB_CROP_ENABLED,
-    # visit_thumb_worker.py) to finish before claiming at all, a genuine latency trade-off (the
-    # re-crop only starts once the review closes, well after crop_status='done') in exchange for a
-    # guarantee that this claim's crop_image_base64 (see below) is always the high-res thumb-crop,
-    # never the representative event's own possibly-badly-timed one.
-    thumb_crop_required_clause = ""
-    if only_visit_representative and require_thumb_crop:
-        thumb_crop_required_clause = """
-        AND visit_id IS NOT NULL
-        AND EXISTS (
-            SELECT 1 FROM yard_stats.visits v WHERE v.id = raw_events.visit_id AND v.thumb_crop_status = 'done'
-        )
-        """
     age_clause = ""
     params: list = [object_types]
     if max_age_hours is not None:
         age_clause = "AND created_at >= now() - (%s * interval '1 hour')"
         params.append(max_age_hours)
     params.append(available_capacity)
-    # Opportunistic upgrade (independent of require_thumb_crop, which only affects eligibility
-    # above): whenever the claimed row IS a visit's representative and that visit's thumb-crop
-    # already happens to be done by claim time, prefer it over the representative event's own
-    # crop_image_base64 -- zero latency cost, since this never changes which rows get claimed or
-    # when, only which image ends up in the response. Only computed for source=visits claims (a
-    # visit's thumb-crop is one artifact per visit; overriding every duplicate det_id's own crop
-    # under plain source=events would mean several distinct raw_events all getting sent to the VLM
-    # as the identical image, wasted analysis rather than a real improvement).
-    visit_thumb_crop_column = (
-        """,
-        (
-            SELECT v.crop_image_base64 FROM yard_stats.visits v
-            WHERE v.id = yard_stats.raw_events.visit_id AND v.thumb_crop_status = 'done'
-        ) AS visit_thumb_crop_base64
-        """
-        if only_visit_representative else ""
-    )
     rows = _execute(
         f"""
         WITH claimable AS (
@@ -1928,7 +1750,6 @@ def claim_ai_batch(
             WHERE objects = ANY(%s) AND crop_status = 'done' AND ai_status IN ('new', 'retry')
             {video_clause}
             {visit_clause}
-            {thumb_crop_required_clause}
             {age_clause}
             ORDER BY created_at DESC
             LIMIT %s
@@ -1941,15 +1762,10 @@ def claim_ai_batch(
         RETURNING yard_stats.raw_events.*,
                   (yard_stats.raw_events.video_path IS NOT NULL) AS has_video,
                   (yard_stats.raw_events.crop_image_base64 IS NOT NULL) AS has_image
-                  {visit_thumb_crop_column}
         """,
         params,
         fetch=True,
     )
-    for row in rows:
-        visit_crop = row.pop("visit_thumb_crop_base64", None)
-        if visit_crop:
-            row["crop_image_base64"] = visit_crop
     return rows
 
 
@@ -2056,7 +1872,7 @@ def semantic_search_combined(
     # Each row is tagged `kind` ("event"/"visit") and `id` (that row's raw_event_id or visit_id) so
     # the caller can route a click to the right lightbox -- the two id spaces are independent
     # sequences (a raw_event id and a visit id can collide), so `kind` is required to disambiguate,
-    # never optional. Also carries has_image/has_video/has_preview_gif/ai_status (the same fields
+    # never optional. Also carries has_image/has_video/ai_status (the same fields
     # EventSummary/VisitSummary already expose) so the web UI can open a result straight into the
     # existing lightbox with no follow-up fetch -- there's no GET /visits/{id} single-item endpoint
     # to fetch those for a visit-kind result on demand, and adding one just to re-fetch what this
@@ -2086,8 +1902,7 @@ def semantic_search_combined(
             SELECT 'event' AS kind, re.id AS id, s.id AS sighting_id, re.start_ts, re.camera,
                    re.objects, s.object_label, s.description, s.embedding <=> %s::vector AS distance,
                    (re.crop_image_base64 IS NOT NULL) AS has_image,
-                   (re.video_path IS NOT NULL) AS has_video,
-                   false AS has_preview_gif, re.ai_status
+                   (re.video_path IS NOT NULL) AS has_video, re.ai_status
             FROM yard_stats.sightings s
             JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
             WHERE {' AND '.join(clauses)}
@@ -2096,11 +1911,9 @@ def semantic_search_combined(
         ))
 
     if source in (None, "visits"):
-        # has_image mirrors _build_visits_query's own (has_thumb_crop OR event_has_image) --
-        # falls back to the representative (earliest-linked) raw_event's own crop whenever the
-        # visit's own thumb-crop grid isn't ready/enabled, same convention GET /visits/{id}/
-        # thumbnail already applies server-side, so a search result never hides a thumbnail that's
-        # actually fetchable.
+        # has_image falls back to the representative (earliest-linked) raw_event's own crop, same
+        # convention GET /visits/{id}/thumbnail already applies server-side, so a search result
+        # never hides a thumbnail that's actually fetchable.
         clauses = ["vs.embedding IS NOT NULL"]
         branch_params = [vector_literal]
         if start:
@@ -2119,15 +1932,14 @@ def semantic_search_combined(
             f"""
             SELECT 'visit' AS kind, v.id AS id, vs.id AS sighting_id, v.start_ts, v.cameras AS camera,
                    v.objects, vs.object_label, vs.description, vs.embedding <=> %s::vector AS distance,
-                   ((v.crop_image_base64 IS NOT NULL) OR COALESCE((
+                   COALESCE((
                        SELECT re.crop_image_base64 IS NOT NULL
                        FROM yard_stats.raw_events re
                        WHERE re.visit_id = v.id
                        ORDER BY re.start_ts ASC, re.id ASC
                        LIMIT 1
-                   ), false)) AS has_image,
-                   (v.video_path IS NOT NULL) AS has_video,
-                   (v.preview_gif_base64 IS NOT NULL) AS has_preview_gif, v.alert_ai_status AS ai_status
+                   ), false) AS has_image,
+                   (v.video_path IS NOT NULL) AS has_video, v.alert_ai_status AS ai_status
             FROM yard_stats.visit_sightings vs
             JOIN yard_stats.visits v ON v.id = vs.visit_id
             WHERE {' AND '.join(clauses)}
@@ -2223,15 +2035,17 @@ def claim_alert_ai_batch(
 ) -> list:
     # Sixth queue stage (AI_ALERTS_ENABLED), claiming from visits.alert_ai_status instead of
     # raw_events.ai_status -- mirrors claim_ai_batch's reap-stale + count-in-progress + CTE-claim
-    # shape (same FOR UPDATE SKIP LOCKED reason). Unlike claim_ai_batch, this only ever claims a
-    # visit whose own composite grid is ready (thumb_crop_status='done') -- a visit with
-    # VISIT_THUMB_CROP_ENABLED off (or still building) simply has nothing this stage can analyze
-    # yet, so it stays alert_ai_status='new' indefinitely, same "nothing to do" treatment as an
-    # unmapped object type gets. object_types is matched against the visit's own *representative*
-    # event's objects (the single event the grid was actually framed around via its region/box),
-    # not visits.objects (a comma-joined list that can span several distinct types per visit,
-    # e.g. "car,person" -- see record_visit) -- the grid is inherently single-object-framed, so the
-    # representative event's own label is what determines which profiles.yaml prompt applies.
+    # shape (same FOR UPDATE SKIP LOCKED reason). A visit is claimable as soon as it exists (subject
+    # to the same reap-stale/capacity/object-type filters every other claim function already has) --
+    # there's no pre-built artifact to wait on: alert_ai_worker.process_claimed_visit gathers its own
+    # high-res crops directly from Frigate at processing time (see crop.crop_event_high_res), rather
+    # than depending on a separate thumb-crop stage having finished a grid ahead of time (the
+    # now-removed visits.thumb_crop_status gate this used to require). object_types is matched
+    # against the visit's own *representative* event's objects (the earliest-linked raw_event), not
+    # visits.objects (a comma-joined list that can span several distinct types per visit, e.g.
+    # "car,person" -- see record_visit) -- alert_prompt/provider selection is still single-type-at-
+    # a-time, so the representative event's own label is what determines which profiles.yaml prompt
+    # applies, same as before.
     reap_stale_alert_ai_processing(stale_minutes)
     in_progress = count_alert_ai_in_progress()
     capacity = max(0, parallel_limit - in_progress)
@@ -2256,7 +2070,6 @@ def claim_alert_ai_batch(
                 LIMIT 1
             ) rep ON true
             WHERE v.alert_ai_status IN ('new', 'retry')
-              AND v.thumb_crop_status = 'done'
               AND rep.objects = ANY(%s)
               {age_clause}
             ORDER BY v.start_ts DESC
@@ -2349,7 +2162,7 @@ def get_visit_alert_sighting(visit_id: int) -> dict | None:
 
 
 def get_report_data(
-    start: datetime, end: datetime, source: str = "events", include_preview: str = "gif",
+    start: datetime, end: datetime, source: str = "events", include_image: bool = True,
     object_label: str | None = None,
 ) -> dict:
     # Same joins daily-report.json's two query nodes used to run directly -- filtered by
@@ -2362,9 +2175,7 @@ def get_report_data(
     # still collapse to one row, but a visit grouping genuinely distinct objects (e.g. a car and a
     # person) shows both instead of silently dropping one.
     visit_clause = ""
-    visit_join = ""
     crop_image_expr = "re.crop_image_base64"
-    gif_image_expr = "NULL"
     if source == "visits":
         visit_clause = """
         AND (
@@ -2378,31 +2189,11 @@ def get_report_data(
             )
         )
         """
-        # Prefer the visit's own high-res re-crop at Frigate's thumb_time (VISIT_THUMB_CROP_ENABLED,
-        # visit_thumb_worker.py) over the representative event's own crop, when it's finished --
-        # reports run well after the fact (a scheduled daily/hourly window), so unlike the AI queue
-        # there's no real latency cost to just always preferring it here.
-        visit_join = "LEFT JOIN yard_stats.visits v ON v.id = re.visit_id AND v.thumb_crop_status = 'done'"
-        crop_image_expr = "COALESCE(v.crop_image_base64, re.crop_image_base64)"
-        # The visit's own animated preview GIF (human preview only, never sent to the VLM -- see
-        # CLAUDE.md's "Visit preview") -- report.py prefers this over the static grid for the
-        # inline row preview, same "richer artifact when available" preference Telegram's visit
-        # summary already applies. NULL for a standalone (never visit-grouped) sighting, or while
-        # the preview hasn't finished building yet -- report.py falls back to the grid/crop there.
-        gif_image_expr = "v.preview_gif_base64"
-    # include_preview is a mode, not a bool, same shape as TELEGRAM_EVENTS_MODE -- "gif" (the
-    # default) is today's original behavior (prefer the visit's animated GIF, falling back to the
-    # static grid/crop); "image" drops only the GIF, at the SQL level, not just report.py's
-    # rendering, since it's typically the single largest field in this query (a multi-frame
-    # animated GIF vs. one flat JPEG); "none" drops the image entirely (crop included) for a
-    # caller that wants the smallest possible payload -- report.py's _img_cell already renders
-    # "(no image)" whenever crop_image_base64 comes back NULL, so no separate rendering path is
-    # needed for that case.
-    if include_preview == "none":
+    # include_image=false drops the image entirely for a caller that wants the smallest possible
+    # payload -- report.py's _img_cell already renders "(no image)" whenever crop_image_base64
+    # comes back NULL, so no separate rendering path is needed for that case.
+    if not include_image:
         crop_image_expr = "NULL"
-        gif_image_expr = "NULL"
-    elif include_preview == "image":
-        gif_image_expr = "NULL"
     # visit_id is included so report.py can group a visit's sightings into one combined alert
     # entry (source="visits" only -- always NULL under source="events", where there's no grouping
     # concept and every sighting is its own entry). One universal query now -- object_label tells
@@ -2422,11 +2213,10 @@ def get_report_data(
     sightings = _execute(
         f"""
         SELECT re.id AS raw_event_id, re.visit_id, re.camera, re.zone, re.start_ts,
-               {crop_image_expr} AS crop_image_base64, {gif_image_expr} AS preview_gif_base64,
+               {crop_image_expr} AS crop_image_base64,
                s.object_label, s.description
         FROM yard_stats.sightings s
         JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
-        {visit_join}
         WHERE s.created_at >= %s AND s.created_at <= %s
         {visit_clause}
         {label_clause}

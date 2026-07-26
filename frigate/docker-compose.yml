@@ -68,17 +68,17 @@ services:
       # on the Frigate host (both outside/outside2 record streams are 3840x2160).
       RECORD_WIDTH: ${RECORD_WIDTH:-3840}
       RECORD_HEIGHT: ${RECORD_HEIGHT:-2160}
-      # Crop tuning, queue tuning, retention, video storage, visit previews, Telegram, and the
-      # internal AI stages are ALL configured in profiles.yaml now, not here -- see that file's own
-      # comments and CLAUDE.md's "Per-object-type overrides" section. Two categories moved there:
+      # Crop tuning, queue tuning, retention, video storage, Telegram, and the internal AI stages
+      # are ALL configured in profiles.yaml now, not here -- see that file's own comments and
+      # CLAUDE.md's "Per-object-type overrides" section. Two categories moved there:
       # per-object-type settings (crop_disabled/crop_frame_offset_pct/crop_padding_pct/
-      # frigate_snapshot_enabled, store_video/store_video_alerts/visit_thumb_crop_enabled/
-      # visit_preview_frame_percentages, telegram_events_mode/telegram_alerts_mode/
-      # ai_events_stage_enabled/ai_alerts_enabled), each resolved fresh per row/type; and plain
+      # frigate_snapshot_enabled, store_video/store_video_alerts, telegram_events_mode/
+      # telegram_alerts_mode/ai_events_stage_enabled/ai_alerts_enabled, provider/model/chat_path
+      # and alert_provider/alert_model/alert_chat_path), each resolved fresh per row/type; and plain
       # technical tuning knobs with no per-type meaning at all (parallel_limit/stale_minutes/
       # max_attempts/crop_initial_wait_seconds/max_crop_dimension/thumbnail_max_dimension/
       # poll_interval_seconds, retention_months/retention_check_interval_seconds, the video_*/
-      # visit_thumb_crop_*/ai_stage_* queue-tuning equivalents, ai_stage_default_timeout_seconds/
+      # ai_stage_*/alert_ai_* queue-tuning equivalents, ai_stage_default_timeout_seconds/
       # ai_stage_embed_timeout_seconds), resolved once at startup by config.apply_profile_defaults().
       # Both live under profiles.yaml's one `defaults:` section (plus object_types.<label> overrides
       # for the first category) -- env vars here now cover only connection info, paths, tokens, and

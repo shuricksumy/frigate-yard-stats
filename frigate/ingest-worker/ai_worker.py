@@ -16,10 +16,25 @@ def load_profile(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-def _llama_proxy_chat_request(type_config: dict, prompt: str, crop_image_base64: str, timeout: float) -> dict:
+_warned_llama_proxy_multi_image = False
+
+
+def _llama_proxy_chat_request(type_config: dict, prompt: str, images: list[str], timeout: float) -> dict:
     # The original, still-default shape: llama_slot_proxy speaks an OpenAI-compatible
     # chat-completions API with no "model" field at all -- the slot is selected entirely by
-    # chat_path (one URL path segment per model), not a body field.
+    # chat_path (one URL path segment per model), not a body field. Multi-image reasoning quality
+    # on a self-hosted llama.cpp+mmproj backend is unverified (see ai_worker.py's own multi-image
+    # docstring note / CLAUDE.md), so only the first image is ever sent here regardless of how many
+    # were gathered -- a warning is logged once (module-global, not per-call) rather than silently
+    # dropping the rest with no visibility at all.
+    global _warned_llama_proxy_multi_image
+    if len(images) > 1 and not _warned_llama_proxy_multi_image:
+        logger.warning(
+            "%d images were gathered for this alert but llama_proxy only ever sends the first one "
+            "-- set provider/alert_provider to 'openai' or 'anthropic' for multi-image analysis",
+            len(images),
+        )
+        _warned_llama_proxy_multi_image = True
     headers = {}
     if config.LLAMA_PROXY_TOKEN:
         headers["Authorization"] = f"Bearer {config.LLAMA_PROXY_TOKEN}"
@@ -33,7 +48,7 @@ def _llama_proxy_chat_request(type_config: dict, prompt: str, crop_image_base64:
                         {"type": "text", "text": prompt},
                         {
                             "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{crop_image_base64}"},
+                            "image_url": {"url": f"data:image/jpeg;base64,{images[0]}"},
                         },
                     ],
                 }
@@ -47,10 +62,12 @@ def _llama_proxy_chat_request(type_config: dict, prompt: str, crop_image_base64:
     return resp.json()
 
 
-def _openai_chat_request(type_config: dict, prompt: str, crop_image_base64: str, timeout: float) -> dict:
+def _openai_chat_request(type_config: dict, prompt: str, images: list[str], timeout: float) -> dict:
     # Same request/response shape llama_slot_proxy already speaks (it's deliberately
     # OpenAI-compatible) -- the two real differences are the base URL/auth and that OpenAI needs a
-    # "model" field in the body instead of selecting the model via the URL path.
+    # "model" field in the body instead of selecting the model via the URL path. OpenAI's vision
+    # API natively supports several image_url blocks in one message's content array, so every
+    # gathered image is sent, not just the first.
     headers = {"Authorization": f"Bearer {config.OPENAI_API_KEY}"}
     resp = requests.post(
         f"{config.OPENAI_BASE_URL}/v1/chat/completions",
@@ -61,10 +78,10 @@ def _openai_chat_request(type_config: dict, prompt: str, crop_image_base64: str,
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {
-                            "type": "image_url",
-                            "image_url": {"url": f"data:image/jpeg;base64,{crop_image_base64}"},
-                        },
+                        *[
+                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}}
+                            for img in images
+                        ],
                     ],
                 }
             ],
@@ -77,11 +94,12 @@ def _openai_chat_request(type_config: dict, prompt: str, crop_image_base64: str,
     return resp.json()
 
 
-def _anthropic_chat_request(type_config: dict, prompt: str, crop_image_base64: str, timeout: float) -> dict:
+def _anthropic_chat_request(type_config: dict, prompt: str, images: list[str], timeout: float) -> dict:
     # Claude's Messages API -- a genuinely different shape from the other two providers: auth is
     # x-api-key + anthropic-version headers (not Authorization: Bearer), images are a "source"
     # block instead of a data-URI image_url, and max_tokens is required (there's no server-side
-    # default the way OpenAI/llama_slot_proxy have one).
+    # default the way OpenAI/llama_slot_proxy have one). Claude's Messages API natively supports
+    # several image blocks in one message's content array, so every gathered image is sent.
     headers = {
         "x-api-key": config.ANTHROPIC_API_KEY,
         "anthropic-version": config.ANTHROPIC_VERSION,
@@ -96,14 +114,13 @@ def _anthropic_chat_request(type_config: dict, prompt: str, crop_image_base64: s
                     "role": "user",
                     "content": [
                         {"type": "text", "text": prompt},
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/jpeg",
-                                "data": crop_image_base64,
-                            },
-                        },
+                        *[
+                            {
+                                "type": "image",
+                                "source": {"type": "base64", "media_type": "image/jpeg", "data": img},
+                            }
+                            for img in images
+                        ],
                     ],
                 }
             ],
@@ -115,16 +132,18 @@ def _anthropic_chat_request(type_config: dict, prompt: str, crop_image_base64: s
     return resp.json()
 
 
-def _chat_request(type_config: dict, prompt: str, crop_image_base64: str, timeout: float) -> dict:
+def _chat_request(type_config: dict, prompt: str, images: list[str], timeout: float) -> dict:
     # Dispatches on this type's own `provider` (profiles.yaml, per object type -- see
     # profiles.yaml.example) -- "llama_proxy" (the default, unchanged behavior) if the key is
     # omitted entirely, so an existing deployment's profiles.yaml needs no edit to keep working.
+    # `images` is always a list -- the events stage passes a one-element list (unchanged
+    # single-image behavior); the alert stage passes however many high-res crops it gathered.
     provider = type_config.get("provider", "llama_proxy")
     if provider == "openai":
-        return _openai_chat_request(type_config, prompt, crop_image_base64, timeout)
+        return _openai_chat_request(type_config, prompt, images, timeout)
     if provider == "anthropic":
-        return _anthropic_chat_request(type_config, prompt, crop_image_base64, timeout)
-    return _llama_proxy_chat_request(type_config, prompt, crop_image_base64, timeout)
+        return _anthropic_chat_request(type_config, prompt, images, timeout)
+    return _llama_proxy_chat_request(type_config, prompt, images, timeout)
 
 
 def _extract_response_text(response: dict, type_config: dict | None) -> str:
@@ -258,7 +277,7 @@ def process_claimed_event(row: dict, profile: dict) -> None:
     timeout = type_config.get("timeout_seconds", config.AI_STAGE_DEFAULT_TIMEOUT_SECONDS)
 
     try:
-        response = _chat_request(type_config, type_config["event_prompt"], row["crop_image_base64"], timeout)
+        response = _chat_request(type_config, type_config["event_prompt"], [row["crop_image_base64"]], timeout)
         fields = parse_sighting_response(response, row, type_config)
         embedding = _embed_text(fields["description"])
         db.complete_sighting(fields["raw_event_id"], fields["object_label"], fields["description"], embedding)

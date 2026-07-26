@@ -3,6 +3,7 @@ import time
 
 import ai_worker
 import config
+import crop
 import db
 import profile_config
 
@@ -12,13 +13,95 @@ logger = logging.getLogger(__name__)
 def parse_alert_sighting_response(response: dict, row: dict, type_config: dict | None = None) -> dict:
     # Same shape as ai_worker.parse_sighting_response, just keyed by visit_id instead of
     # raw_event_id -- no JSON parsing, no per-type branching. alert_prompt already asks the model
-    # to cover both static attributes and what changed across the grid's 4 frames in one flowing
-    # answer, so the whole chat response is the description verbatim, same as the event-level path.
+    # to cover both static attributes and what changed across the gathered series of images in one
+    # flowing answer, so the whole chat response is the description verbatim, same as the
+    # event-level path.
     return {
         "visit_id": row["id"],
         "object_label": row.get("objects"),
         "description": ai_worker._extract_response_text(response, type_config),
     }
+
+
+def _select_events_for_alert(events: list[dict], max_images: int) -> list[dict]:
+    # Picks which of a visit's linked raw_events get a high-res crop built and sent to the VLM --
+    # one representative (the earliest) per distinct object type first, so a visit spanning several
+    # real types (e.g. a car and a person) always gets at least one image of each rather than
+    # losing a whole type to whichever happened to sort first. If that alone already reaches
+    # max_images (a visit spanning more distinct types than the cap -- rare but possible), the
+    # earliest-starting representatives win. Otherwise, remaining slots are filled by round-robin
+    # across types that have more than one linked event (tracker re-tracks/label flicker of the
+    # SAME real object), each round taking the middle of what's left in that type's own bucket --
+    # a simple, deterministic way to spread the extra images across the type's own timespan instead
+    # of clustering them all near wherever the representative already came from.
+    if not events:
+        return []
+    groups: dict[str, list[dict]] = {}
+    for event in events:
+        groups.setdefault(event["objects"], []).append(event)
+
+    representatives = [group[0] for group in groups.values()]
+    representatives.sort(key=lambda e: e["start_ts"])
+    if len(representatives) >= max_images:
+        return representatives[:max_images]
+
+    remaining_slots = max_images - len(representatives)
+    leftovers_by_type = {label: group[1:] for label, group in groups.items() if len(group) > 1}
+
+    fill: list[dict] = []
+    while remaining_slots > 0 and any(leftovers_by_type.values()):
+        for label in list(leftovers_by_type.keys()):
+            if remaining_slots <= 0:
+                break
+            bucket = leftovers_by_type[label]
+            if not bucket:
+                continue
+            fill.append(bucket.pop(len(bucket) // 2))
+            remaining_slots -= 1
+
+    selected = representatives + fill
+    selected.sort(key=lambda e: e["start_ts"])
+    return selected
+
+
+def _gather_alert_images(
+    events: list[dict], crop_disabled: bool | None = None, crop_padding_pct: float | None = None,
+) -> list[str]:
+    # A single bad/expired linked event (Frigate's own event-id clip already rolled off, a
+    # transient fetch error, ...) shouldn't fail the whole visit's alert analysis -- same "a gap
+    # doesn't take the rest down with it" tolerance crop._panels_from_independent_timestamps
+    # already established for the old grid's per-moment fetches. Only an empty result routes to a
+    # real failure (see process_claimed_visit).
+    images = []
+    for event in events:
+        try:
+            images.append(crop.crop_event_high_res(
+                event, crop_disabled=crop_disabled, crop_padding_pct=crop_padding_pct,
+            ))
+        except Exception:
+            logger.warning(
+                "Could not build a high-res crop for raw_event id=%s det_id=%s in alert analysis, skipping",
+                event.get("id"), event.get("det_id"), exc_info=True,
+            )
+    return images
+
+
+def _resolve_alert_type_config(type_config: dict) -> dict:
+    # Optional alert_provider/alert_model/alert_chat_path keys let one object type point its
+    # alert-stage analysis at a different provider than its own event-stage analysis (e.g.
+    # event_prompt stays on the local llama_slot_proxy for cheap, frequent single-image analysis,
+    # while alert_prompt routes to a hosted provider for the multi-image series) -- without this,
+    # profiles.yaml's single provider/model/chat_path keys would force both stages onto the same
+    # backend. Falls back to the plain keys when the alert_* ones are absent, so an existing
+    # profiles.yaml needs no edit to keep working, same convention `provider` itself established.
+    resolved = dict(type_config)
+    if "alert_provider" in type_config:
+        resolved["provider"] = type_config["alert_provider"]
+    if "alert_model" in type_config:
+        resolved["model"] = type_config["alert_model"]
+    if "alert_chat_path" in type_config:
+        resolved["chat_path"] = type_config["alert_chat_path"]
+    return resolved
 
 
 def process_claimed_visit(row: dict, profile: dict) -> None:
@@ -29,16 +112,33 @@ def process_claimed_visit(row: dict, profile: dict) -> None:
         # guard rather than crash the poll loop on an unexpected row.
         logger.warning("Claimed visit id=%s has unmapped representative object type %r, skipping", visit_id, row.get("objects"))
         return
-    timeout = type_config.get("timeout_seconds", config.AI_STAGE_DEFAULT_TIMEOUT_SECONDS)
+    if row.get("alert_ai_attempt_count", 0) == 0:
+        # Same head-start reasoning as crop_worker/video_worker/visit_thumb_worker's own initial
+        # waits -- a just-linked event's own clip may not be finalized on Frigate's side yet.
+        # Applied once per claimed visit, not once per gathered image.
+        time.sleep(config.ALERT_AI_INITIAL_WAIT_SECONDS)
+
+    effective_config = _resolve_alert_type_config(type_config)
+    timeout = effective_config.get("timeout_seconds", config.AI_STAGE_DEFAULT_TIMEOUT_SECONDS)
+    object_label = row.get("objects")
+    crop_disabled = profile_config.crop_disabled(profile, object_label)
+    crop_padding_pct = profile_config.crop_padding_pct(profile, object_label)
 
     try:
-        response = ai_worker._chat_request(
-            type_config, type_config["alert_prompt"], row["crop_image_base64"], timeout,
-        )
-        fields = parse_alert_sighting_response(response, row, type_config)
+        linked_events = db.get_raw_events_for_visit(visit_id)
+        selected = _select_events_for_alert(linked_events, config.ALERT_AI_MAX_IMAGES)
+        images = _gather_alert_images(selected, crop_disabled, crop_padding_pct)
+        if not images:
+            raise ValueError(f"Could not gather any high-res images for visit id={visit_id}")
+
+        response = ai_worker._chat_request(effective_config, effective_config["alert_prompt"], images, timeout)
+        fields = parse_alert_sighting_response(response, row, effective_config)
         embedding = ai_worker._embed_text(fields["description"])
         db.complete_visit_sighting(fields["visit_id"], fields["object_label"], fields["description"], embedding)
-        logger.info("Alert AI analysis done for visit id=%s object_label=%s", visit_id, fields["object_label"])
+        logger.info(
+            "Alert AI analysis done for visit id=%s object_label=%s image_count=%d",
+            visit_id, fields["object_label"], len(images),
+        )
 
     except Exception:
         logger.exception("Alert AI analysis failed for visit id=%s det_id=%s", visit_id, row.get("det_id"))
