@@ -5,11 +5,14 @@ monkeypatch ai_worker._chat_request/_embed_text and db.* functions, no network o
 required -- same style as test_ai_worker.py.
 """
 import os
+import uuid
 
 os.environ.setdefault("MQTT_HOST", "localhost")
 os.environ.setdefault("POSTGRES_PASSWORD", "test")
 os.environ.setdefault("FRIGATE_API_BASE", "http://frigate.test:5000")
 os.environ.setdefault("API_KEY", "test-key")
+
+import pytest  # noqa: E402
 
 import ai_worker  # noqa: E402
 import config  # noqa: E402
@@ -253,3 +256,98 @@ def test_run_once_passes_configured_tuning_knobs(monkeypatch):
     }
     visit_summary_worker.run_once(profile)
     assert captured == {"parallel_limit": 5, "stale_minutes": 10, "max_age_hours": 24}
+
+
+# ---- integration: a stale visit summary is invalidated once a previously-failed event succeeds ----
+# A visit whose linked events include one or more permanently-failed ones is still summarized from
+# whatever sightings exist (failed is a terminal state for claim_visit_summary_batch's own purposes
+# -- it doesn't wait forever). If that failed event later gets requeued (e.g. via the admin
+# dashboard's "Requeue failed" button) and succeeds, the visit's already-computed summary is now
+# stale (built from an incomplete set) -- db.complete_sighting resets summary_status back to 'new'
+# so visit_summary_worker recomputes it from the fuller set, overriding the stale result.
+
+@pytest.fixture
+def conn_ok():
+    try:
+        db.get_conn()
+    except Exception as exc:
+        pytest.skip(f"Postgres not reachable for integration test: {exc}")
+
+
+def _insert_raw_event(det_id, ai_status, objects="car"):
+    rows = db._execute(
+        """
+        INSERT INTO yard_stats.raw_events
+            (camera, zone, objects, start_ts, end_ts, det_id, has_clip, has_snapshot,
+             crop_status, ai_status)
+        VALUES ('pytest-cam', 'pytest-zone', %s, now(), now(), %s, true, true, 'done', %s)
+        RETURNING id
+        """,
+        (objects, det_id, ai_status), fetch=True,
+    )
+    return rows[0]["id"]
+
+
+def _cleanup_visit(*raw_event_ids, visit_id):
+    db._execute("DELETE FROM yard_stats.sightings WHERE raw_event_id = ANY(%s)", (list(raw_event_ids),))
+    db._execute("DELETE FROM yard_stats.visit_summaries WHERE visit_id = %s", (visit_id,))
+    db._execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", (list(raw_event_ids),))
+    db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
+
+
+def test_complete_sighting_resets_stale_visit_summary_after_a_retried_event_succeeds(conn_ok):
+    det_id_done = f"pytest-{uuid.uuid4()}"
+    det_id_failed = f"pytest-{uuid.uuid4()}"
+    raw_id_done = _insert_raw_event(det_id_done, "done")
+    raw_id_failed = _insert_raw_event(det_id_failed, "failed")
+    db.complete_sighting(raw_id_done, "car", "red sedan")
+
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0,
+        "det_ids": [det_id_done, det_id_failed],
+    })
+    try:
+        # The visit already ran its summary once, using only the "done" event's sighting -- the
+        # "failed" one contributed nothing.
+        db.complete_visit_summary(visit_id, "A red sedan visited.")
+        assert db.get_visit(visit_id)["summary_status"] == "done"
+
+        # The previously-failed event gets requeued and this time succeeds.
+        db.complete_sighting(raw_id_failed, "car", "actually a different red sedan, plate ABC123")
+
+        visit = db.get_visit(visit_id)
+        assert visit["summary_status"] == "new"
+        assert visit["summary_attempt_count"] == 0
+        # The stale summary row is left in place as history -- get_visit_summary still returns it
+        # (the newest/only one) until visit_summary_worker recomputes and inserts a fresh one.
+        assert db.get_visit_summary(visit_id)["summary"] == "A red sedan visited."
+    finally:
+        _cleanup_visit(raw_id_done, raw_id_failed, visit_id=visit_id)
+
+
+def test_complete_sighting_does_not_disturb_a_visit_summary_still_in_progress(conn_ok):
+    det_id_done = f"pytest-{uuid.uuid4()}"
+    det_id_failed = f"pytest-{uuid.uuid4()}"
+    raw_id_done = _insert_raw_event(det_id_done, "done")
+    raw_id_failed = _insert_raw_event(det_id_failed, "failed")
+    db.complete_sighting(raw_id_done, "car", "red sedan")
+
+    visit_id = db.record_visit({
+        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
+        "start_time": 1784198451.0, "end_time": 1784198470.0,
+        "det_ids": [det_id_done, det_id_failed],
+    })
+    try:
+        # Visit summary hasn't run yet (still 'new', the freshly-inserted default) -- completing an
+        # unrelated event's sighting must not touch it, only a *stale* (done/failed/skipped)
+        # summary should ever be reset.
+        assert db.get_visit(visit_id)["summary_status"] == "new"
+
+        db.complete_sighting(raw_id_failed, "car", "actually visible after all")
+
+        visit = db.get_visit(visit_id)
+        assert visit["summary_status"] == "new"
+        assert visit["summary_attempt_count"] == 0
+    finally:
+        _cleanup_visit(raw_id_done, raw_id_failed, visit_id=visit_id)

@@ -428,6 +428,13 @@ A visit whose linked events produced no real sighting text at all (e.g. every on
 `skipped`/`failed`) is marked `summary_status='skipped'` — terminal, not retried forever, since
 there's nothing to summarize.
 
+A `failed` event doesn't hold a visit's summary hostage — it counts as "settled" the same as
+`done`/`skipped`, so a visit with some permanently-failed events still gets summarized from
+whatever sightings the others produced. If a failed event is later requeued (the admin dashboard's
+"Requeue failed" button) and succeeds, the visit's already-computed summary is automatically
+invalidated and recomputed from the fuller set on the stage's next poll — overriding the stale
+result. Nothing to configure for this; it's automatic.
+
 ## Hosted VLM providers (OpenAI / Claude)
 
 The internal AI stage defaults to calling a **locally-hosted** model through `LLAMA_PROXY_BASE_URL`

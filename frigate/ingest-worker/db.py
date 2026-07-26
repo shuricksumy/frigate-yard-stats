@@ -2039,6 +2039,25 @@ def complete_sighting(
                 "UPDATE yard_stats.raw_events SET ai_status = 'done', ai_status_changed_at = now() WHERE id = %s",
                 (raw_event_id,),
             )
+            # If this event belongs to a visit whose summary already ran (or was skipped/failed)
+            # using an incomplete set of sightings -- e.g. this event previously failed, then got
+            # requeued (see /admin/queue/requeue-failed) and only now succeeded -- reset that
+            # visit's summary_status back to 'new' so visit_summary_worker recomputes it from the
+            # now-fuller set of sightings, overriding the stale result. complete_visit_summary's
+            # plain INSERT (not upsert) means the previous summary row still exists as history --
+            # get_visit_summary's ORDER BY id DESC LIMIT 1 always surfaces the newest one. Only
+            # resets a visit whose summary is itself in a terminal state (done/failed/skipped) --
+            # never interrupts one that's still new/retry/processing, which is already going to
+            # (re)compute against whatever's linked once it's next claimed.
+            cur.execute(
+                """
+                UPDATE yard_stats.visits
+                SET summary_status = 'new', summary_status_changed_at = now(), summary_attempt_count = 0
+                WHERE id = (SELECT visit_id FROM yard_stats.raw_events WHERE id = %s)
+                  AND summary_status IN ('done', 'failed', 'skipped')
+                """,
+                (raw_event_id,),
+            )
         conn.commit()
         return sighting_id
     except Exception:

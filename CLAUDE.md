@@ -668,6 +668,24 @@ real sighting text at all (e.g. every one ended up `skipped`/`failed` with no ac
 row) is marked `summary_status='skipped'` immediately -- terminal, same "nothing to do here, ever"
 treatment a `has_snapshot=false` row already gets at ingest time -- rather than retried forever.
 
+**A visit is summarized from whatever's available, not held hostage by a permanently-failed
+event** -- `failed` counts as "settled" exactly like `done`/`skipped` for
+`claim_visit_summary_batch`'s own purposes, so a visit with e.g. 3 done events and 1 permanently
+failed one still gets summarized (from the 3 real sightings) rather than waiting forever on the
+one that will never produce a sighting. **If that failed event is later requeued (`/admin/queue/
+requeue-failed`) and succeeds**, the visit's already-computed summary is now stale -- built from an
+incomplete set. `db.complete_sighting` handles this: after marking the event's own `ai_status=
+'done'`, in the same transaction, it resets the linked visit's `summary_status` back to `'new'`
+(and `summary_attempt_count` to `0`) *whenever that visit's summary is currently in a terminal
+state* (`done`/`failed`/`skipped`) -- never while it's still `new`/`retry`/`processing`, which is
+already going to (re)compute against whatever's linked once it's next claimed regardless. This
+makes the visit summary self-healing across a retry: `visit_summary_worker` picks it back up on
+its next poll and recomputes from the now-fuller set (the previously-done sightings plus the
+newly-succeeded one), **overriding** the stale result. `complete_visit_summary` does a plain
+`INSERT`, never an upsert, so the stale row isn't deleted -- it just stops being the newest one
+`get_visit_summary`'s `ORDER BY id DESC LIMIT 1` returns, kept around as history the same way an
+old, superseded value would be anywhere else in this project.
+
 **Not per-object-type, deliberately** -- `profiles.yaml`'s `visit_summary:` block is a new top-level
 section, sibling to `defaults:`/`object_types:`, not nested under either: a visit isn't tied to one
 type, so there's exactly one shared `prompt`/`provider`/`model`/`chat_path` for this stage, not one
