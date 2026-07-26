@@ -60,30 +60,16 @@ class VisitSummary(BaseModel):
     has_video: bool
 
 
-class AlertSighting(BaseModel):
-    # The visit's own alert-stage (composite grid) analysis -- same universal shape as Sighting,
-    # just keyed by visit_id instead of raw_event_id.
-    id: int
-    visit_id: int
-    object_label: str | None
-    description: str | None
-
-
 class VisitSightings(BaseModel):
     # Every sighting linked to this visit, not just the representative event's -- claim_ai_batch's
     # only_visit_representative partitions by (visit_id, objects), so a visit can have more than
     # one analyzed event: one representative per distinct object type (a car and a person in the
     # same visit each get their own sighting), not just one per visit. One universal list now --
-    # there's no vehicles/persons split anywhere in this model.
+    # there's no vehicles/persons split anywhere in this model. (This used to also carry an
+    # alert_sighting/alert_image_count pair from the now-removed alert AI stage -- a visit's alert
+    # is its video plus these individually-analyzed connected events, not a second gathered-image
+    # VLM call.)
     sightings: list[Sighting]
-    # The visit's own alert-stage analysis (AI_ALERTS_ENABLED), independent of sightings above --
-    # null until that stage has produced one (feature off, or not finished yet for this visit).
-    # The web UI prefers this when present, falling back to sightings otherwise.
-    alert_sighting: AlertSighting | None = None
-    # How many of the alert stage's gathered high-res crops were persisted to disk
-    # (STORE_ALERT_IMAGES) -- 0 if that option was off or none were stored. The web UI's lightbox
-    # gallery builds GET /media/alert-image/{visit_id}/{index} URLs for 0..alert_image_count-1.
-    alert_image_count: int = 0
 
 
 class CameraCount(BaseModel):

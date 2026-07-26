@@ -151,6 +151,22 @@ def _cleanup_visit(visit_id):
     db._execute("DELETE FROM yard_stats.visits WHERE id = %s", (visit_id,))
 
 
+def _complete_visit_sighting(visit_id, object_label, description, embedding=None):
+    # visit_sightings/visits.alert_ai_status are deprecated (kept in schema, unwritten by any code
+    # path now that the alert AI stage that used to populate them via db.complete_visit_sighting
+    # was removed) -- semantic_search_combined's "visits" branch still reads both, unchanged, so
+    # this local test helper inserts directly rather than depending on the removed convenience
+    # function.
+    db._execute(
+        "INSERT INTO yard_stats.visit_sightings (visit_id, object_label, description, embedding) "
+        "VALUES (%s, %s, %s, %s::vector)",
+        (visit_id, object_label, description, db._vector_literal(embedding)),
+    )
+    db._execute(
+        "UPDATE yard_stats.visits SET alert_ai_status = 'done' WHERE id = %s", (visit_id,),
+    )
+
+
 # ---- semantic_search_combined (web UI Search tab's own combined events+visits lookup) ----
 
 def test_semantic_search_combined_events_only_matches_semantic_search_sightings(conn_ok):
@@ -175,7 +191,7 @@ def test_semantic_search_combined_visits_only(conn_ok):
     camera = f"pytest-combo-{uuid.uuid4()}"
     visit_id = _insert_visit(camera=camera)
     try:
-        db.complete_visit_sighting(visit_id, "car", "silver suv pulling into the driveway", embedding=_vec(1.0))
+        _complete_visit_sighting(visit_id, "car", "silver suv pulling into the driveway", embedding=_vec(1.0))
         results = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=10, source="visits")
         assert all(r["kind"] == "visit" for r in results)
         assert visit_id in {r["id"] for r in results}
@@ -196,7 +212,7 @@ def test_semantic_search_combined_default_source_ranks_both_together(conn_ok):
     visit_id = _insert_visit(camera=camera)
     try:
         db.complete_sighting(event_id, "car", "red sedan", embedding=_vec(1.0))
-        db.complete_visit_sighting(visit_id, "car", "red sedan pulling in", embedding=_vec(1.0))
+        _complete_visit_sighting(visit_id, "car", "red sedan pulling in", embedding=_vec(1.0))
         results = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=50)
         kinds_and_ids = {(r["kind"], r["id"]) for r in results}
         assert ("event", event_id) in kinds_and_ids
@@ -212,7 +228,7 @@ def test_semantic_search_combined_orders_by_distance_across_both_tables(conn_ok)
     far_visit_id = _insert_visit(camera=camera)
     try:
         db.complete_sighting(close_event_id, "car", "red sedan", embedding=_vec(1.0))
-        db.complete_visit_sighting(far_visit_id, "car", "blue hatchback", embedding=_vec(-1.0))
+        _complete_visit_sighting(far_visit_id, "car", "blue hatchback", embedding=_vec(-1.0))
         results = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=50)
         ids_in_order = [(r["kind"], r["id"]) for r in results]
         assert ids_in_order.index(("event", close_event_id)) < ids_in_order.index(("visit", far_visit_id))
@@ -231,8 +247,8 @@ def test_semantic_search_combined_camera_filter(conn_ok):
     try:
         db.complete_sighting(event_a, "car", "red sedan", embedding=_vec(1.0))
         db.complete_sighting(event_b, "car", "red sedan", embedding=_vec(1.0))
-        db.complete_visit_sighting(visit_a, "car", "red sedan", embedding=_vec(1.0))
-        db.complete_visit_sighting(visit_b, "car", "red sedan", embedding=_vec(1.0))
+        _complete_visit_sighting(visit_a, "car", "red sedan", embedding=_vec(1.0))
+        _complete_visit_sighting(visit_b, "car", "red sedan", embedding=_vec(1.0))
         results = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=50, camera=camera_a)
         kinds_and_ids = {(r["kind"], r["id"]) for r in results}
         assert ("event", event_a) in kinds_and_ids
@@ -277,7 +293,7 @@ def test_semantic_search_combined_excludes_rows_without_embedding(conn_ok):
     visit_id = _insert_visit(camera=camera)
     try:
         db.complete_sighting(event_id, "car", "no embedding here")
-        db.complete_visit_sighting(visit_id, "car", "no embedding here either")
+        _complete_visit_sighting(visit_id, "car", "no embedding here either")
         results = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=50)
         kinds_and_ids = {(r["kind"], r["id"]) for r in results}
         assert ("event", event_id) not in kinds_and_ids
@@ -300,7 +316,7 @@ def test_semantic_search_combined_max_distance_excludes_weak_matches(conn_ok):
     far_visit_id = _insert_visit(camera=camera)
     try:
         db.complete_sighting(close_event_id, "car", "red sedan", embedding=_vec(1.0))
-        db.complete_visit_sighting(far_visit_id, "car", "unrelated", embedding=_orthogonal_vec(1.0))
+        _complete_visit_sighting(far_visit_id, "car", "unrelated", embedding=_orthogonal_vec(1.0))
         # No cutoff -- both come back, same as today's behavior.
         results = db.semantic_search_combined(_vec(1.0), object_types=["car"], limit=50)
         kinds_and_ids = {(r["kind"], r["id"]) for r in results}

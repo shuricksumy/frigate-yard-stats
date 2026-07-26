@@ -47,10 +47,10 @@ n8n_projects -d home_automation`) when the API-level view isn't enough.
   a full event lifecycle for an object it never actually persisted a snapshot for; there's nothing
   to crop for these no matter how long you wait.
 - If crops look wrong for just *one* object type (full frame instead of cropped, or vice versa;
-  wrong offset/framing), or wrong across the board, check `profiles.yaml` — `crop_disabled`/
-  `crop_frame_offset_pct`/`crop_padding_pct`/`frigate_snapshot_enabled` are configured entirely
-  there (a type's own `object_types.<label>` entry, or a profile-wide `defaults:` section), not in
-  `.env` at all, so there's nothing to check on the `.env` side for these four.
+  wrong offset/framing; wrong resolution), or wrong across the board, check `profiles.yaml` —
+  `crop_disabled`/`crop_frame_offset_pct`/`crop_padding_pct`/`ai_image_max_dimension` are configured
+  entirely there (a type's own `object_types.<label>` entry, or a profile-wide `defaults:` section),
+  not in `.env` at all, so there's nothing to check on the `.env` side for these four.
 
 ## Events are cropped but never analyzed (`ai_status` stuck on `new`)
 
@@ -63,11 +63,11 @@ This stage is owned by n8n, not `ingest-worker` — see [`n8n.md`](n8n.md):
   `max_age_hours` query param is excluding a backlog that's older than expected.
 - If that node succeeds but a later VLM call node fails, the issue is your VLM endpoint
   (`REPLACE_WITH_VLM_HOST`/`PORT`), not this project.
-- If you're using the internal AI stage instead (`ai_events_stage_enabled`/`ai_alerts_enabled`,
-  both configured in `profiles.yaml`, not `.env`) and one object type never gets analyzed while
-  others do, check that type's `profiles.yaml` entry (and any profile-wide `defaults:` section) for
-  the actual resolved value — or that it has an entry in `profiles.yaml` at all; a label with no
-  entry is never claimed by either stage, by design.
+- If you're using the internal AI stage instead (`ai_events_stage_enabled`, configured in
+  `profiles.yaml`, not `.env`) and one object type never gets analyzed while others do, check that
+  type's `profiles.yaml` entry (and any profile-wide `defaults:` section) for the actual resolved
+  value — or that it has an entry in `profiles.yaml` at all; a label with no entry is never claimed
+  by this stage, by design.
 
 ## Video never gets stored
 
@@ -86,20 +86,21 @@ This stage is owned by n8n, not `ingest-worker` — see [`n8n.md`](n8n.md):
   `defaults:`, not `.env` — so a backlogged row gives up sooner instead of burning attempts on a
   clip that's already gone) are the two real levers here.
 
-## Alert-stage analysis keeps failing (`alert_ai_status = 'failed'`)
+## Event images never get stored (`store_event_images` on, but `raw_events.image_path` stays null)
 
-The alert stage (`AI_ALERTS_ENABLED`) gathers its high-res images via the same durable,
-event-id-scoped Frigate clip endpoint (`/api/events/{det_id}/clip.mp4`) the events stage's own
-crop uses — not the continuous-recording start/end endpoint, so it's not sensitive to
-`record.continuous.days` the way the old (removed) visit-preview grid feature was. A visit failing
-here consistently usually means every one of its linked events' own clips has already rolled off
-Frigate's `alerts`/`detections` retention window by the time the alert stage got to it — check
-`ALERT_AI_INITIAL_WAIT_SECONDS`/queue backlog (`AI_STAGE_PARALLEL_LIMIT`/`AI_STAGE_STALE_MINUTES`)
-first, same as any other stuck-in-`retry` diagnosis. If `store_alert_images` is on and the visit's
-`alert_ai_status` reaches `done` but no images show up in the web UI/report, check that
-`ALERT_IMAGES_STORAGE_HOST_PATH` is actually bind-mounted and writable (same check as the video
-paths above) — a disk-write failure there is logged but swallowed, non-fatal to the analysis
-itself, so a full/misconfigured mount fails silently from the analysis's own point of view.
+This project used to have a separate "alert stage" that gathered and could optionally store its
+own high-res crops per visit — that stage has since been removed entirely, along with its
+`STORE_ALERT_IMAGES` option. The events stage's own full-resolution crop (`crop.crop_event`, always
+built regardless of this setting) is what `store_event_images` now persists. If it's on for an
+object type but `raw_events.image_path` stays null for that type's events:
+
+- Check that `EVENT_IMAGES_STORAGE_HOST_PATH` is actually bind-mounted and writable in
+  `docker-compose.yml` (same check as the video paths above) — a disk-write failure here is logged
+  but swallowed, non-fatal to the crop stage itself, so a full/misconfigured mount fails silently
+  from the pipeline's own point of view; check `ingest-worker`'s logs for a "Failed to persist
+  event image to disk" warning.
+- Confirm `store_event_images` actually resolves to `true` for that object type (a type's own
+  entry, or a profile-wide `defaults:` section) — same resolution mechanism as `store_video`.
 
 ## Telegram messages never arrive
 

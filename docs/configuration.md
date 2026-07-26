@@ -3,9 +3,8 @@
 Most settings below live in `frigate/.env` (copied from `frigate/.env.example`) and are read by
 `ingest-worker` on container start — see [`docker.md`](docker.md) if you haven't set that up yet.
 A specific subset — anything you'd realistically want different per Frigate object type (crop
-framing, video storage, visit previews, Telegram modes, the internal AI stages) — instead lives
-entirely in `frigate/profiles.yaml`; see "Per-object-type overrides" below for the full list and
-why. This page groups everything by *feature* and explains what each setting actually does in
+framing, video storage, Telegram modes, the internal AI stage) — instead lives entirely in
+`frigate/profiles.yaml`; see "Per-object-type overrides" below for the full list and why. This page groups everything by *feature* and explains what each setting actually does in
 plain language; `.env.example`/`profiles.yaml` themselves have the exact names and defaults.
 
 ## Suggested rollout order
@@ -18,16 +17,16 @@ once — bring it up in stages so if something looks wrong, you know which piece
    `http://<host>:8080/ui` or via `/events` in Swagger.
 2. **Turn on video storage** (`store_video` in `profiles.yaml`) once step 1 looks right, if you
    want stored clips alongside the crops.
-3. **Turn on the alerts/visits flow** (`store_video_alerts`, `ai_alerts_enabled`, both in
-   `profiles.yaml`) once you're comfortable with the events flow — these group multiple detections
-   into one real-world "visit" and are a separate, independently-toggleable layer on top.
+3. **Turn on the visits flow** (`store_video_alerts` in `profiles.yaml`) once you're comfortable
+   with the events flow — this groups multiple detections into one real-world "visit" (its own
+   stored video) and is a separate, independently-toggleable layer on top.
 4. **Turn on Telegram** whenever you want notifications — independent of everything else.
-5. **Semantic search and the internal AI stages are both separate, later opt-ins** — neither is
-   needed to get the core pipeline running. The AI stage itself (`ai_events_stage_enabled`,
-   `ai_alerts_enabled`, both in `profiles.yaml`) is what actually analyzes events with a VLM and
-   writes `sightings` rows — turn it on once you're comfortable with the events/visits flow above.
-   Only turn on pgvector embeddings once the AI stage is already writing real sightings, since
-   there's nothing to embed until then.
+5. **Semantic search and the internal AI stage are both separate, later opt-ins** — neither is
+   needed to get the core pipeline running. The AI stage itself (`ai_events_stage_enabled`, in
+   `profiles.yaml`) is what actually analyzes events with a VLM and writes `sightings` rows — turn
+   it on once you're comfortable with the events/visits flow above. Only turn on pgvector
+   embeddings once the AI stage is already writing real sightings, since there's nothing to embed
+   until then.
 
 ## Required settings
 
@@ -54,9 +53,6 @@ instead — see "Per-object-type overrides" below for the full mechanism.
 - `RECORD_WIDTH` / `RECORD_HEIGHT` — your cameras' actual full-resolution record-stream size (see
   [`frigate.md`](frigate.md)'s "detect vs record" section) — needed to correctly scale Frigate's
   normalized bounding-box coordinates.
-- `max_crop_dimension` (default `1280`, a plain technical knob in `profiles.yaml`'s `defaults:`,
-  not a per-type setting or an env var) — the cropped JPEG's long side is capped here. VLMs
-  downsample beyond this internally anyway, so a bigger value only adds load, not analysis quality.
 - `crop_padding_pct` (default `0.2`, in `profiles.yaml`) — extra margin added around Frigate's own
   detected region, so the crop isn't razor-tight around the object.
 - `crop_frame_offset_pct` (default `0.5`, in `profiles.yaml`) — *where* in the event's timespan to
@@ -66,34 +62,24 @@ instead — see "Per-object-type overrides" below for the full mechanism.
   headers, not in EXIF — the only place it's visible at all is the camera's own burned-in
   on-screen clock, readable by eye but not extractable programmatically), so this is a starting
   point to tune against your own footage if `0.5` consistently looks off, not a value that can be
-  computed or synced to Frigate's exact choice. This also drives the alert stage's own per-event
-  high-res crops (see "Internal AI stages" below) — set `alert_crop_frame_offset_pct` instead if
-  you want that stage's timing to differ from the events stage's own value for the same type.
+  computed or synced to Frigate's exact choice.
 - `crop_disabled` (default `false`, in `profiles.yaml`) — skips cropping entirely; the full
-  original camera frame (still scaled to `max_crop_dimension`) is used instead of a region around
-  the object. This is a real trade-off, not a strict improvement: a full wide frame gives more
-  context but makes small detail (plates, notable features) harder for the VLM to read. The same
-  image is what's displayed in the web UI *and* sent to the VLM — there's no separate "wide for
-  humans, cropped for the model" mode. Only applies for events when `frigate_snapshot_enabled`
-  below is `false`.
-- `frigate_snapshot_enabled` (default **`true`**, in `profiles.yaml`) — for **events only**, uses
-  Frigate's own already-rendered event snapshot instead of seeking+cropping a frame from the
-  record-stream clip yourself. Frigate picks this frame by its own best-detection-score judgment,
-  so in practice it beats the fixed-offset guess `crop_frame_offset_pct` makes often enough to be
-  the default — accepted trade-off: Frigate's snapshot is from the lower-res detect stream
-  (typically much smaller than your record stream) with a burned-in bounding-box/label/timestamp
-  overlay this Frigate version's API gives no way to turn off (confirmed directly —
-  `bbox=0`/`timestamp=0`/`h=` query params on the snapshot endpoint have no effect at all). Set to
-  `false` to fall back to this project's original seek-based approach if that trade-off doesn't
-  work for your footage — `crop_disabled`/`crop_frame_offset_pct`/`crop_padding_pct` only take
-  effect once you do. The alert stage's own high-res per-event crops (see "Internal AI stages"
-  below) always use the seek-based approach regardless of this setting, since a durable, high-res
-  frame is what that stage needs — `FRIGATE_SNAPSHOT_ENABLED` only affects the events stage's own
-  single-frame crop.
+  original camera frame is used instead of a region around the object (still capped to
+  `ai_image_max_dimension` for the copy sent to the VLM — see below). This is a real trade-off, not
+  a strict improvement: a full wide frame gives more context but makes small detail (plates,
+  notable features) harder for the VLM to read. The same image is what's displayed in the web UI
+  *and* sent to the VLM — there's no separate "wide for humans, cropped for the model" mode.
+- `ai_image_max_dimension` (default `1280`, in `profiles.yaml`) — the long side of the downscaled
+  copy actually sent to the VLM and stored in Postgres (`raw_events.crop_image_base64`). VLMs
+  downsample beyond this internally anyway, so a bigger value only adds load, not analysis
+  quality — a plate-heavy vehicle prompt may still want more resolution than a person/dog prompt,
+  which is why this is per-object-type rather than one shared global cap. The full-resolution crop
+  written to disk when `store_event_images` is on (see "Event-analysis image storage" below) is
+  never capped by this at all.
 
 All four can be set globally via `profiles.yaml`'s `defaults:` section, or per object type, e.g. to
-have `car` use a seek-based crop with extra padding for plate legibility while everything else
-keeps using Frigate's own snapshot. See "Per-object-type overrides" below for how the tiers work.
+have `car` use extra padding and more resolution for plate legibility while everything else stays
+at the defaults. See "Per-object-type overrides" below for how the tiers work.
 
 ## Camera allow-list
 
@@ -160,29 +146,30 @@ each camera's own top-level directory to report real on-disk video bytes — thi
 because of the layout above, so a pre-migration file (still under a bare year directory) won't be
 attributed to a real camera name there; it'll show up bucketed under that year instead.
 
-## Alert-analysis image storage
+## Event-analysis image storage
 
-`store_alert_images` (default `false`, in `profiles.yaml` — same per-object-type override
+`store_event_images` (default `false`, in `profiles.yaml` — same per-object-type override
 mechanism as `store_video`/`store_video_alerts` above, see "Per-object-type overrides" below)
-persists the alert stage's own gathered high-res crops (see "Internal AI stages" below) to disk
-under `ALERT_IMAGES_STORAGE_HOST_PATH` (default `./alert-images` on the host) — same "only the
-path lives in Postgres" shape video storage already uses. Off by default: these images stay purely
-ephemeral (built, sent to the VLM, discarded) unless you opt in. Unlike `store_video`/
+persists the events stage's own full-resolution crop (a downscaled copy of the same crop,
+`ai_image_max_dimension`-capped, is always kept in Postgres regardless — see "Crop tuning" above)
+to disk under `EVENT_IMAGES_STORAGE_HOST_PATH` (default `./event-images` on the host) — same "only
+the path lives in Postgres" shape video storage already uses. Off by default: the full-resolution
+copy is discarded after producing the AI-facing downscale unless you opt in. Unlike `store_video`/
 `store_video_alerts`, turning this on doesn't start a separate poll thread — it's a synchronous
-step inside the existing alert-stage thread, so there's no extra queue/capacity tuning to configure.
+step inside the existing crop-stage thread, so there's no extra queue/capacity tuning to configure.
 
-Files land under `{ALERT_IMAGES_STORAGE_PATH}/{camera}/{YYYY}/{MM}/{DD}/visit-{object_type}-
-{visit_id}-{index}-{event_id}.jpg` — the same camera-first layout video clips use, so the admin
+Files land under `{EVENT_IMAGES_STORAGE_PATH}/{camera}/{YYYY}/{MM}/{DD}/{object_type}-{event_id}-
+{start_ts_epoch}-{start_ts_iso}.jpg` — the same camera-first layout video clips use, so the admin
 dashboard's disk-usage/by-camera/by-object-type breakdowns (see
-[`web-ui.md`](web-ui.md#admin-dashboard)) apply here with no extra code. A retried analysis
-attempt overwrites the same files (deterministic names), so a backlog of retries doesn't pile up
-duplicate images on disk.
+[`web-ui.md`](web-ui.md#admin-dashboard)) apply here with no extra code. A retried crop attempt
+overwrites the same file (deterministic name), so a backlog of retries doesn't pile up duplicates
+on disk.
 
-Once stored, these images are reachable three ways: the web UI's Visit lightbox shows a small
-thumbnail-strip gallery of exactly what the alert stage analyzed; `/reports/generate`'s optional
-`include_alert_images` param embeds the same series into the alerts report; and
-`/retention/purge`'s `delete_alert_images` flag (default on) clears them independently of video/
-snapshots. See [`web-ui.md`](web-ui.md) and "Retention" below for each.
+Once stored, `GET /events/{id}/image` (and its thumbnail counterpart) prefer this full-resolution
+file over the smaller Postgres-stored copy whenever it exists, falling back to the Postgres copy
+and then a frame pulled from stored video — see [`web-ui.md`](web-ui.md). `/retention/purge`'s
+`delete_event_images` flag (default on) clears the file and column independently of video/
+snapshots — see "Retention" below.
 
 ## Telegram notifications
 
@@ -231,8 +218,8 @@ a cutoff of your own choosing right now rather than waiting for or reconfiguring
 sweep — defaults to a dry run (just shows you counts) until you pass `confirm=true`. `only_media`
 (default `true`) keeps every row and its AI analysis text/plate reads searchable forever; what it
 actually clears is three independent flags, not one all-or-nothing "media" switch: `delete_video`
-(default `true`), `delete_snapshots` (default `false`), `delete_alert_images` (default `true`,
-`STORE_ALERT_IMAGES`'s own gathered high-res crops) — see `web-ui.md` for what each one maps to.
+(default `true`), `delete_snapshots` (default `false`), `delete_event_images` (default `true`,
+`STORE_EVENT_IMAGES`'s own full-resolution crop) — see `web-ui.md` for what each one maps to.
 Set `only_media=false` for the original full-row delete instead (rebuilds the semantic search
 index afterward); the three `delete_*` params are ignored entirely in that mode, since a full row
 delete already covers all of their columns.
@@ -260,13 +247,10 @@ A number of settings live entirely in `frigate/profiles.yaml`, not `.env` at all
 currently being processed:
 
 - `telegram_events_mode` / `telegram_alerts_mode`
-- `ai_events_stage_enabled` / `ai_alerts_enabled`
-- `crop_disabled` / `crop_frame_offset_pct` / `crop_padding_pct` / `frigate_snapshot_enabled`
-- `store_video` / `store_video_alerts` / `store_alert_images`
-- `provider` / `model` / `chat_path` (event-stage VLM routing) and `alert_provider` /
-  `alert_model` / `alert_chat_path` (alert-stage override — see "Hosted VLM providers" below)
-- `alert_crop_frame_offset_pct` — alert-stage-only override of `crop_frame_offset_pct` (see
-  "Crop tuning" below), falling back to the plain `crop_frame_offset_pct` value when unset
+- `ai_events_stage_enabled`
+- `crop_disabled` / `crop_frame_offset_pct` / `crop_padding_pct` / `ai_image_max_dimension`
+- `store_video` / `store_video_alerts` / `store_event_images`
+- `provider` / `model` / `chat_path` (VLM routing — see "Hosted VLM providers" below)
 
 Two tiers, checked in this order:
 
@@ -281,15 +265,13 @@ retention schedule, image-size caps. These have no per-object-type meaning at al
 startup rather than per-call:
 
 - `parallel_limit` / `stale_minutes` / `max_attempts` / `crop_initial_wait_seconds` /
-  `max_crop_dimension` / `thumbnail_max_dimension` / `poll_interval_seconds` (crop-stage queue tuning)
+  `thumbnail_max_dimension` / `poll_interval_seconds` (crop-stage queue tuning)
 - `retention_months` / `retention_check_interval_seconds`
 - `video_parallel_limit` / `video_initial_wait_seconds` / `video_min_valid_bytes` /
   `video_max_attempts` / `video_retry_wait_seconds` / `video_max_age_hours`
 - `ai_stage_parallel_limit` / `ai_stage_stale_minutes` / `ai_stage_max_attempts` /
   `ai_stage_max_age_hours` / `ai_stage_poll_interval_seconds`
 - `ai_stage_default_timeout_seconds` / `ai_stage_embed_timeout_seconds`
-- `alert_ai_initial_wait_seconds` (default `5`) / `alert_ai_max_images` (default `4`) — alert-stage
-  only, see "Internal AI stages" below.
 
 For *either* category, if a key is set nowhere, `ingest-worker` falls back to a plain hardcoded
 default in `config.py` (matching this project's original behavior) — there's no third `.env`-backed
@@ -358,31 +340,25 @@ param the UI itself doesn't expose). Same `LLAMA_PROXY_BASE_URL`/`LLAMA_PROXY_EM
 requirement as the backfill endpoint above — a 502 response means that backend is unreachable or
 misconfigured, surfaced in the UI as an error banner rather than a silent empty result.
 
-## Internal AI stages
+## Internal AI stage
 
-Two independent stages, both configured in `profiles.yaml` (not `.env` — see "Per-object-type
-overrides" below) and off by default unless enabled there — nothing analyzes events with a VLM at
-all until you turn at least one of these on (there's no n8n workflow shipped for this anymore, see
-[`n8n.md`](n8n.md)):
+Configured in `profiles.yaml` (not `.env` — see "Per-object-type overrides" below) and off by
+default unless enabled there — nothing analyzes events with a VLM at all until you turn this on
+(there's no n8n workflow shipped for this anymore, see [`n8n.md`](n8n.md)). A second "alerts"
+stage used to exist alongside this one (analyzing a visit's own gathered series of high-res crops)
+but has since been removed entirely — a visit's own connected events, each individually analyzed
+by this one stage, cover the same ground; see the web UI's Visit lightbox in
+[`web-ui.md`](web-ui.md).
 
-- **`ai_events_stage_enabled`** — analyzes each event's own single-frame crop with
-  `profiles.yaml`'s `event_prompt`. If you ever build your own n8n workflow against the same
-  `/ai-queue/claim` endpoint, don't run it alongside this at once against the same queue (safe
-  either way — `FOR UPDATE SKIP LOCKED` prevents a double-claim — just wasteful/confusing).
-- **`ai_alerts_enabled`** — analyzes a visit with `profiles.yaml`'s `alert_prompt`, storing results
-  separately in `visit_sightings`. Rather than one low-res frame, this stage gathers up to
-  `alert_ai_max_images` (default `4`) genuinely high-resolution crops — one per distinct object
-  type the visit's linked events cover, then temporally-spread re-tracks to fill any remaining
-  slots — built fresh from the record stream at analysis time and discarded right after by
-  default, never stored (unless `store_alert_images` opts in — see "Alert-analysis image storage"
-  above). No readiness gate to wait on: a visit is claimable as soon as it exists. Can run
-  alongside or instead of `ai_events_stage_enabled` — the two are fully independent queues.
+- **`ai_events_stage_enabled`** — analyzes each event's own crop with `profiles.yaml`'s
+  `event_prompt`. If you ever build your own n8n workflow against the same `/ai-queue/claim`
+  endpoint, don't run it alongside this at once against the same queue (safe either way — `FOR
+  UPDATE SKIP LOCKED` prevents a double-claim — just wasteful/confusing).
 
-Both can be set globally via `profiles.yaml`'s `defaults:` section, or per object type — e.g. to
-run the events stage for `car`/`person` only while `dog` sits out, or to enable a stage for just
-one type even while everything else stays off. Setting either `true` for at least one type is
-enough to start that stage's poll thread — the thread then only claims the type(s) that resolve to
-enabled, never every mapped type unconditionally. See "Per-object-type overrides" below.
+Can be set globally via `profiles.yaml`'s `defaults:` section, or per object type — e.g. to run the
+stage for `car`/`person` only while `dog` sits out. Setting it `true` for at least one type is
+enough to start the poll thread — the thread then only claims the type(s) that resolve to enabled,
+never every mapped type unconditionally. See "Per-object-type overrides" below.
 
 - Object types + prompts + per-type model slot/timeout live in **`frigate/profiles.yaml`** (repo
   root, alongside `docker-compose.yml`), not env vars — that's genuinely a lot of config to cram
@@ -390,20 +366,17 @@ enabled, never every mapped type unconditionally. See "Per-object-type overrides
   just edit it and restart `ingest-worker` — no rebuild needed. (`AI_STAGE_PROFILE_PATH`, default
   `/app/profiles.yaml`, is the path the bind mount lands on; you'd only touch this env var if you
   wanted to point at a differently-named file instead.) This is a flat map — every Frigate object
-  label (`car`, `truck`, `person`, or any label you add, e.g. `dog`) gets its own entry with two
-  prompts: `event_prompt` (single static frame) and `alert_prompt` (a series of separate high-res
-  photos, framed to also describe what changed across them, not just static attributes). Both
-  prompts are answered as plain free text — there is no JSON schema or per-field response format,
-  so adding a brand-new object type is purely a `profiles.yaml` edit, never a code change. Labels
-  that should share one model/prompt (e.g. `car` and `truck`) can point at the same YAML anchor
-  instead of duplicating the block. A Frigate object label with no entry in this file is simply
-  never analyzed by either stage.
+  label (`car`, `truck`, `person`, or any label you add, e.g. `dog`) gets its own entry with an
+  `event_prompt` (answered as plain free text — there is no JSON schema or per-field response
+  format, so adding a brand-new object type is purely a `profiles.yaml` edit, never a code change).
+  Labels that should share one model/prompt (e.g. `car` and `truck`) can point at the same YAML
+  anchor instead of duplicating the block. A Frigate object label with no entry in this file is
+  simply never analyzed.
 - `ai_stage_parallel_limit`/`ai_stage_stale_minutes`/`ai_stage_max_attempts`/
   `ai_stage_max_age_hours`/`ai_stage_poll_interval_seconds` — same queue-tuning shape as the crop
-  stage above, shared between both stages (each claims from its own separate queue, so this
-  doesn't mean they compete for capacity). Plain technical knobs, `profiles.yaml`'s `defaults:`
-  only (see "Per-object-type overrides" above), not env vars.
-- `LLAMA_PROXY_BASE_URL` (required once either stage is enabled) — your
+  stage above. Plain technical knobs, `profiles.yaml`'s `defaults:` only (see "Per-object-type
+  overrides" above), not env vars.
+- `LLAMA_PROXY_BASE_URL` (required once the stage is enabled) — your
   [`llama_slot_proxy`](https://github.com/shuricksumy/llama-slot-proxy)'s own base URL, called
   directly instead of going through n8n. `LLAMA_PROXY_TOKEN` is optional (blank = no
   `Authorization` header — `llama_slot_proxy` is unauthenticated on the LAN in most setups today).
@@ -425,22 +398,18 @@ enabled, never every mapped type unconditionally. See "Per-object-type overrides
 
 ## Hosted VLM providers (OpenAI / Claude)
 
-Both internal AI stages default to calling a **locally-hosted** model through `LLAMA_PROXY_BASE_URL`
+The internal AI stage defaults to calling a **locally-hosted** model through `LLAMA_PROXY_BASE_URL`
 (e.g. `llama_slot_proxy`) — the "no cloud calls" behavior this project started with. You can
 instead route individual object types to a hosted provider (OpenAI or Anthropic/Claude) by adding
-two keys to that type's `profiles.yaml` entry, alongside (or instead of) `chat_path`:
+a `provider` key (plus `model`, instead of `chat_path`) to that type's `profiles.yaml` entry:
 
 ```yaml
 object_types:
   car:
-    provider: llama_proxy    # event stage stays local -- multi-image not needed for one frame
-    chat_path: /video/v1/chat/completions
-    alert_provider: openai   # alert stage (the multi-image series) routes to a hosted provider
-    alert_model: gpt-4o      # or e.g. claude-opus-4-8 for anthropic
-    # max_tokens: 1024       # anthropic only, optional -- shared across both stages, see below
+    provider: openai         # or "anthropic" -- omit entirely to stay on llama_proxy (the default)
+    model: gpt-4o            # or e.g. claude-opus-4-8 for anthropic
+    # max_tokens: 1024       # anthropic only, optional, see below
     event_prompt: >-
-      ...
-    alert_prompt: >-
       ...
 ```
 
@@ -448,18 +417,6 @@ This is a **per-object-type** choice, exactly like `chat_path` already is — on
 your local model while another routes to a hosted one, in the same file. A type with no `provider`
 key behaves exactly as before (`llama_proxy`, selected via `chat_path`); nothing changes for an
 existing deployment that never sets this.
-
-**The alert stage can route to a different provider than the event stage, for the same type** —
-`alert_provider`/`alert_model`/`alert_chat_path` are optional overrides checked only by
-`alert_ai_worker`, falling back to the plain `provider`/`model`/`chat_path` when omitted. This
-matters specifically because the alert stage sends *several* high-res images in one call (see
-"Internal AI stages" above) while the event stage only ever sends one — `llama_proxy` only ever
-uses the first image handed to it and logs a warning once if given more (multi-image support on a
-self-hosted backend is unverified), so a type wanting genuine multi-image reasoning for its alert
-analysis needs `alert_provider: openai` or `alert_provider: anthropic` specifically — both natively
-support multiple images in one message. A type that never sets any `alert_*` key behaves
-identically for both stages, same "omitting the key preserves old behavior" convention `provider`
-itself established.
 
 | `provider` | Needs in `.env` | Needs in `profiles.yaml` (per type) |
 |---|---|---|
@@ -483,19 +440,17 @@ all. Switching `EMBEDDING_PROVIDER` to `openai` also means setting `EMBEDDING_DI
 `EMBEDDING_DIMENSIONS` above, since a different model's vectors are an incomparable vector space
 regardless of dimension.
 
-**Cost and privacy, briefly:** a hosted provider means that type's cropped images (and, for the
-alerts stage, the whole gathered series of several high-res crops per visit) leave your network on
-every analyzed sighting, billed per request (and per image, for the alert stage) — worth weighing
-against `llama_slot_proxy`'s one-time hardware cost and zero marginal cost per sighting. A common
-middle ground is routing only your highest-value type (e.g. `car`, for plate/make/model accuracy)
-to a hosted provider while everything else stays local.
+**Cost and privacy, briefly:** a hosted provider means that type's cropped images leave your
+network on every analyzed sighting, billed per request — worth weighing against
+`llama_slot_proxy`'s one-time hardware cost and zero marginal cost per sighting. A common middle
+ground is routing only your highest-value type (e.g. `car`, for plate/make/model accuracy) to a
+hosted provider while everything else stays local.
 
 ### Which model should I actually use?
 
 There's no single right answer — it depends on what you're optimizing for. Some starting points,
 based on what each provider is actually good at for this project's kind of task (a single cropped
-photo for the event stage, or several separate high-res photos in one call for the alert stage,
-answered as one or two free-text sentences):
+photo, answered as one or two free-text sentences):
 
 - **Staying local (`llama_proxy`, the default)** — zero marginal cost, zero data leaving your
   network, and genuinely adequate quality for most of this project's prompts (color/body-type/
@@ -510,18 +465,15 @@ answered as one or two free-text sentences):
   body-type/clothing description. Plate-text OCR accuracy varies more than a dedicated OCR model
   would give you — Frigate's own LPR read (`raw_events.sub_label`) is still captured on every row
   regardless of what the VLM says, specifically as a cross-check for exactly this reason.
-- **Claude (`claude-opus-4-8` or `claude-sonnet-5`)** — the more capable option for the *alert*
-  prompt specifically (`alert_prompt`, the visit-level "what changed across this series of photos"
-  task, natively multi-image) — reading fine detail across several separate high-res photos and
-  reasoning about what changed between them is closer to genuine visual reasoning than the
-  single-frame `event_prompt` case, and that's where a stronger model's accuracy shows up most.
-  `claude-sonnet-5` is the cheaper, faster choice if `claude-opus-4-8`'s cost/latency isn't worth it
-  for your volume — both are meaningfully more expensive per request than OpenAI's `gpt-4o` tier or
-  a local model's zero marginal cost.
+- **Claude (`claude-opus-4-8` or `claude-sonnet-5`)** — a genuinely stronger vision model overall,
+  worth considering for a high-value type where accuracy matters more than cost (plate/make/model
+  reads on `car`, say). `claude-sonnet-5` is the cheaper, faster choice if `claude-opus-4-8`'s
+  cost/latency isn't worth it for your volume — both are meaningfully more expensive per request
+  than OpenAI's `gpt-4o` tier or a local model's zero marginal cost.
 
 **A practical split**, if you want to try hosted providers without committing everything to one:
-route `car`/`truck`'s `event_prompt` (single-frame, plate-legibility-sensitive) to whichever local
-or hosted model reads plates best in your own testing, and leave `person`/`dog` on a cheaper/local
+route `car`/`truck`'s `event_prompt` (plate-legibility-sensitive) to whichever local or hosted
+model reads plates best in your own testing, and leave `person`/`dog` on a cheaper/local
 model, since clothing-color/breed description doesn't benefit as much from a stronger model. Since
 this is all per-object-type in `profiles.yaml`, testing a combination costs nothing but editing the
 file and restarting the container — no code change, no redeploy of a different image.

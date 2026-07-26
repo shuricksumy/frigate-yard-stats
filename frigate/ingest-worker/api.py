@@ -89,7 +89,7 @@ def purge_old_records(
     only_media: bool = Query(True, description="Default true: keeps every row and all its text/structured AI analysis (including embeddings) -- only clears the media categories selected below, so old data stays searchable with just the media gone. false: deletes the rows entirely (raw_events, visits, and their dependent sightings) -- today's original full purge -- and rebuilds the vector search index afterward against whatever data remains. When false, the delete_* params below are ignored entirely (a full row delete already covers all of their columns)."),
     delete_video: bool = Query(True, description="only_media=true only: delete stored video clip files off disk and clear video_path (raw_events and visits)."),
     delete_snapshots: bool = Query(False, description="only_media=true only: clear raw_events.crop_image_base64 (the per-event still crop, aka 'Event Snapshots')."),
-    delete_alert_images: bool = Query(True, description="only_media=true only: delete the alert stage's own gathered high-res crop files off disk and clear visits.alert_image_paths (STORE_ALERT_IMAGES). Never touches raw_events/object_label-scoped rows -- this is a visits-only artifact, so (like video/snapshots for visits) it's skipped entirely under an object_label-scoped purge."),
+    delete_event_images: bool = Query(True, description="only_media=true only: delete the events stage's own full-resolution crop files off disk and clear raw_events.image_path (STORE_EVENT_IMAGES). Single-object-type-per-row, so unlike video/snapshots for visits, this applies cleanly under an object_label-scoped purge too."),
     object_label: str | None = Query(None, description="Restrict this purge to a single Frigate object label (e.g. 'car'). Only ever affects raw_events and their sightings -- visits/visit_sightings are never touched when this is set, since a visit can span multiple distinct object types and there's no single-type-safe way to decide the visit row belongs to just one type's purge. Omit for the existing all-types behavior, which does cover visits/visit_sightings same as before this param existed."),
     camera: str | None = Query(None, description="Restrict this purge to a single Frigate camera. Unlike object_label, this DOES apply to visits/visit_sightings too -- visit grouping is per-camera only, so a visit's own `cameras` column is always a single, unambiguous value. Composes with object_label (both can be set at once)."),
 ):
@@ -98,7 +98,7 @@ def purge_old_records(
     than the configured retention window, or (only_media=true, the default) strip old
     media while keeping every row's AI analysis text and plate reads searchable indefinitely.
     only_media mode is itself three independently toggleable categories (delete_video/
-    delete_snapshots/delete_alert_images) rather than one all-or-nothing "media" concept, since
+    delete_snapshots/delete_event_images) rather than one all-or-nothing "media" concept, since
     they have very different storage cost and "still worth keeping" answers. Unlike /retention/run,
     the cutoff here is caller-controlled and the delete has no undo, so this requires X-API-Key and
     defaults to a dry run: call once without confirm=true to see how many rows/files would be
@@ -108,13 +108,13 @@ def purge_old_records(
         counts = db.purge_media_older_than(
             cutoff, execute=confirm, object_label=object_label, camera=camera,
             delete_video=delete_video, delete_snapshots=delete_snapshots,
-            delete_alert_images=delete_alert_images,
+            delete_event_images=delete_event_images,
         )
         return {
             "cutoff": cutoff, "dry_run": not confirm, "only_media": True, "object_label": object_label,
             "camera": camera,
             "delete_video": delete_video, "delete_snapshots": delete_snapshots,
-            "delete_alert_images": delete_alert_images,
+            "delete_event_images": delete_event_images,
             "counts": counts,
         }
     counts = db.purge_older_than(cutoff, execute=confirm, object_label=object_label, camera=camera)
@@ -236,20 +236,10 @@ def get_visit_sightings(visit_id: int):
     together (see its only_visit_representative comment), so a visit spanning e.g. a car and a
     person has one sighting each here, not just whichever was analyzed first. GET /events/{id}
     still only ever returns a single event's own sighting; this is the visit-scoped combined view
-    the web UI's lightbox uses instead. alert_sighting is the visit's own AI_ALERTS_ENABLED
-    analysis (a series of high-res per-event crops, see alert_ai_worker.py), independent of
-    sightings above -- null until that stage has produced one for this visit. alert_image_count is
-    how many of those gathered images were persisted to disk (STORE_ALERT_IMAGES, 0 if that option
-    was off or none were stored) -- the web UI's lightbox uses this to build
-    GET /media/alert-image/{visit_id}/{index} URLs for a gallery, without needing the raw
-    filesystem paths themselves."""
+    the web UI's lightbox uses instead."""
     if db.get_visit(visit_id) is None:
         raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
-    return {
-        "sightings": db.get_sightings_for_visit(visit_id),
-        "alert_sighting": db.get_visit_alert_sighting(visit_id),
-        "alert_image_count": len(db.get_visit_alert_image_paths(visit_id)),
-    }
+    return {"sightings": db.get_sightings_for_visit(visit_id)}
 
 
 @app.get("/events/{event_id}", response_model=schemas.EventDetail, tags=["events"], dependencies=[Depends(require_api_key)])
@@ -268,13 +258,19 @@ def get_event(event_id: int):
 def get_event_thumbnail(event_id: int):
     """A small on-the-fly JPEG (THUMBNAIL_MAX_DIMENSION, reuses report.py's same scale-down
     helper) for the web report's grid view -- keeps GET /events list-sized responses light by
-    never embedding the full crop_image_base64 there. Falls back to a frame pulled from the stored
-    video if there's no crop image but there is a video (belt and suspenders -- in practice a video
-    always implies a crop image already exists). Accepts X-API-Key header or ?api_key= query param
-    since this is loaded directly by an <img> tag."""
+    never embedding the full image there. Prefers the full-resolution file on disk (image_path,
+    STORE_EVENT_IMAGES) if present, then the AI-facing copy in Postgres (crop_image_base64), then a
+    frame pulled from the stored video (belt and suspenders -- in practice a video always implies a
+    crop image already exists). Accepts X-API-Key header or ?api_key= query param since this is
+    loaded directly by an <img> tag."""
     row = db.get_raw_event(event_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"raw_event {event_id} not found")
+    if row.get("image_path") and os.path.isfile(row["image_path"]):
+        with open(row["image_path"], "rb") as f:
+            image_base64 = base64.b64encode(f.read()).decode()
+        thumbnail_base64 = crop.scale_image_base64(image_base64, config.THUMBNAIL_MAX_DIMENSION)
+        return Response(content=base64.b64decode(thumbnail_base64), media_type="image/jpeg")
     if row.get("crop_image_base64"):
         thumbnail_base64 = crop.scale_image_base64(row["crop_image_base64"], config.THUMBNAIL_MAX_DIMENSION)
         return Response(content=base64.b64decode(thumbnail_base64), media_type="image/jpeg")
@@ -285,14 +281,17 @@ def get_event_thumbnail(event_id: int):
 
 @app.get("/events/{event_id}/image", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
 def get_event_image(event_id: int):
-    """Full-size crop as raw JPEG bytes (decodes the stored crop_image_base64) -- used by the web
-    report's lightbox when an event has no video, or when viewing the still image side of an event
-    that has both. Falls back to a frame pulled from the stored video if there's no crop image but
-    there is a video. Accepts X-API-Key header or ?api_key= query param since this is loaded
-    directly by an <img> tag."""
+    """Full-size image as raw JPEG bytes -- used by the web report's lightbox when an event has no
+    video, or when viewing the still image side of an event that has both. Prefers the
+    full-resolution file on disk (image_path, STORE_EVENT_IMAGES) if present, then the AI-facing
+    copy stored in Postgres (crop_image_base64), then a frame pulled from the stored video.
+    Accepts X-API-Key header or ?api_key= query param since this is loaded directly by an <img>
+    tag."""
     row = db.get_raw_event(event_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"raw_event {event_id} not found")
+    if row.get("image_path") and os.path.isfile(row["image_path"]):
+        return FileResponse(row["image_path"], media_type="image/jpeg")
     if row.get("crop_image_base64"):
         return Response(content=base64.b64decode(row["crop_image_base64"]), media_type="image/jpeg")
     if row.get("video_path") and os.path.isfile(row["video_path"]):
@@ -303,17 +302,22 @@ def get_event_image(event_id: int):
 @app.get("/visits/{visit_id}/thumbnail", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
 def get_visit_thumbnail(visit_id: int):
     """A small on-the-fly image for the Visits view grid -- prefers the representative event's own
-    crop (available almost immediately after the event is cropped), falling back to a frame from
-    the visit's own stored video, same belt-and-suspenders reasoning as GET /events/{id}/thumbnail.
-    Accepts X-API-Key header or ?api_key= query param since this is loaded directly by an <img>
-    tag."""
+    full-resolution file on disk (image_path, STORE_EVENT_IMAGES), then its AI-facing copy in
+    Postgres (crop_image_base64), falling back to a frame from the visit's own stored video, same
+    belt-and-suspenders reasoning as GET /events/{id}/thumbnail. Accepts X-API-Key header or
+    ?api_key= query param since this is loaded directly by an <img> tag."""
     visit = db.get_visit(visit_id)
     if visit is None:
         raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
-    representative = db.get_representative_event_for_visit(visit_id)
-    image_base64 = representative.get("crop_image_base64") if representative else None
-    if image_base64:
+    representative = db.get_representative_event_for_visit(visit_id) or {}
+    image_path = representative.get("image_path")
+    if image_path and os.path.isfile(image_path):
+        with open(image_path, "rb") as f:
+            image_base64 = base64.b64encode(f.read()).decode()
         thumbnail_base64 = crop.scale_image_base64(image_base64, config.THUMBNAIL_MAX_DIMENSION)
+        return Response(content=base64.b64decode(thumbnail_base64), media_type="image/jpeg")
+    if representative.get("crop_image_base64"):
+        thumbnail_base64 = crop.scale_image_base64(representative["crop_image_base64"], config.THUMBNAIL_MAX_DIMENSION)
         return Response(content=base64.b64decode(thumbnail_base64), media_type="image/jpeg")
     if visit.get("video_path") and os.path.isfile(visit["video_path"]):
         return Response(content=video.extract_frame_jpeg(visit["video_path"], config.THUMBNAIL_MAX_DIMENSION), media_type="image/jpeg")
@@ -323,36 +327,22 @@ def get_visit_thumbnail(visit_id: int):
 @app.get("/visits/{visit_id}/image", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
 def get_visit_image(visit_id: int):
     """Full-size image as raw JPEG bytes -- same source preference as GET /visits/{id}/thumbnail
-    (representative event's crop, then a frame from the visit's stored video), used by the web
-    report's lightbox when viewing a Visits-view card. Accepts X-API-Key header or ?api_key= query
-    param since this is loaded directly by an <img> tag."""
+    (representative event's full-resolution file, then its AI-facing crop, then a frame from the
+    visit's stored video), used by the web report's lightbox when viewing a Visits-view card.
+    Accepts X-API-Key header or ?api_key= query param since this is loaded directly by an <img>
+    tag."""
     visit = db.get_visit(visit_id)
     if visit is None:
         raise HTTPException(status_code=404, detail=f"visit {visit_id} not found")
-    representative = db.get_representative_event_for_visit(visit_id)
-    image_base64 = representative.get("crop_image_base64") if representative else None
-    if image_base64:
-        return Response(content=base64.b64decode(image_base64), media_type="image/jpeg")
+    representative = db.get_representative_event_for_visit(visit_id) or {}
+    image_path = representative.get("image_path")
+    if image_path and os.path.isfile(image_path):
+        return FileResponse(image_path, media_type="image/jpeg")
+    if representative.get("crop_image_base64"):
+        return Response(content=base64.b64decode(representative["crop_image_base64"]), media_type="image/jpeg")
     if visit.get("video_path") and os.path.isfile(visit["video_path"]):
         return Response(content=video.extract_frame_jpeg(visit["video_path"]), media_type="image/jpeg")
     raise HTTPException(status_code=404, detail=f"No crop image or video for visit {visit_id}")
-
-
-@app.get("/media/alert-image/{visit_id}/{index}", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
-def get_alert_image(visit_id: int, index: int):
-    """One of the alert stage's own gathered high-res crops (STORE_ALERT_IMAGES), stored on disk
-    under ALERT_IMAGES_STORAGE_PATH -- `index` is 0-based, matching the order implied by
-    GET /visits/{id}/sightings' alert_image_count, for the web UI's lightbox gallery. 404s if the
-    visit has none stored, `index` is out of range, or the file itself is missing (e.g. already
-    cleared by a retention purge since the images were gathered). Accepts X-API-Key header or
-    ?api_key= query param since this is loaded directly by an <img> tag."""
-    paths = db.get_visit_alert_image_paths(visit_id)
-    if index < 0 or index >= len(paths):
-        raise HTTPException(status_code=404, detail=f"No alert image at index {index} for visit {visit_id}")
-    path = paths[index]
-    if not os.path.isfile(path):
-        raise HTTPException(status_code=404, detail=f"Alert image file missing for visit {visit_id}")
-    return FileResponse(path, media_type="image/jpeg")
 
 
 @app.get("/media/video/{event_id}", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
@@ -421,14 +411,13 @@ def generate_report(
     source: str = Query("events", pattern="^(events|visits)$", description="'events' (default) includes every sighting independently -- today's exact behavior. 'visits' dedups the same way POST /ai-queue/claim's source=visits does: only the sighting for a visit's earliest-linked raw_event, plus every sighting whose raw_event was never grouped into a visit -- for an alerts-scoped report where one real-world visit shouldn't show up once per det_id."),
     include_image: bool = Query(True, description="False skips the row image entirely, for a caller that wants the smallest possible payload -- the field is never even fetched from Postgres in that mode."),
     object_label: str | None = Query(None, description="Restrict the report to a single Frigate object label (e.g. 'car') -- for a per-type report alongside the default report covering every type. Omit for no filter (today's behavior)."),
-    include_alert_images: bool = Query(False, description="source=visits only (ignored/no-op under source=events, where there's no visit-level image series). When true, embeds a thumbnail strip of the alert stage's own gathered high-res crops (STORE_ALERT_IMAGES) underneath each alert row's main image, for whichever visits have any stored. Off by default -- a real payload-size increase (several extra base64 images per alert row), so it's opt-in."),
 ):
     """Builds the same HTML report daily-report.json used to build itself in a Code node --
     n8n now just calls this and emails/Telegrams the result. Each row's inline image is a small
     on-the-fly thumbnail (never touching the stored full-quality crop); the full-size image is
     still available via the report's click-to-enlarge lightbox, embedded once, not twice."""
     resolved_start, resolved_end = _resolve_window(start, end, hours)
-    return report.generate_report(resolved_start, resolved_end, source, include_image, object_label, include_alert_images)
+    return report.generate_report(resolved_start, resolved_end, source, include_image, object_label)
 
 
 @app.post("/ai-queue/claim", response_model=schemas.ClaimResponse, tags=["ai-queue"], dependencies=[Depends(require_api_key)])
@@ -550,12 +539,10 @@ def admin_overview():
         "retention": db.get_retention_info(),
         "feature_flags": {
             "ai_events_stage_enabled": config.AI_EVENTS_STAGE_ENABLED,
-            "ai_alerts_enabled": config.AI_ALERTS_ENABLED,
             "store_video": config.STORE_VIDEO,
             "store_video_alerts": config.STORE_VIDEO_ALERTS,
-            "store_alert_images": config.STORE_ALERT_IMAGES,
+            "store_event_images": config.STORE_EVENT_IMAGES,
             "crop_disabled": config.CROP_DISABLED,
-            "frigate_snapshot_enabled": config.FRIGATE_SNAPSHOT_ENABLED,
             "telegram_events_mode": config.TELEGRAM_EVENTS_MODE,
             "telegram_alerts_mode": config.TELEGRAM_ALERTS_MODE,
         },
@@ -564,7 +551,7 @@ def admin_overview():
 
 @app.get("/admin/disk-usage", tags=["admin"], dependencies=[Depends(require_api_key)])
 def admin_disk_usage():
-    """Walks VIDEO_STORAGE_PATH/VIDEO_STORAGE_PATH_ALERTS/ALERT_IMAGES_STORAGE_PATH on disk to
+    """Walks VIDEO_STORAGE_PATH/VIDEO_STORAGE_PATH_ALERTS/EVENT_IMAGES_STORAGE_PATH on disk to
     report real bytes used -- kept separate from /admin/overview since this is a real filesystem
     walk (can be slow with a large video backlog), not a cheap SQL query."""
     return {
@@ -574,11 +561,11 @@ def admin_disk_usage():
         "video_storage_alerts_by_object_type": admin.dir_size_by_object_type(config.VIDEO_STORAGE_PATH_ALERTS),
         "video_storage_by_camera": admin.dir_size_by_camera(config.VIDEO_STORAGE_PATH),
         "video_storage_alerts_by_camera": admin.dir_size_by_camera(config.VIDEO_STORAGE_PATH_ALERTS),
-        # STORE_ALERT_IMAGES -- same camera-first layout/filename convention (visit-{type}-{id}-...)
-        # video.py already established, so the exact same generic helpers apply unchanged.
-        "alert_images_storage": admin.dir_size_bytes(config.ALERT_IMAGES_STORAGE_PATH),
-        "alert_images_storage_by_object_type": admin.dir_size_by_object_type(config.ALERT_IMAGES_STORAGE_PATH),
-        "alert_images_storage_by_camera": admin.dir_size_by_camera(config.ALERT_IMAGES_STORAGE_PATH),
+        # STORE_EVENT_IMAGES -- same camera-first layout/filename convention video.py already
+        # established, so the exact same generic helpers apply unchanged.
+        "event_images_storage": admin.dir_size_bytes(config.EVENT_IMAGES_STORAGE_PATH),
+        "event_images_storage_by_object_type": admin.dir_size_by_object_type(config.EVENT_IMAGES_STORAGE_PATH),
+        "event_images_storage_by_camera": admin.dir_size_by_camera(config.EVENT_IMAGES_STORAGE_PATH),
     }
 
 
@@ -602,7 +589,7 @@ def admin_reindex_vector():
 @app.post("/admin/queue/requeue-failed", tags=["admin"], dependencies=[Depends(require_api_key)])
 def admin_requeue_failed(
     table: str = Query(..., description="'raw_events' or 'visits'"),
-    stage: str = Query(..., description="raw_events: 'crop'/'video'/'ai'. visits: 'video'/'alert_ai'."),
+    stage: str = Query(..., description="raw_events: 'crop'/'video'/'ai'. visits: 'video'."),
 ):
     """Resets every row currently stuck at {stage}_status='failed' back to 'retry' with a fresh
     attempt count, so the next poll tick/claim picks it back up -- the exact fix
@@ -618,7 +605,7 @@ def admin_requeue_failed(
 @app.post("/admin/queue/skip-failed", tags=["admin"], dependencies=[Depends(require_api_key)])
 def admin_skip_failed(
     table: str = Query(..., description="'raw_events' or 'visits'"),
-    stage: str = Query(..., description="raw_events: 'crop'/'video'/'ai'. visits: 'video'/'alert_ai'."),
+    stage: str = Query(..., description="raw_events: 'crop'/'video'/'ai'. visits: 'video'."),
     days: int = Query(7, ge=1, description="Mark {stage}_status='failed' rows older than this many days as 'skipped' instead of retrying them."),
 ):
     """The other lever for a stuck 'failed' bucket, alongside requeue-failed above -- some

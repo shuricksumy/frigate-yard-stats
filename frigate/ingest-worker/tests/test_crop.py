@@ -5,7 +5,6 @@ start/end span had a saved Frigate clip only ~7 minutes long -- ffmpeg's `-ss <m
 landed past the real end of the file and exited 0 with no output (not a raised error), so the
 first ffmpeg call succeeding-but-empty can't be caught via subprocess exit code alone.
 """
-import base64
 import os
 
 os.environ.setdefault("MQTT_HOST", "localhost")
@@ -83,11 +82,10 @@ def test_crop_and_scale_raises_on_invalid_box(monkeypatch):
         pass
 
 
-def test_crop_and_scale_skips_crop_filter_when_disabled(monkeypatch):
-    # CROP_DISABLED=true -- crop_image_base64 becomes the full original frame (still scaled to
-    # MAX_CROP_DIMENSION), not a region around the object. Same field feeds both the web UI and
-    # the VLM call, so this one flag changes what gets displayed AND analyzed.
-    monkeypatch.setattr(config, "CROP_DISABLED", True)
+def test_crop_and_scale_defaults_to_no_scale_filter_at_native_resolution(monkeypatch):
+    # max_dimension defaults to None -- the full-resolution storage copy, no scale filter at all.
+    # The AI-facing (capped) copy is produced afterward via scale_image_base64, not a second scale
+    # filter here.
     captured_vf = []
 
     def fake_run(cmd, check, capture_output):
@@ -103,6 +101,35 @@ def test_crop_and_scale_skips_crop_filter_when_disabled(monkeypatch):
     monkeypatch.setattr(crop.subprocess, "run", fake_run)
 
     result = crop.crop_and_scale("http://frigate.test/api/events/abc/clip.mp4", 5.0, [0, 0, 100, 100])
+
+    assert result
+    assert len(captured_vf) == 1
+    assert "crop=" in captured_vf[0]
+    assert "scale=" not in captured_vf[0]
+
+
+def test_crop_and_scale_skips_crop_filter_when_disabled(monkeypatch):
+    # CROP_DISABLED=true -- crop_image_base64 becomes the full original frame (scaled to whatever
+    # max_dimension is passed), not a region around the object. Same field feeds both the web UI
+    # and the VLM call, so this one flag changes what gets displayed AND analyzed.
+    monkeypatch.setattr(config, "CROP_DISABLED", True)
+    captured_vf = []
+
+    def fake_run(cmd, check, capture_output):
+        if "-vf" in cmd:
+            captured_vf.append(cmd[cmd.index("-vf") + 1])
+        if "-ss" in cmd:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"fake-frame-bytes")
+        else:
+            with open(cmd[-1], "wb") as f:
+                f.write(b"fake-cropped-bytes")
+
+    monkeypatch.setattr(crop.subprocess, "run", fake_run)
+
+    result = crop.crop_and_scale(
+        "http://frigate.test/api/events/abc/clip.mp4", 5.0, [0, 0, 100, 100], max_dimension=1280,
+    )
 
     assert result
     assert len(captured_vf) == 1
@@ -173,106 +200,85 @@ def test_crop_and_scale_disabled_ignores_an_invalid_box(monkeypatch):
     assert result
 
 
-# ---- fetch_frigate_snapshot_base64 / crop_event's FRIGATE_SNAPSHOT_ENABLED branch ----
+# ---- crop_event: seek+crop from the record stream, two-resolution split ----
 
-def test_fetch_frigate_snapshot_base64_returns_encoded_bytes(monkeypatch):
-    class FakeResponse:
-        content = b"fake-jpeg-bytes"
-
-        def raise_for_status(self):
-            pass
-
-    captured_url = []
-    monkeypatch.setattr(crop.requests, "get", lambda url, **k: captured_url.append(url) or FakeResponse())
-
-    result = crop.fetch_frigate_snapshot_base64("1784554838.654667-xag8k1")
-
-    assert result == base64.b64encode(b"fake-jpeg-bytes").decode()
-    assert captured_url[0] == f"{config.FRIGATE_API_BASE}/api/events/1784554838.654667-xag8k1/snapshot.jpg"
-
-
-def test_crop_event_uses_frigate_snapshot_when_enabled(monkeypatch):
-    monkeypatch.setattr(config, "FRIGATE_SNAPSHOT_ENABLED", True)
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
-        "data": {"region": [0.1, 0.1, 0.2, 0.2], "score": 0.91}, "sub_label": "10MG407",
-    })
-    monkeypatch.setattr(crop, "fetch_frigate_snapshot_base64", lambda det_id: "snapshot-base64")
-
-    # crop_and_scale must never be called in this mode -- assert by making it raise if it is.
-    def _fail_if_called(*a, **k):
-        raise AssertionError("crop_and_scale should not run when FRIGATE_SNAPSHOT_ENABLED is true")
-    monkeypatch.setattr(crop, "crop_and_scale", _fail_if_called)
-
-    raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
-    result = crop.crop_event(raw_event)
-
-    assert result == {"crop_image_base64": "snapshot-base64", "sub_label": "10MG407", "score": 0.91}
-
-
-def test_crop_event_uses_record_stream_crop_when_snapshot_disabled(monkeypatch):
-    monkeypatch.setattr(config, "FRIGATE_SNAPSHOT_ENABLED", False)
-    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
-        "data": {"region": [0.1, 0.1, 0.2, 0.2], "score": 0.5}, "sub_label": None,
-    })
-
-    def _fail_if_called(det_id):
-        raise AssertionError("fetch_frigate_snapshot_base64 should not run when FRIGATE_SNAPSHOT_ENABLED is false")
-    monkeypatch.setattr(crop, "fetch_frigate_snapshot_base64", _fail_if_called)
-    monkeypatch.setattr(crop, "crop_and_scale", lambda clip_url, offset, box, *a, **k: "record-stream-crop-base64")
-
-    raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
-    result = crop.crop_event(raw_event)
-
-    assert result == {"crop_image_base64": "record-stream-crop-base64", "sub_label": None, "score": 0.5}
-
-
-def test_crop_event_high_res_fetches_event_and_crops_from_record_stream(monkeypatch):
+def test_crop_event_fetches_event_and_crops_from_record_stream(monkeypatch):
     monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
         "data": {"region": [0.1, 0.1, 0.2, 0.2], "score": 0.5}, "sub_label": None,
     })
     captured = {}
 
-    def fake_crop_and_scale(clip_url, offset, box, crop_disabled=None, crop_padding_pct=None):
+    def fake_crop_and_scale(clip_url, offset, box, crop_disabled=None, crop_padding_pct=None, max_dimension=None):
         captured["clip_url"] = clip_url
         captured["offset"] = offset
-        return "high-res-crop-base64"
+        captured["max_dimension"] = max_dimension
+        return "full-res-crop-base64"
     monkeypatch.setattr(crop, "crop_and_scale", fake_crop_and_scale)
+    monkeypatch.setattr(crop, "scale_image_base64", lambda image_base64, max_dimension: "ai-crop-base64")
 
     raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
-    result = crop.crop_event_high_res(raw_event)
+    result = crop.crop_event(raw_event)
 
-    assert result == "high-res-crop-base64"
+    assert result == {
+        "crop_image_base64": "ai-crop-base64",
+        "full_res_image_base64": "full-res-crop-base64",
+        "sub_label": None,
+        "score": 0.5,
+    }
     assert captured["clip_url"] == f"{config.FRIGATE_API_BASE}/api/events/abc123/clip.mp4"
     assert captured["offset"] == 50.0  # default CROP_FRAME_OFFSET_PCT (0.5) midpoint
+    # crop_and_scale is called with no max_dimension -- the full-resolution storage copy, not
+    # capped to the AI-facing size.
+    assert captured["max_dimension"] is None
 
 
-def test_crop_event_high_res_reuses_already_fetched_event(monkeypatch):
-    # crop_event's own non-snapshot branch already fetched the Frigate event once (for
-    # sub_label/score) -- passing it through here must skip a second, redundant fetch.
-    def _fail_if_called(det_id):
-        raise AssertionError("fetch_frigate_event should not run when event= is already provided")
-    monkeypatch.setattr(crop, "fetch_frigate_event", _fail_if_called)
-    monkeypatch.setattr(crop, "crop_and_scale", lambda *a, **k: "high-res-crop-base64")
+def test_crop_event_scales_the_full_res_crop_down_for_the_ai_facing_copy(monkeypatch):
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
+        "data": {"region": [0.1, 0.1, 0.2, 0.2], "score": None}, "sub_label": None,
+    })
+    monkeypatch.setattr(crop, "crop_and_scale", lambda *a, **k: "full-res-crop-base64")
+    captured = {}
+
+    def fake_scale(image_base64, max_dimension):
+        captured["image_base64"] = image_base64
+        captured["max_dimension"] = max_dimension
+        return "ai-crop-base64"
+    monkeypatch.setattr(crop, "scale_image_base64", fake_scale)
 
     raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
-    event = {"data": {"region": [0.1, 0.1, 0.2, 0.2]}}
-    result = crop.crop_event_high_res(raw_event, event=event)
+    result = crop.crop_event(raw_event, ai_image_max_dimension=640)
 
-    assert result == "high-res-crop-base64"
+    assert result["crop_image_base64"] == "ai-crop-base64"
+    assert result["full_res_image_base64"] == "full-res-crop-base64"
+    assert captured == {"image_base64": "full-res-crop-base64", "max_dimension": 640}
 
 
-def test_crop_event_uses_record_stream_crop_calls_frigate_event_only_once(monkeypatch):
-    # crop_event's non-snapshot branch must fetch the Frigate event exactly once and reuse it for
-    # both crop_event_high_res's box computation and its own sub_label/score fields -- not fetch
-    # it twice.
-    monkeypatch.setattr(config, "FRIGATE_SNAPSHOT_ENABLED", False)
+def test_crop_event_ai_image_max_dimension_falls_back_to_global_config(monkeypatch):
+    monkeypatch.setattr(config, "MAX_CROP_DIMENSION", 999)
+    monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
+        "data": {"region": [0.1, 0.1, 0.2, 0.2]}, "sub_label": None,
+    })
+    monkeypatch.setattr(crop, "crop_and_scale", lambda *a, **k: "full-res-crop-base64")
+    captured = {}
+    monkeypatch.setattr(crop, "scale_image_base64", lambda image_base64, max_dimension: captured.setdefault("max_dimension", max_dimension) or "ai-crop-base64")
+
+    raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
+    crop.crop_event(raw_event)
+
+    assert captured["max_dimension"] == 999
+
+
+def test_crop_event_calls_frigate_event_only_once(monkeypatch):
+    # crop_event must fetch the Frigate event exactly once and reuse it for both the box
+    # computation and its own sub_label/score fields -- not fetch it twice.
     call_count = {"n": 0}
 
     def counting_fetch(det_id):
         call_count["n"] += 1
         return {"data": {"region": [0.1, 0.1, 0.2, 0.2], "score": 0.5}, "sub_label": None}
     monkeypatch.setattr(crop, "fetch_frigate_event", counting_fetch)
-    monkeypatch.setattr(crop, "crop_and_scale", lambda *a, **k: "record-stream-crop-base64")
+    monkeypatch.setattr(crop, "crop_and_scale", lambda *a, **k: "full-res-crop-base64")
+    monkeypatch.setattr(crop, "scale_image_base64", lambda *a, **k: "ai-crop-base64")
 
     raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
     crop.crop_event(raw_event)
@@ -280,34 +286,24 @@ def test_crop_event_uses_record_stream_crop_calls_frigate_event_only_once(monkey
     assert call_count["n"] == 1
 
 
-def test_crop_event_frigate_snapshot_enabled_param_overrides_global_config(monkeypatch):
-    # frigate_snapshot_enabled=False passed explicitly (as crop_worker.py does once resolved via
-    # profile_config.frigate_snapshot_enabled) wins over the global default being True -- a
-    # per-type override, e.g. one object type wants the seek-based crop while others use Frigate's
-    # own snapshot.
-    monkeypatch.setattr(config, "FRIGATE_SNAPSHOT_ENABLED", True)
+def test_crop_event_passes_crop_disabled_and_padding_and_offset_through(monkeypatch):
     monkeypatch.setattr(crop, "fetch_frigate_event", lambda det_id: {
         "data": {"region": [0.1, 0.1, 0.2, 0.2], "score": 0.5}, "sub_label": None,
     })
-
-    def _fail_if_called(det_id):
-        raise AssertionError("fetch_frigate_snapshot_base64 should not run when overridden off")
-    monkeypatch.setattr(crop, "fetch_frigate_snapshot_base64", _fail_if_called)
-
     captured = {}
 
-    def fake_crop_and_scale(clip_url, offset, box, crop_disabled=None, crop_padding_pct=None):
+    def fake_crop_and_scale(clip_url, offset, box, crop_disabled=None, crop_padding_pct=None, max_dimension=None):
         captured["crop_disabled"] = crop_disabled
         captured["crop_padding_pct"] = crop_padding_pct
         captured["offset"] = offset
-        return "record-stream-crop-base64"
+        return "full-res-crop-base64"
     monkeypatch.setattr(crop, "crop_and_scale", fake_crop_and_scale)
+    monkeypatch.setattr(crop, "scale_image_base64", lambda *a, **k: "ai-crop-base64")
 
     raw_event = {"det_id": "abc123", "start_ts": 0, "end_ts": 100}
     result = crop.crop_event(
-        raw_event, frigate_snapshot_enabled=False, crop_disabled=True,
-        crop_frame_offset_pct=0.9, crop_padding_pct=0.05,
+        raw_event, crop_disabled=True, crop_frame_offset_pct=0.9, crop_padding_pct=0.05,
     )
 
-    assert result["crop_image_base64"] == "record-stream-crop-base64"
+    assert result["crop_image_base64"] == "ai-crop-base64"
     assert captured == {"crop_disabled": True, "crop_padding_pct": 0.05, "offset": 90.0}

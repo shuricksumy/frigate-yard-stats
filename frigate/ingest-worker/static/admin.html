@@ -137,7 +137,7 @@
         filesystem walk of stored clips whose filename starts with that type.
       </p>
       <table class="admin-table">
-        <thead><tr><th>Type</th><th class="num">Events</th><th class="num">Sightings</th><th class="num">Alert sightings</th><th class="num">DB bytes (approx.)</th><th class="num">Video bytes</th><th class="num">Alert image bytes</th></tr></thead>
+        <thead><tr><th>Type</th><th class="num">Events</th><th class="num">Sightings</th><th class="num">Alert sightings</th><th class="num">DB bytes (approx.)</th><th class="num">Video bytes</th><th class="num">Event image bytes</th></tr></thead>
         <tbody>
           <template x-for="row in objectTypeRows()" :key="row.type">
             <tr>
@@ -147,7 +147,7 @@
               <td class="num" x-text="fmtNum(row.visitSightings)"></td>
               <td class="num" x-text="fmtBytes(row.dbBytes)"></td>
               <td class="num" x-text="diskUsage ? fmtBytes(row.videoBytes) : '...'"></td>
-              <td class="num" x-text="diskUsage ? fmtBytes(row.alertImageBytes) : '...'"></td>
+              <td class="num" x-text="diskUsage ? fmtBytes(row.eventImageBytes) : '...'"></td>
             </tr>
           </template>
         </tbody>
@@ -158,13 +158,13 @@
     <section class="admin-card" x-show="overview">
       <h2>By camera</h2>
       <p class="status-line">
-        Row counts are exact Postgres counts; "Video bytes"/"Alert image bytes" are a real
-        filesystem walk of each camera's own top-level storage directory (video.py/alert_images.py
+        Row counts are exact Postgres counts; "Video bytes"/"Event image bytes" are a real
+        filesystem walk of each camera's own top-level storage directory (video.py/event_images.py
         write files under camera/YYYY/MM/DD/...) -- files stored before that layout existed bucket
         under a year directory instead, so they won't show up under a real camera name here.
       </p>
       <table class="admin-table">
-        <thead><tr><th>Camera</th><th class="num">Events</th><th class="num">Sightings</th><th class="num">Alert sightings</th><th class="num">Video bytes</th><th class="num">Alert image bytes</th></tr></thead>
+        <thead><tr><th>Camera</th><th class="num">Events</th><th class="num">Sightings</th><th class="num">Alert sightings</th><th class="num">Video bytes</th><th class="num">Event image bytes</th></tr></thead>
         <tbody>
           <template x-for="row in cameraRows()" :key="row.camera">
             <tr>
@@ -173,7 +173,7 @@
               <td class="num" x-text="fmtNum(row.sightings)"></td>
               <td class="num" x-text="fmtNum(row.visitSightings)"></td>
               <td class="num" x-text="diskUsage ? fmtBytes(row.videoBytes) : '...'"></td>
-              <td class="num" x-text="diskUsage ? fmtBytes(row.alertImageBytes) : '...'"></td>
+              <td class="num" x-text="diskUsage ? fmtBytes(row.eventImageBytes) : '...'"></td>
             </tr>
           </template>
         </tbody>
@@ -239,7 +239,7 @@
       <div class="stat-grid" x-show="diskUsage">
         <div class="stat-tile"><span class="stat-value" x-text="fmtBytes(diskUsage && diskUsage.video_storage.bytes)"></span><span class="stat-label">video storage (<span x-text="diskUsage && diskUsage.video_storage.file_count"></span> files)</span></div>
         <div class="stat-tile"><span class="stat-value" x-text="fmtBytes(diskUsage && diskUsage.video_storage_alerts.bytes)"></span><span class="stat-label">alert video storage (<span x-text="diskUsage && diskUsage.video_storage_alerts.file_count"></span> files)</span></div>
-        <div class="stat-tile"><span class="stat-value" x-text="fmtBytes(diskUsage && diskUsage.alert_images_storage.bytes)"></span><span class="stat-label">alert-analysis image storage (<span x-text="diskUsage && diskUsage.alert_images_storage.file_count"></span> files)</span></div>
+        <div class="stat-tile"><span class="stat-value" x-text="fmtBytes(diskUsage && diskUsage.event_images_storage.bytes)"></span><span class="stat-label">event image storage (<span x-text="diskUsage && diskUsage.event_images_storage.file_count"></span> files)</span></div>
         <div class="stat-tile"><span class="stat-value" x-text="fmtBytes(overview && overview.db_size.database_bytes)"></span><span class="stat-label">database total</span></div>
       </div>
       <p class="status-line" x-show="!diskUsage">Loading disk usage&hellip;</p>
@@ -291,8 +291,8 @@
           Delete Event Snapshots
         </label>
         <label class="checkbox-label" :title="purgeDeleteAll ? 'Ignored while Delete ALL is checked' : ''">
-          <input type="checkbox" x-model="purgeDeleteAlertImages" :disabled="purgeDeleteAll" @change="purgePreview = null">
-          Delete alert-analysis images
+          <input type="checkbox" x-model="purgeDeleteEventImages" :disabled="purgeDeleteAll" @change="purgePreview = null">
+          Delete full-resolution event images
         </label>
         <label class="checkbox-label">
           <input type="checkbox" x-model="purgeDeleteAll" @change="purgePreview = null">
@@ -322,7 +322,7 @@
         <span x-text="'event videos: ' + (purgePreview && purgePreview.counts.raw_events_video_files)"></span>
         <span x-text="'event snapshots: ' + (purgePreview && purgePreview.counts.raw_events_snapshots)"></span>
         <span x-text="'visit videos: ' + (purgePreview && purgePreview.counts.visits_video_files)"></span>
-        <span x-text="'visits w/ alert images: ' + (purgePreview && purgePreview.counts.visits_alert_images)"></span>
+        <span x-text="'full-resolution event images: ' + (purgePreview && purgePreview.counts.raw_events_image_files)"></span>
       </div>
       <div x-show="purgePreview && purgeDeleteAll" class="admin-row">
         <span>Would delete:</span>
@@ -362,10 +362,6 @@
         <label class="checkbox-label">
           <input type="checkbox" x-model="reportIncludeImage">
           Include image
-        </label>
-        <label class="checkbox-label" x-show="reportSource === 'visits'">
-          <input type="checkbox" x-model="reportIncludeAlertImages">
-          Include alert-analysis images
         </label>
         <button @click="generateReport()" :disabled="generatingReport">Generate &amp; open</button>
       </div>

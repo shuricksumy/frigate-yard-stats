@@ -9,18 +9,17 @@ resolution falls through to a plain Python constant in config.py -- a hardcoded 
 matching this project's original behavior, not a third configurable tier (there's no env var
 backing it). Every resolver here follows this same shape -- no I/O, no caching -- so callers
 (crop.py, crop_worker.py, video_worker.py, alert_video_worker.py,
-mqtt_ingest.py, ai_worker.py, alert_ai_worker.py, main.py) pass in whatever profile they already
+mqtt_ingest.py, ai_worker.py, main.py) pass in whatever profile they already
 loaded once at startup (ai_worker.load_profile). A missing/None profile or object_label is treated
 the same as "no override for this type" -- every resolver falls back to the hardcoded default
 rather than raising.
 
 Two families of settings:
   - Plain per-row settings (telegram_events_mode/telegram_alerts_mode/ai_events_stage_enabled/
-    ai_alerts_enabled/crop_disabled/crop_frame_offset_pct/crop_padding_pct/
-    frigate_snapshot_enabled/store_alert_images) -- resolved fresh for whatever row is
-    currently being processed, since the worker that owns that row already claims every type
-    regardless (crop_worker) or already knows which types to ask an existing
-    object_types-aware claim function for (ai_worker/alert_ai_worker).
+    crop_disabled/crop_frame_offset_pct/crop_padding_pct/ai_image_max_dimension/
+    store_event_images) -- resolved fresh for whatever row is currently being processed, since the
+    worker that owns that row already claims every type regardless (crop_worker) or already knows
+    which types to ask an existing object_types-aware claim function for (ai_worker).
   - store_video/store_video_alerts -- these gate whether their whole poll
     thread starts at all (main.py) *and* which rows their claim function is even allowed to look at
     (claim_video_batch/claim_visit_video_batch), since unlike the AI
@@ -67,10 +66,6 @@ def ai_events_stage_enabled(profile: dict | None, object_label: str | None) -> b
     return _resolve(profile, object_label, "ai_events_stage_enabled", config.AI_EVENTS_STAGE_ENABLED)
 
 
-def ai_alerts_enabled(profile: dict | None, object_label: str | None) -> bool:
-    return _resolve(profile, object_label, "ai_alerts_enabled", config.AI_ALERTS_ENABLED)
-
-
 def crop_disabled(profile: dict | None, object_label: str | None) -> bool:
     return _resolve(profile, object_label, "crop_disabled", config.CROP_DISABLED)
 
@@ -79,30 +74,23 @@ def crop_frame_offset_pct(profile: dict | None, object_label: str | None) -> flo
     return _resolve(profile, object_label, "crop_frame_offset_pct", config.CROP_FRAME_OFFSET_PCT)
 
 
-def alert_crop_frame_offset_pct(profile: dict | None, object_label: str | None) -> float:
-    # Optional alert-stage-specific override, same shape as alert_provider/alert_model/
-    # alert_chat_path -- lets one type's alert-stage crop timing differ from its own event-stage
-    # value, since the two stages can reasonably want different offsets (the events stage's own
-    # value is moot whenever frigate_snapshot_enabled is on, but the alert stage always does a
-    # real seek, so its offset choice actually matters regardless of that other setting). Checked
-    # at both tiers (the type's own entry, then `defaults:`) before falling back to the plain
-    # crop_frame_offset_pct resolution unchanged, so an existing profiles.yaml that never sets
-    # this needs no edit to keep working.
-    type_cfg = _type_config(profile, object_label)
-    if "alert_crop_frame_offset_pct" in type_cfg:
-        return type_cfg["alert_crop_frame_offset_pct"]
-    defaults_cfg = _defaults_config(profile)
-    if "alert_crop_frame_offset_pct" in defaults_cfg:
-        return defaults_cfg["alert_crop_frame_offset_pct"]
-    return crop_frame_offset_pct(profile, object_label)
-
-
 def crop_padding_pct(profile: dict | None, object_label: str | None) -> float:
     return _resolve(profile, object_label, "crop_padding_pct", config.CROP_PADDING_PCT)
 
 
-def frigate_snapshot_enabled(profile: dict | None, object_label: str | None) -> bool:
-    return _resolve(profile, object_label, "frigate_snapshot_enabled", config.FRIGATE_SNAPSHOT_ENABLED)
+def ai_image_max_dimension(profile: dict | None, object_label: str | None) -> int:
+    # The AI-facing (and DB-stored) image size -- a downscale of the same full-resolution crop
+    # crop.crop_event always builds. Per-object-type resolvable since a plate-heavy vehicle prompt
+    # may want more resolution than a person/dog prompt; the full-resolution copy written to disk
+    # (store_event_images below) is never capped by this.
+    return _resolve(profile, object_label, "ai_image_max_dimension", config.MAX_CROP_DIMENSION)
+
+
+def store_event_images(profile: dict | None, object_label: str | None) -> bool:
+    # Plain per-row resolution, same shape as crop_disabled -- gates a synchronous side effect
+    # inside the existing crop_worker thread (persisting the full-resolution crop to disk), not a
+    # separate poll thread/claim query.
+    return _resolve(profile, object_label, "store_event_images", config.STORE_EVENT_IMAGES)
 
 
 def store_video_enabled(profile: dict | None, object_label: str | None) -> bool:
@@ -118,14 +106,6 @@ def store_video_alerts_enabled(profile: dict | None, object_label: str | None) -
     return _resolve(profile, object_label, "store_video_alerts", config.STORE_VIDEO_ALERTS)
 
 
-def store_alert_images(profile: dict | None, object_label: str | None) -> bool:
-    # Plain per-row resolution, same shape as crop_disabled -- gates a synchronous side effect
-    # inside the existing alert_ai_worker thread (persisting its already-gathered images to disk),
-    # not a separate poll thread/claim query, so this doesn't need the claim-filter/any_*_enabled
-    # machinery store_video/store_video_alerts have.
-    return _resolve(profile, object_label, "store_alert_images", config.STORE_ALERT_IMAGES)
-
-
 def any_ai_events_stage_enabled(profile: dict | None) -> bool:
     # Gates whether ai_worker's whole poll thread starts at all (main.py) -- true if the effective
     # base (profile-wide `defaults`, else config.py's hardcoded fallback) is on, or at least one
@@ -135,14 +115,6 @@ def any_ai_events_stage_enabled(profile: dict | None) -> bool:
     if not profile:
         return False
     return any(t.get("ai_events_stage_enabled") for t in profile.get("object_types", {}).values())
-
-
-def any_ai_alerts_enabled(profile: dict | None) -> bool:
-    if _resolve(profile, None, "ai_alerts_enabled", config.AI_ALERTS_ENABLED):
-        return True
-    if not profile:
-        return False
-    return any(t.get("ai_alerts_enabled") for t in profile.get("object_types", {}).values())
 
 
 def _bool_override_labels(profile: dict | None, key: str) -> tuple[list[str], list[str]]:

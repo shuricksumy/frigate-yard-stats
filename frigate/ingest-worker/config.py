@@ -81,14 +81,18 @@ MAX_ATTEMPTS = 3
 # confirmed in production that a short event's crop can genuinely fail this way, not just long
 # events tripping the clip-duration fallback in crop.py).
 CROP_INITIAL_WAIT_SECONDS = 5.0
+# Last-resort fallback for the AI-facing (and DB-stored) image size -- NOT in _PROFILE_DEFAULTS_MAP
+# below, since (like CROP_PADDING_PCT/CROP_DISABLED/CROP_FRAME_OFFSET_PCT) this is genuinely
+# per-object-type resolvable (see profile_config.ai_image_max_dimension) rather than a global-only
+# technical knob -- a plate-heavy vehicle prompt may want more resolution than a person/dog prompt.
+# The full-resolution crop written to disk (STORE_EVENT_IMAGES) is never capped by this at all.
 MAX_CROP_DIMENSION = 1280
 # -------------------------------------------------
-# CROP_PADDING_PCT/CROP_DISABLED/CROP_FRAME_OFFSET_PCT/FRIGATE_SNAPSHOT_ENABLED below are instead
-# per-object-type settings (a car needs different crop framing than a person) -- see
-# profile_config.py's resolvers (crop_disabled/crop_frame_offset_pct/crop_padding_pct/
-# frigate_snapshot_enabled), which check a type's own object_types.<label> entry before falling
-# back to `defaults:`. The literals below are only the last-resort fallback once neither of those
-# sets a value either.
+# CROP_PADDING_PCT/CROP_DISABLED/CROP_FRAME_OFFSET_PCT/MAX_CROP_DIMENSION above are per-object-type
+# settings (a car needs different crop framing than a person) -- see profile_config.py's resolvers
+# (crop_disabled/crop_frame_offset_pct/crop_padding_pct/ai_image_max_dimension), which check a
+# type's own object_types.<label> entry before falling back to `defaults:`. The literals below are
+# only the last-resort fallback once neither of those sets a value either.
 # -------------------------------------------------
 CROP_PADDING_PCT = 0.2
 # Off by default -- the crop exists specifically so the VLM can read small detail (plates, notable
@@ -97,27 +101,15 @@ CROP_PADDING_PCT = 0.2
 # read the same stored crop_image_base64.
 CROP_DISABLED = False
 # Where in the event's start_ts->end_ts span to seek for the crop frame (0.0=start, 0.5=midpoint,
-# 1.0=end) -- only applies when FRIGATE_SNAPSHOT_ENABLED (per type) is false. Frigate picks its own
-# alert thumbnail at whatever frame scored highest during the event, which isn't a fixed offset and
-# isn't exposed via its API (confirmed live: one event's own snapshot landed almost exactly at
-# start, another well past the midpoint) -- there's no universal value that matches Frigate's
-# per-event choice, so this stays a tunable rather than a guessed new default.
+# 1.0=end). Frigate itself picks its own alert thumbnail at whatever frame scored highest during
+# the event -- a content-dependent choice, not a fixed offset, and never exposed via its API
+# (confirmed live, directly: not in the event JSON, not in the snapshot's own response headers, not
+# in EXIF -- the only place a moment's real time is visible at all is the camera's own burned-in
+# on-screen clock, not programmatically extractable). There is no universal offset value that
+# matches Frigate's per-event choice, so this stays a tunable approximation rather than a guessed
+# new default -- true for every event now that FRIGATE_SNAPSHOT_ENABLED (Frigate's own snapshot as
+# an alternative image source) has been removed; see CLAUDE.md's "Cropping" section.
 CROP_FRAME_OFFSET_PCT = 0.5
-# True: uses Frigate's own already-rendered event snapshot (GET /api/events/{det_id}/snapshot.jpg)
-# instead of seeking+cropping a frame from the record-stream clip ourselves -- Frigate picks this
-# frame by its own best-detection-score judgment (content-dependent, not a fixed offset guess like
-# CROP_FRAME_OFFSET_PCT above), which in practice beats our own fixed-offset seek often enough that
-# this is the default. Known trade-off, accepted as the default anyway: it's from the lower-res
-# detect stream (800x448 in testing, vs. this setup's 3840x2160 record stream) with a
-# bounding-box/label/timestamp overlay burned in that this Frigate version's API gives no way to
-# suppress (confirmed empirically -- bbox=0/timestamp=0/h=<n> query params on the snapshot endpoint
-# have no effect at all, byte-identical response). Set false (per type, in profiles.yaml) to fall
-# back to this project's original seek-based approach if that trade-off doesn't work for your
-# footage -- CROP_DISABLED/CROP_FRAME_OFFSET_PCT/CROP_PADDING_PCT above only apply once this is
-# false for that type. Events only -- the alert stage's own high-res per-event crops (see
-# alert_ai_worker.py) always use crop.crop_event_high_res regardless of this flag, since a single
-# Frigate snapshot has no per-event-in-a-visit equivalent to offer it.
-FRIGATE_SNAPSHOT_ENABLED = True
 # A second, much smaller copy of the same crop -- for report/preview UIs that would otherwise
 # embed the full MAX_CROP_DIMENSION image inline per row (multiplied across every sighting, that's
 # what blew up a 2-hour daily report to 42MB and pushed up n8n's memory while building/emailing
@@ -196,6 +188,24 @@ STORE_VIDEO_ALERTS = False
 VIDEO_STORAGE_PATH_ALERTS = _env("VIDEO_STORAGE_PATH_ALERTS", "/data/video-alerts")
 
 # -------------------------------------------------
+# Opt-in filesystem persistence of the full-resolution crop crop.crop_event already builds for
+# every event (the AI-facing copy in crop_image_base64 is always a downscale of this same crop) --
+# off by default, so the full-res copy is simply discarded unless this is turned on. Deliberately
+# NOT an env var, same reasoning as STORE_VIDEO/CROP_DISABLED -- resolved per-object-type via
+# profile_config.store_event_images (a plain per-row resolver like crop_disabled, not a
+# claim-filter/thread-gating setting -- persisting is a synchronous side effect inside the existing
+# crop_worker thread, not a separate poll loop/queue stage). See event_images.py.
+# -------------------------------------------------
+STORE_EVENT_IMAGES = False
+# Mount point inside the container -- pair with a bind mount in docker-compose.yml
+# (EVENT_IMAGES_STORAGE_HOST_PATH on the host side). A genuinely separate storage location from
+# VIDEO_STORAGE_PATH/VIDEO_STORAGE_PATH_ALERTS, so this flow's disk usage can be measured/managed
+# independently. Files are laid out as
+# {EVENT_IMAGES_STORAGE_PATH}/{camera}/{YYYY}/{MM}/{DD}/{object_type}-{event_id}-{start_ts_epoch}-
+# {start_ts_iso}.jpg -- see event_images.py.
+EVENT_IMAGES_STORAGE_PATH = _env("EVENT_IMAGES_STORAGE_PATH", "/data/event-images")
+
+# -------------------------------------------------
 # Telegram notifications -- see telegram.py. Each is a mode, not a bool: "none" (off, the
 # default), "image" (photo/GIF only, no video clip), "video" (video clip only, no photo/GIF), or
 # "all" (both). Splitting photo from video lets you skip uploading large video clips to Telegram
@@ -235,43 +245,31 @@ TELEGRAM_ALERTS_MODE = "none"
 OBJECT_TYPES = [t.strip() for t in _env("OBJECT_TYPES", "car,truck,person,dog").split(",") if t.strip()]
 
 # -------------------------------------------------
-# Internal AI stages (ai_worker.py / alert_ai_worker.py) -- an alternative to
-# n8n/metadata-processor.json, not a replacement for it: that workflow is left untouched in the
-# repo and can be re-enabled in n8n at any time. Off by default, same convention as STORE_VIDEO
-# above.
+# Internal AI stage (ai_worker.py) -- an alternative to n8n/metadata-processor.json, not a
+# replacement for it: that workflow is left untouched in the repo and can be re-enabled in n8n at
+# any time. Off by default, same convention as STORE_VIDEO above.
 #
-# Two independent stages, each with its own enable flag, queue, and prompt (profiles.yaml's
-# event_prompt vs alert_prompt) -- same "independent switch, shared tuning knobs" split this
-# project already uses for STORE_VIDEO vs STORE_VIDEO_ALERTS:
 #   AI_EVENTS_STAGE_ENABLED -- ai_worker.py, analyzes each raw_event's own single-frame crop with
 #     event_prompt. When on, this thread claims the exact same ai_status='new'/'retry' rows
 #     metadata-processor.json's "Claim Next Batch (API)" node does (via db.claim_ai_batch directly,
 #     not over HTTP), so the two must not run against the same queue at the same time. This is the
 #     renamed former AI_STAGE_ENABLED -- was previously the only stage; splitting it out clarifies
-#     that it only ever analyzed one event's own crop, never a visit's own alert-stage series.
-#   AI_ALERTS_ENABLED -- alert_ai_worker.py, analyzes a series of high-res crops (one per selected
-#     raw_event linked to the visit, gathered fresh at processing time via
-#     crop.crop_event_high_res -- see ALERT_AI_MAX_IMAGES below) with alert_prompt, storing the
-#     result in visit_sightings -- a separate table from (and independent of) the events stage's
-#     own sightings table. Needs no other stage to have run first -- a visit is claimable as soon
-#     as it exists (subject to the usual reap-stale/capacity/object-type filters).
+#     that it only ever analyzed one event's own crop. (A second stage, AI_ALERTS_ENABLED, used to
+#     exist alongside this one -- analyzing a series of high-res crops gathered fresh per visit --
+#     but was removed entirely: a visit's "alert" is now its video plus its own individually-
+#     analyzed connected events, not a second gathered-image VLM call. See CLAUDE.md's "Alert AI
+#     stage" section for the full history of why it existed and why it was removed.)
 #
-# Both flags are deliberately NOT env vars -- configure via profiles.yaml (`defaults:` for a global
-# change, object_types.<label> for a type that needs to behave differently from the rest, e.g. opt
-# out of the events stage while everything else stays on it, or opt in despite everything else
-# being off) -- see profile_config.py. The literals below are only the last-resort fallback (off,
-# matching this project's original default) for a deployment that never sets either in
-# profiles.yaml at all.
+# Deliberately NOT an env var -- configure via profiles.yaml (`defaults:` for a global change,
+# object_types.<label> for a type that needs to behave differently from the rest) -- see
+# profile_config.py. The literal below is only the last-resort fallback (off, matching this
+# project's original default) for a deployment that never sets it in profiles.yaml at all.
 # -------------------------------------------------
 AI_EVENTS_STAGE_ENABLED = False
-AI_ALERTS_ENABLED = False
 # Same idea as SCHEMA_SQL_PATH -- baked into the image by default, bind-mount a different file and
-# point this at it to customize prompts/models without a rebuild. Shared by both stages -- each
-# reads its own prompt key (event_prompt/alert_prompt) out of the same per-type profile section.
+# point this at it to customize prompts/models without a rebuild.
 AI_STAGE_PROFILE_PATH = _env("AI_STAGE_PROFILE_PATH", "/app/profiles.yaml")
-# Queue-tuning knobs below are shared between both stages (each stage claims from its own separate
-# queue -- raw_events.ai_status vs visits.alert_ai_status -- so sharing these doesn't mean they
-# compete for the same capacity). Technical tuning knobs (see the block above PARALLEL_LIMIT) --
+# Queue-tuning knobs below. Technical tuning knobs (see the block above PARALLEL_LIMIT) --
 # configure via profiles.yaml's `defaults:`, not env vars.
 AI_STAGE_PARALLEL_LIMIT = 2
 AI_STAGE_STALE_MINUTES = 5
@@ -280,40 +278,8 @@ AI_STAGE_MAX_ATTEMPTS = 3
 # default) means no cutoff, every eligible row is still claimable regardless of age.
 AI_STAGE_MAX_AGE_HOURS = None
 AI_STAGE_POLL_INTERVAL_SECONDS = 5.0
-# alert_ai_worker-only knobs (the events stage has no equivalent -- it always analyzes exactly one
-# already-stored image, nothing to gather or wait on).
-#
-# Same head-start reasoning as CROP_INITIAL_WAIT_SECONDS/VIDEO_INITIAL_WAIT_SECONDS -- applied once
-# per claimed visit on its first attempt (alert_ai_attempt_count == 0), not once per gathered
-# image, since Frigate may still be finalizing a just-linked event's clip.
-ALERT_AI_INITIAL_WAIT_SECONDS = 5.0
-# Upper bound on how many high-res per-event crops get gathered and sent to the VLM for one
-# visit's alert analysis -- one representative per distinct object type in the visit first, then
-# same-type re-tracks spread across the visit's timespan fill any remaining slots (see
-# alert_ai_worker._select_events_for_alert). 4 matches the old composite grid's panel count as a
-# sane starting default; a visit with lots of tracker re-ID/label-flicker noise would otherwise
-# send an unbounded, cost-scaling number of near-duplicate images for no analytical benefit.
-ALERT_AI_MAX_IMAGES = 4
-# Opt-in filesystem persistence of the same high-res crops gathered above -- off by default (they
-# are ephemeral, built/sent/discarded, unless this is turned on). Deliberately NOT an env var, same
-# reasoning as STORE_VIDEO/CROP_DISABLED -- this is a setting you'd realistically want different
-# per Frigate object type, so it's resolved via profile_config.store_alert_images (a plain
-# per-row resolver like crop_disabled, not a claim-filter/thread-gating setting -- persisting to
-# disk is a synchronous side effect inside the existing alert_ai_worker thread, not a separate poll
-# loop/queue stage). This literal is only the last-resort fallback for a deployment that never sets
-# it in profiles.yaml at all.
-STORE_ALERT_IMAGES = False
-# Mount point inside the container -- pair with a bind mount in docker-compose.yml
-# (ALERT_IMAGES_STORAGE_HOST_PATH on the host side). A genuinely separate storage location from
-# VIDEO_STORAGE_PATH/VIDEO_STORAGE_PATH_ALERTS (own mount point), not a subfolder of either, so
-# this flow's disk usage can be measured/managed independently -- same reasoning
-# VIDEO_STORAGE_PATH_ALERTS already established. Files are laid out as
-# {ALERT_IMAGES_STORAGE_PATH}/{camera}/{YYYY}/{MM}/{DD}/visit-{object_type}-{visit_id}-{index}-
-# {event_id}.jpg -- see alert_images.py.
-ALERT_IMAGES_STORAGE_PATH = _env("ALERT_IMAGES_STORAGE_PATH", "/data/alert-images")
 # llama_slot_proxy's own base URL, called directly instead of going through n8n -- e.g.
-# http://llama-proxy-host:port. Only required when AI_EVENTS_STAGE_ENABLED or AI_ALERTS_ENABLED is
-# true.
+# http://llama-proxy-host:port. Only required when AI_EVENTS_STAGE_ENABLED is true.
 LLAMA_PROXY_BASE_URL = _env("LLAMA_PROXY_BASE_URL", "").rstrip("/")
 # Optional -- llama_slot_proxy is unauthenticated on the LAN today (same as every VLM call n8n
 # makes directly), so this is future-proofing rather than a hard requirement. Blank means no
@@ -371,7 +337,6 @@ _PROFILE_DEFAULTS_MAP = {
     "STALE_MINUTES": "stale_minutes",
     "MAX_ATTEMPTS": "max_attempts",
     "CROP_INITIAL_WAIT_SECONDS": "crop_initial_wait_seconds",
-    "MAX_CROP_DIMENSION": "max_crop_dimension",
     "THUMBNAIL_MAX_DIMENSION": "thumbnail_max_dimension",
     "POLL_INTERVAL_SECONDS": "poll_interval_seconds",
     "RETENTION_MONTHS": "retention_months",
@@ -389,8 +354,6 @@ _PROFILE_DEFAULTS_MAP = {
     "AI_STAGE_POLL_INTERVAL_SECONDS": "ai_stage_poll_interval_seconds",
     "AI_STAGE_DEFAULT_TIMEOUT_SECONDS": "ai_stage_default_timeout_seconds",
     "AI_STAGE_EMBED_TIMEOUT_SECONDS": "ai_stage_embed_timeout_seconds",
-    "ALERT_AI_INITIAL_WAIT_SECONDS": "alert_ai_initial_wait_seconds",
-    "ALERT_AI_MAX_IMAGES": "alert_ai_max_images",
 }
 
 

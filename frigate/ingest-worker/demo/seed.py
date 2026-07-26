@@ -74,10 +74,6 @@ def insert_visit(camera, objects, minutes_ago, det_ids, video_path=None):
     return visit_id
 
 
-def add_visit_sighting(visit_id, object_label, description):
-    db.complete_visit_sighting(visit_id, object_label, description, embedding=embed(description))
-
-
 def make_clip(frames, out_path, fps=2):
     with tempfile.TemporaryDirectory() as tmp:
         for i, frame in enumerate(frames):
@@ -120,27 +116,30 @@ def main():
     eid, _ = insert_event("backyard", "dog", 12, img)
     add_sighting(eid, "dog", "Medium-sized brown and white dog running across the backyard, no collar visible.")
 
-    # -- Visit A: silver SUV pulling into the driveway (two re-tracked det_ids) --
+    # -- Visit A: silver SUV pulling into the driveway (two re-tracked det_ids) -- a visit's
+    # lightbox shows its own linked events' sightings (no separate alert-level analysis anymore),
+    # so each det_id gets its own per-event sighting like a plain event would.
     det_a1 = f"demo-{uuid.uuid4()}"
     det_a2 = f"demo-{uuid.uuid4()}"
     img0 = g.frame_silver_suv(fmt_osd(ts(15)), zoom=zoom_steps[0])
     img3 = g.frame_silver_suv(fmt_osd(ts(15) + datetime.timedelta(seconds=6)), zoom=zoom_steps[3])
-    insert_event("driveway", "car", 15, img0, det_id=det_a1)
-    insert_event("driveway", "car", 15, img3, det_id=det_a2)
+    eid_a1, _ = insert_event("driveway", "car", 15, img0, det_id=det_a1)
+    eid_a2, _ = insert_event("driveway", "car", 15, img3, det_id=det_a2)
+    add_sighting(eid_a1, "car", "Silver SUV pulling into the driveway, headlights on, roof rails visible.")
+    add_sighting(eid_a2, "car", "Silver SUV parked in the driveway, engine shut off, roof rails visible.")
     suv_frames = [g.frame_silver_suv(fmt_osd(ts(15) + datetime.timedelta(seconds=s * 2)), zoom=z) for s, z in enumerate(zoom_steps)]
     suv_clip = os.path.join(video_alerts_root, "visit-car-1-demo.mp4")
     make_clip(suv_frames, suv_clip)
-    visit_a = insert_visit("driveway", "car", 15, [det_a1, det_a2], video_path=suv_clip)
-    add_visit_sighting(visit_a, "car", "Silver SUV pulled into the driveway, headlights on, roof rails visible, engine shut off after a few seconds.")
+    insert_visit("driveway", "car", 15, [det_a1, det_a2], video_path=suv_clip)
 
     # -- Visit B: delivery person walking near the front door and back -- a real photo shot from
     # directly behind (no face visible), not the earlier synthetic illustration -- see
     # gen_real_frames' module docstring for why this specific photo was safe to use.
     det_b1 = f"demo-{uuid.uuid4()}"
     img0 = g.frame_delivery_person(fmt_osd(ts(5)), zoom=zoom_steps[0])
-    insert_event("front_door", "person", 5, img0, det_id=det_b1)
-    visit_b = insert_visit("front_door", "person", 5, [det_b1])
-    add_visit_sighting(visit_b, "person", "Delivery person wearing a blue jacket walked up to the front door, left a package, and walked back toward the street.")
+    eid_b1, _ = insert_event("front_door", "person", 5, img0, det_id=det_b1)
+    add_sighting(eid_b1, "person", "Delivery person wearing a blue jacket walked up to the front door and left a package.")
+    insert_visit("front_door", "person", 5, [det_b1])
 
     print("seed complete")
 

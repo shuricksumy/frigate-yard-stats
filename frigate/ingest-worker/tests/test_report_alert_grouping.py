@@ -6,7 +6,6 @@ _group_by_visit/_img_cell/_build_alert_rows are pure functions (no DB), so most 
 without Postgres. The end-to-end generate_report() test at the bottom does need a reachable
 Postgres with schema.sql applied -- see test_db_video_queue.py's module docstring.
 """
-import base64
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -64,26 +63,6 @@ def test_group_by_visit_keeps_ungrouped_sightings_separate():
     assert len(groups) == 2
 
 
-def test_group_by_visit_carries_alert_image_paths():
-    t = datetime(2026, 7, 17, 10, 0, 0)
-    row = {
-        "visit_id": 1, "raw_event_id": 1, "start_ts": t, "camera": "outside2",
-        "crop_image_base64": "car-crop", "alert_image_paths": "/data/alert-images/a.jpg,/data/alert-images/b.jpg",
-        "object_label": "car", "description": "orange suv",
-    }
-    groups = report._group_by_visit([row])
-    assert groups[0]["alert_image_paths"] == "/data/alert-images/a.jpg,/data/alert-images/b.jpg"
-
-
-def test_group_by_visit_missing_alert_image_paths_key_defaults_to_none():
-    # Older callers/fixtures that never set this key (it's new) shouldn't break -- .get() with no
-    # default, not a required dict key.
-    t = datetime(2026, 7, 17, 10, 0, 0)
-    row = {"visit_id": None, "raw_event_id": 1, "start_ts": t, "camera": "outside2", "crop_image_base64": "a"}
-    groups = report._group_by_visit([row])
-    assert groups[0]["alert_image_paths"] is None
-
-
 def test_img_cell_renders_crop_image_with_lightbox():
     lightboxes = []
     cell = report._img_cell(_TINY_JPEG_BASE64, lightboxes, [0])
@@ -94,30 +73,6 @@ def test_img_cell_renders_crop_image_with_lightbox():
 def test_img_cell_no_image_placeholder():
     cell = report._img_cell(None, [], [0])
     assert cell == "(no image)"
-
-
-def test_alert_images_cell_empty_when_no_paths():
-    assert report._alert_images_cell(None, [], [0]) == ""
-    assert report._alert_images_cell("", [], [0]) == ""
-
-
-def test_alert_images_cell_renders_one_thumbnail_per_existing_file(tmp_path):
-    p1 = tmp_path / "a.jpg"
-    p2 = tmp_path / "b.jpg"
-    p1.write_bytes(base64.b64decode(_TINY_JPEG_BASE64))
-    p2.write_bytes(base64.b64decode(_TINY_JPEG_BASE64))
-    lightboxes = []
-    cell = report._alert_images_cell(f"{p1},{p2}", lightboxes, [0])
-    assert cell.count("<img") == 2
-    assert len(lightboxes) == 2
-
-
-def test_alert_images_cell_skips_missing_files_without_failing(tmp_path):
-    p1 = tmp_path / "a.jpg"
-    p1.write_bytes(base64.b64decode(_TINY_JPEG_BASE64))
-    missing = tmp_path / "gone.jpg"
-    cell = report._alert_images_cell(f"{p1},{missing}", [], [0])
-    assert cell.count("<img") == 1  # only the existing file rendered
 
 
 def test_build_alert_rows_orders_newest_first():
@@ -234,43 +189,6 @@ def test_generate_report_include_image_false_omits_image(conn_ok):
         assert "(no image)" in no_image["html"]
     finally:
         _cleanup(raw_id, visit_id=visit_id)
-
-
-def test_generate_report_include_alert_images_embeds_thumbnail_strip(conn_ok, tmp_path):
-    raw_id, det_id = _insert_raw_event(objects="car")
-    _insert_sighting(raw_id, "car", "silver sedan")
-    visit_id = db.record_visit({
-        "camera": "pytest-cam", "zone": "pytest-zone", "objects": "car",
-        "start_time": 1784198451.0, "end_time": 1784198470.0, "det_ids": [det_id],
-    })
-    p1 = tmp_path / "alert1.jpg"
-    p1.write_bytes(base64.b64decode(_TINY_JPEG_BASE64))
-    db._execute(
-        "UPDATE yard_stats.visits SET alert_image_paths = %s WHERE id = %s",
-        (str(p1), visit_id),
-    )
-    try:
-        now = datetime.now(timezone.utc)
-        window = (now - timedelta(hours=1), now + timedelta(hours=1))
-        without = report.generate_report(*window, source="visits", include_alert_images=False)
-        with_it = report.generate_report(*window, source="visits", include_alert_images=True)
-        assert with_it["html"].count("<img") > without["html"].count("<img")
-    finally:
-        _cleanup(raw_id, visit_id=visit_id)
-
-
-def test_generate_report_include_alert_images_ignored_under_source_events(conn_ok):
-    # source="events" has no visit-level image series concept at all -- the param is a no-op there.
-    raw_id, det_id = _insert_raw_event(objects="car")
-    _insert_sighting(raw_id, "car", "silver sedan")
-    try:
-        now = datetime.now(timezone.utc)
-        result = report.generate_report(
-            now - timedelta(hours=1), now + timedelta(hours=1), source="events", include_alert_images=True,
-        )
-        assert "silver sedan" in result["html"]
-    finally:
-        _cleanup(raw_id)
 
 
 def test_generate_report_object_label_filters_and_labels_title(conn_ok):

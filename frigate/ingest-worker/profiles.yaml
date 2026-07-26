@@ -4,37 +4,30 @@
 # takes effect; this copy only matters if that bind mount is ever removed. Keep the two in sync
 # yourself if you edit one.
 #
-# Configures both internal AI stages -- ai_worker.py (ai_events_stage_enabled below) and
-# alert_ai_worker.py (ai_alerts_enabled below), alternatives to n8n/metadata-processor.json, not a
-# replacement for it: that workflow is left untouched in the repo (though it now expects the old
-# vehicle_sightings/person_sightings shape this project moved away from -- see CLAUDE.md's
-# "Universal sightings" section -- so it would need its own rework before being usable again).
+# Configures the internal AI stage -- ai_worker.py (ai_events_stage_enabled below), an alternative
+# to n8n/metadata-processor.json, not a replacement for it: that workflow is left untouched in the
+# repo (though it now expects the old vehicle_sightings/person_sightings shape this project moved
+# away from -- see CLAUDE.md's "Universal sightings" section -- so it would need its own rework
+# before being usable again). A second stage used to exist here (alert_ai_worker.py, analyzing a
+# series of high-res crops gathered fresh per visit) but was removed entirely -- a visit's "alert"
+# is now its video plus its own individually-analyzed connected events. See CLAUDE.md's "Alert AI
+# stage" section for the full history.
 #
 # object_types is FLAT and universal -- one entry per Frigate object label (raw_events.objects),
 # each with its own prompt/model. There is no "sighting_type" concept in the code at all: every
 # analyzed sighting (car, truck, person, dog, whatever you add here) is stored the exact same way
-# (see db.complete_sighting/complete_visit_sighting) -- the label itself is just data on the row
-# (object_label), not a branch in the code. A Frigate label with no entry here is simply never
-# claimed by either stage at all -- ai_status (or alert_ai_status) stays 'new' indefinitely,
-# exactly as if that stage were off for that one type. Not a bug to fix -- there's nothing
-# configured for it yet, add an entry whenever you want one analyzed.
+# (see db.complete_sighting) -- the label itself is just data on the row (object_label), not a
+# branch in the code. A Frigate label with no entry here is simply never claimed by this stage at
+# all -- ai_status stays 'new' indefinitely, exactly as if this stage were off for that one type.
+# Not a bug to fix -- there's nothing configured for it yet, add an entry whenever you want one
+# analyzed.
 #
-# Two prompts per entry, for two genuinely different inputs:
-#   event_prompt -- ai_worker.py sends this with ONE single-frame crop (the raw_event's own
-#     region/box, or Frigate's own snapshot when frigate_snapshot_enabled is true). Framed for a
-#     single static moment.
-#   alert_prompt -- alert_ai_worker.py sends this with a SERIES of separate high-resolution crops,
-#     one per raw_event actually linked to the visit (up to alert_ai_max_images), each built fresh
-#     from the record stream at processing time (never stored), not a fixed 4-frame composite grid.
-#     Framed for both a confident static read (using whichever photo in the series shows a detail
-#     most clearly) AND a description of what changed across the sequence, in the SAME flowing
-#     answer. Sending several separate images in one prompt needs a provider that actually supports
-#     multi-image messages -- see alert_provider/alert_model below.
-# Both prompts are answered as plain free text (no JSON) -- the whole response becomes
-# sightings.description/visit_sightings.description verbatim. This is deliberate: a fixed JSON
-# schema is exactly the kind of per-type structure this redesign removed. If you want a detail
-# captured (plate text, breed, collar color, whatever), ask for it directly in the prompt's own
-# wording -- the model's own sentence is the record, not a set of columns.
+# event_prompt -- ai_worker.py sends this with ONE single-frame crop (crop.crop_event's own
+# record-stream region crop, downscaled to ai_image_max_dimension below). Answered as plain free
+# text (no JSON) -- the whole response becomes sightings.description verbatim. This is deliberate:
+# a fixed JSON schema is exactly the kind of per-type structure this redesign removed. If you want
+# a detail captured (plate text, breed, collar color, whatever), ask for it directly in the
+# prompt's own wording -- the model's own sentence is the record, not a set of columns.
 #
 # A bunch of settings, ALL OPTIONAL, live entirely in this file -- see profile_config.py. These are
 # NOT env vars at all (deliberately -- they're settings you'd realistically want different per
@@ -48,52 +41,32 @@
 #   telegram_events_mode / telegram_alerts_mode -- none/image/video/all (see telegram.py). e.g. a
 #     `dog` entry could set telegram_events_mode: none to silence noisy dog-only notifications
 #     while cars/people still notify normally. Hardcoded fallback: "none" (both).
-#   ai_events_stage_enabled / ai_alerts_enabled -- true/false, alternatives to
-#     n8n/metadata-processor.json (see CLAUDE.md's "Internal AI stage" section). Setting either
-#     true for at least one type (or in `defaults`) is enough to start that stage's poll thread --
-#     see profile_config.any_ai_events_stage_enabled/any_ai_alerts_enabled, used by main.py's
-#     thread-startup check. Hardcoded fallback: false (both, i.e. off).
-#   crop_disabled / crop_frame_offset_pct / crop_padding_pct / frigate_snapshot_enabled -- crop
-#     framing for this type's own event crop. Resolved fresh for every event, since crop_worker
-#     already processes every type regardless -- no queue/thread implications, just which image
-#     ends up on the row. e.g. a `car` entry could set frigate_snapshot_enabled: false plus its own
-#     crop_frame_offset_pct to use a seek-based crop with more control over framing for plate
-#     legibility, while other types keep using Frigate's own snapshot. Hardcoded fallback:
-#     crop_disabled=false, crop_frame_offset_pct=0.5, crop_padding_pct=0.2,
-#     frigate_snapshot_enabled=true.
-#   store_video / store_video_alerts -- true/false. Unlike the AI-stage flags above, these apply to
-#     *any* Frigate label by default (not just ones with a profiles.yaml prompt entry), so a type
-#     can get its own entry here purely to carry one of these two keys, with no chat_path/prompt at
-#     all. Setting either true for at least one type (or in `defaults`) is enough to start that
-#     stage's poll thread -- see profile_config.any_store_video_enabled/
-#     any_store_video_alerts_enabled. e.g. a `person` entry could set store_video: false to skip
-#     storing clips for people while cars still get them. Hardcoded fallback: false (both).
-#   store_alert_images -- true/false. Persists the alert stage's own gathered high-res crops to
-#     disk under ALERT_IMAGES_STORAGE_PATH (comma-joined paths on visits.alert_image_paths, never
-#     the image bytes themselves in Postgres) -- off by default, so those images stay ephemeral
-#     unless you opt in. A plain per-row resolver, not a poll-thread gate, since persisting is a
-#     synchronous side effect inside the existing alert stage. Hardcoded fallback: false.
-#   alert_provider / alert_model / alert_chat_path -- same shape as provider/model/chat_path (see
-#     profiles.yaml.example for the full explanation), but scoped to the alert stage only, so one
-#     type's alert analysis (the multi-image series) can route to a different provider than its own
-#     event analysis. Omitting these falls back to the plain provider/model/chat_path unchanged. If
-#     the effective alert provider is "llama_proxy" (the default either way), only the first image
-#     in the gathered series is ever sent -- multi-image support on a self-hosted backend is
-#     unverified.
-#   alert_crop_frame_offset_pct -- alert-stage-only override of crop_frame_offset_pct, letting one
-#     type's alert-stage high-res crops seek a different point in each linked event's span than its
-#     own event-stage value. Falls back to the plain crop_frame_offset_pct resolution when unset.
-#     Frigate never exposes a timestamp for its own best-frame choice anywhere in its API (checked
-#     directly -- not in the event JSON, not in the snapshot's response headers, not in EXIF; only
-#     visible at all via the camera's own burned-in on-screen clock, not programmatically
-#     extractable), so this is always a tuned approximation, not a sync to Frigate's exact choice.
-#   alert_ai_initial_wait_seconds (defaults: only, default 5) / alert_ai_max_images (defaults:
-#     only, default 4) -- alert-stage-only technical tuning knobs, see profiles.yaml.example.
+#   ai_events_stage_enabled -- true/false, alternative to n8n/metadata-processor.json (see
+#     CLAUDE.md's "Internal AI stage" section). Setting this true for at least one type (or in
+#     `defaults`) is enough to start the stage's poll thread -- see
+#     profile_config.any_ai_events_stage_enabled, used by main.py's thread-startup check.
+#     Hardcoded fallback: false.
+#   crop_disabled / crop_frame_offset_pct / crop_padding_pct -- crop framing for this type's own
+#     event crop (always our own record-stream seek+crop -- see crop.crop_event). Resolved fresh
+#     for every event, since crop_worker already processes every type regardless -- no
+#     queue/thread implications, just how the crop is framed. e.g. a `car` entry could tune
+#     crop_padding_pct for tighter plate legibility while other types keep the default. Hardcoded
+#     fallback: crop_disabled=false, crop_frame_offset_pct=0.5, crop_padding_pct=0.2.
+#   ai_image_max_dimension -- the long side (px) of the downscaled copy actually sent to the VLM
+#     and stored in Postgres (raw_events.crop_image_base64) -- a downscale of the same
+#     full-resolution crop crop.crop_event always builds. Per-type since a plate-heavy vehicle
+#     prompt may want more resolution than a person/dog prompt. Hardcoded fallback: 1280.
+#   store_video / store_video_alerts / store_event_images -- true/false. Unlike the AI-stage flag
+#     above, these apply to *any* Frigate label by default (not just ones with a profiles.yaml
+#     prompt entry), so a type can get its own entry here purely to carry one of these keys, with
+#     no chat_path/prompt at all. store_event_images persists the full-resolution crop
+#     crop.crop_event already built to disk under EVENT_IMAGES_STORAGE_PATH -- off by default. e.g.
+#     a `person` entry could set store_video: false to skip storing clips for people while cars
+#     still get them. Hardcoded fallback: false (all three).
 #
 # defaults: (optional) -- common values applied to every object type that doesn't set its own for
-# that same key, sitting between the per-type overrides above and the hardcoded fallback. Leave it
-# out entirely (or omit individual keys) to fall straight through to the hardcoded fallback,
-# exactly as if this section didn't exist.
+# that same key. Leave it out entirely (or omit individual keys) to fall straight through to the
+# hardcoded fallback, exactly as if this section didn't exist.
 # defaults:
 #   store_video: false
 #   crop_padding_pct: 0.3
@@ -108,15 +81,13 @@ object_types:
     # telegram_events_mode: image
     # telegram_alerts_mode: all
     # ai_events_stage_enabled: true
-    # ai_alerts_enabled: true
     # crop_disabled: false
     # crop_frame_offset_pct: 0.5
-    # alert_crop_frame_offset_pct: 0.3
     # crop_padding_pct: 0.2
-    # frigate_snapshot_enabled: true
+    # ai_image_max_dimension: 1280
     # store_video: true
     # store_video_alerts: true
-    # store_alert_images: true
+    # store_event_images: true
     event_prompt: >-
       This image shows a single moment from one vehicle sighting. In one or two short sentences,
       describe the vehicle's color, body type (sedan/suv/truck/van/pickup/minivan/etc.), make and
@@ -125,15 +96,6 @@ object_types:
       color/wrap, aftermarket wheels), and the license plate text if it's visible and legible. If a
       detail isn't visible or you're not confident, simply omit it rather than guessing. Do not
       describe your process.
-    alert_prompt: >-
-      These are several high-resolution photos of the SAME vehicle captured at different moments
-      during one visit (not different vehicles) -- use all of them together for the most confident
-      read, since a detail unclear in one photo (angle, glare, motion blur) may be legible in
-      another, e.g. the plate. In one or two short sentences, describe the vehicle's color, body
-      type, make and model if identifiable, notable features, the license plate text if
-      visible/legible in any photo, and what changed or happened across the sequence (e.g. "pulled
-      into the driveway and parked", "drove past left to right", "reversed out and left"). If a
-      detail isn't visible, omit it. Do not describe your process.
   truck: *vehicle_profile
   person:
     chat_path: /REPLACE_WITH_PERSON_SLOT/v1/chat/completions
@@ -141,11 +103,5 @@ object_types:
     event_prompt: >-
       This image shows a single moment of one person. Describe their clothing colors and what
       they appear to be doing in this one frame, in one short sentence. No speculation about
-      identity.
-    alert_prompt: >-
-      These are several high-resolution photos of the SAME person captured at different moments
-      during one visit (not different people) -- use all of them together, since a detail unclear
-      in one photo may be visible in another. Describe this person's clothing colors (a static
-      detail, most reliable from whichever photo shows it most clearly) and what they appear to be
-      doing across the sequence -- e.g. walking toward the door, carrying something, getting
-      in/out of a vehicle -- in one short sentence covering both. No speculation about identity.
+      identity. Do not describe your process or repeat these instructions -- respond with only
+      the one-sentence description.

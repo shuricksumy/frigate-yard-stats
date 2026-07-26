@@ -69,7 +69,7 @@ def test_get_stage_counts_has_expected_shape(conn_ok):
     result = db.get_stage_counts()
     assert set(result.keys()) == {"raw_events", "visits"}
     assert set(result["raw_events"].keys()) == {"crop_status", "video_status", "ai_status"}
-    assert set(result["visits"].keys()) == {"video_status", "alert_ai_status"}
+    assert set(result["visits"].keys()) == {"video_status"}
 
 
 def test_get_stage_counts_counts_a_failed_ai_row(conn_ok):

@@ -223,40 +223,27 @@
   <div class="modal-backdrop" x-show="lightboxEvent" @click.self="closeLightbox()" style="display:none">
     <div class="modal lightbox">
       <button class="close" @click="closeLightbox()">&times;</button>
-      <a class="download" x-show="lightboxEvent && lightboxAlertImageIndex === null" style="display:none" :href="lightboxDownloadUrl()" :download="lightboxDownloadFilename()" title="Download">&#8681;</a>
-      <div class="lightbox-toggle" x-show="lightboxEvent && lightboxEvent.has_video && lightboxEvent.has_image && lightboxAlertImageIndex === null" style="display:none">
+      <a class="download" x-show="lightboxEvent" style="display:none" :href="lightboxDownloadUrl()" :download="lightboxDownloadFilename()" title="Download">&#8681;</a>
+      <div class="lightbox-toggle" x-show="lightboxEvent && lightboxEvent.has_video && lightboxEvent.has_image" style="display:none">
         <button x-show="lightboxEvent && lightboxEvent.has_video" :class="{ active: lightboxMode === 'video' }" @click="lightboxMode = 'video'">Video</button>
         <button x-show="lightboxEvent && lightboxEvent.has_image" :class="{ active: lightboxMode === 'image' }" @click="lightboxMode = 'image'">Image</button>
       </div>
-      <!-- Viewing one of the alert stage's own gathered images (clicked from the gallery strip
-           below) -- same popup, not a new tab, with its own way back. The AI analysis description
-           panel further down stays visible/unchanged the whole time. -->
-      <template x-if="lightboxAlertImageIndex !== null">
-        <img :src="lightboxAlertImageUrls[lightboxAlertImageIndex]" alt="AI analysis image, full size">
-      </template>
-      <template x-if="lightboxAlertImageIndex === null && lightboxEvent && lightboxEvent.has_video && lightboxMode === 'video'">
+      <template x-if="lightboxEvent && lightboxEvent.has_video && lightboxMode === 'video'">
         <video controls autoplay :src="lightboxVideoUrl()"></video>
       </template>
-      <template x-if="lightboxAlertImageIndex === null && lightboxEvent && lightboxEvent.has_image && (lightboxMode === 'image' || !lightboxEvent.has_video)">
+      <template x-if="lightboxEvent && lightboxEvent.has_image && (lightboxMode === 'image' || !lightboxEvent.has_video)">
         <img :src="lightboxImageUrl()" alt="event full image">
       </template>
       <!-- A row can still be openable with no media left at all (a retention purge clears
            crop_image_base64/video_path but keeps the row and its AI analysis text) -- show a
            placeholder instead of a broken image/video. -->
-      <div class="lightbox-no-media" x-show="lightboxAlertImageIndex === null && lightboxEvent && !lightboxEvent.has_image && !lightboxEvent.has_video" style="display:none">
+      <div class="lightbox-no-media" x-show="lightboxEvent && !lightboxEvent.has_image && !lightboxEvent.has_video" style="display:none">
         No media available — likely cleared by a retention purge. AI analysis below is still preserved.
-      </div>
-      <!-- Back bar for viewing one of the alert stage's own gathered images (see above) -- takes
-           priority display-wise over the Connected-events back bar below, since the two states
-           can't both be true at once in practice (a connected event isn't a visit, so it never has
-           its own alert image gallery). -->
-      <div class="lightbox-back-bar" x-show="lightboxAlertImageIndex !== null" style="display:none">
-        <button type="button" class="link-button" @click="backFromAlertImage()">&larr; Back</button>
       </div>
       <!-- Only shown after drilling into one of a visit's own "Connected events" -- not gated on
            that event's own ai_status (unlike .lightbox-info below), since the way back should
            still be available even if this particular connected event hasn't been analyzed yet. -->
-      <div class="lightbox-back-bar" x-show="lightboxAlertImageIndex === null && lightboxParentVisit" style="display:none">
+      <div class="lightbox-back-bar" x-show="lightboxParentVisit" style="display:none">
         <button type="button" class="link-button" @click="backToVisit()">&larr; Back to alert</button>
       </div>
       <div class="lightbox-info" x-show="lightboxEvent && (lightboxEvent.visitId || lightboxEvent.ai_status === 'done')" style="display:none">
@@ -278,22 +265,6 @@
             </div>
           </template>
         </template>
-      </div>
-      <!-- The alert stage's own gathered high-res crops (STORE_ALERT_IMAGES) -- what the alert
-           analysis above actually looked at, not just its written description. Visits only, and
-           only when that option was on and produced at least one file for this visit. Each
-           thumbnail opens full-size in this same lightbox's main media area (see
-           lightboxAlertImageIndex above), with a "Back" button to return -- same popup pattern as
-           the rest of the app, not a new browser tab. -->
-      <div class="lightbox-alert-images" x-show="lightboxAlertImageUrls.length > 0" style="display:none">
-        <h4>AI analysis images (<span x-text="lightboxAlertImageUrls.length"></span>)</h4>
-        <div class="alert-images-strip">
-          <template x-for="(url, i) in lightboxAlertImageUrls" :key="url">
-            <a href="#" @click.prevent="viewAlertImage(i)" :class="{ active: lightboxAlertImageIndex === i }">
-              <img :src="url" alt="alert analysis image" loading="lazy">
-            </a>
-          </template>
-        </div>
       </div>
       <!-- Every raw_event this visit grouped together (Frigate's own review/tracker grouping),
            not just the deduped AI-analyzed sighting(s) above -- click one to open its own

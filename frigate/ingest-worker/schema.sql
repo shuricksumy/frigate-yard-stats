@@ -59,25 +59,23 @@ CREATE INDEX IF NOT EXISTS idx_visits_zone_ts ON yard_stats.visits (zone, start_
 CREATE INDEX IF NOT EXISTS idx_visits_video_status ON yard_stats.visits (video_status);
 CREATE INDEX IF NOT EXISTS idx_visits_thumb_crop_status ON yard_stats.visits (thumb_crop_status);
 
--- Sixth queue stage (AI_ALERTS_ENABLED) -- analyzes a series of high-res per-event crops gathered
--- fresh from the visit's own linked raw_events at processing time (crop.crop_event_high_res, see
--- alert_ai_worker.py), never a stored visit-level image, using profiles.yaml's alert_prompt
--- (framed for a series of separate high-res photos, unlike AI_EVENTS_STAGE_ENABLED's event_prompt
--- which is framed for one static frame). Independent of raw_events.ai_status entirely -- a visit's
--- alert-level analysis and its linked raw_events' own event-level analysis are two separate
--- results, stored in two separate places (see visit_sightings below vs. sightings), so both can
--- run at once without one overwriting or blocking the other.
+-- DEPRECATED -- the alert AI stage (AI_ALERTS_ENABLED/alert_ai_worker.py) that used to populate
+-- these columns was removed entirely: a visit's "alert" is now its own video plus its
+-- individually-analyzed connected events (see raw_events.image_path below and CLAUDE.md's "Alert
+-- AI stage" section for the full history), not a second gathered-image VLM call. These columns
+-- stay in schema.sql, unwritten and unread by any code path, following this project's own
+-- established precedent for the earlier visit-preview grid/GIF removal (see
+-- visits.crop_image_base64/preview_gif_base64/thumb_crop_status below) -- dropping them is a
+-- separate, deferred migration, not bundled with the removal itself.
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS alert_ai_status TEXT NOT NULL DEFAULT 'new'
   CHECK (alert_ai_status IN ('new', 'processing', 'retry', 'failed', 'done', 'skipped'));
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS alert_ai_status_changed_at TIMESTAMPTZ NOT NULL DEFAULT now();
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS alert_ai_attempt_count INTEGER NOT NULL DEFAULT 0;
 CREATE INDEX IF NOT EXISTS idx_visits_alert_ai_status ON yard_stats.visits (alert_ai_status);
 
--- Optional, opt-in (STORE_ALERT_IMAGES/store_alert_images) filesystem persistence of the same
--- high-res crops gathered for alert analysis above -- comma-joined file paths only (same
--- convention as the `objects` column), the actual JPEG bytes live under
--- ALERT_IMAGES_STORAGE_PATH on disk, never in Postgres. NULL until the alert stage has both run
--- and had this option enabled for the visit's representative object type. See alert_images.py.
+-- DEPRECATED, same reasoning as alert_ai_status above -- backed STORE_ALERT_IMAGES/
+-- alert_images.py, both removed. Superseded by raw_events.image_path (see below), which persists
+-- the events stage's own full-resolution crop instead.
 ALTER TABLE yard_stats.visits ADD COLUMN IF NOT EXISTS alert_image_paths TEXT;
 
 -- One row per Frigate "end" event, any label (car/truck/person/dog/...). Carries three
@@ -116,8 +114,15 @@ CREATE TABLE IF NOT EXISTS yard_stats.raw_events (
   -- (VIDEO_STORAGE_PATH), never in Postgres.
   video_path TEXT,
   -- The exact cropped JPEG (base64) ingest-worker produced for this event -- lives here (not the
-  -- sightings tables) since it's produced before AI analysis and is label-agnostic.
+  -- sightings tables) since it's produced before AI analysis and is label-agnostic. This is
+  -- always a downscale (crop.py's scale_image_base64) of the full-resolution crop crop.crop_event
+  -- itself built -- see image_path below for the full-resolution original.
   crop_image_base64 TEXT,
+  -- Optional filesystem path to the full-resolution version of the same crop (STORE_EVENT_IMAGES/
+  -- store_event_images, see event_images.py) -- only the path lives here, the JPEG bytes live
+  -- under EVENT_IMAGES_STORAGE_PATH on disk, never in Postgres. NULL until the crop stage has both
+  -- run and had this option enabled for the event's own object type.
+  image_path TEXT,
   -- Captured from the same Frigate API fetch used to get the crop region -- the settled/final LPR
   -- read and detection score, not the live MQTT "end" payload's values (sub_label in particular
   -- can resolve after the event first fires). Kept here so n8n's AI stage never calls Frigate's
@@ -183,12 +188,9 @@ CREATE TABLE IF NOT EXISTS yard_stats.sightings (
 CREATE INDEX IF NOT EXISTS idx_sightings_raw_event ON yard_stats.sightings (raw_event_id);
 CREATE INDEX IF NOT EXISTS idx_sightings_object_label ON yard_stats.sightings (object_label);
 
--- One row per alert-stage-analyzed visit (AI_ALERTS_ENABLED) -- same universal shape as
--- sightings above, keyed by visit_id instead of raw_event_id, since this analyzes a series of
--- high-res crops gathered from the visit's own linked raw_events rather than any single event's
--- own crop. description covers both static attributes and what changed across that series in one
--- flowing answer -- alert_prompt asks for both together, there's no separate structured "notes"
--- field.
+-- DEPRECATED -- kept, unwritten and unread by any code path, same reasoning as
+-- visits.alert_ai_status above: this backed the now-removed alert AI stage (one row per
+-- alert-stage-analyzed visit, same universal shape as sightings above but keyed by visit_id).
 CREATE TABLE IF NOT EXISTS yard_stats.visit_sightings (
   id SERIAL PRIMARY KEY,
   visit_id INTEGER REFERENCES yard_stats.visits(id),

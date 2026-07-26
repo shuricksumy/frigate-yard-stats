@@ -4,7 +4,6 @@ import threading
 import uvicorn
 
 import ai_worker
-import alert_ai_worker
 import alert_video_worker
 import config
 import crop_worker
@@ -50,11 +49,6 @@ def main():
     # least one object type opts in.
     if profile_config.any_ai_events_stage_enabled(profile):
         threading.Thread(target=ai_worker.run_forever, args=(profile,), name="ai_worker", daemon=True).start()
-    # Independent switch, independent thread, independent queue (visits.alert_ai_status) -- can
-    # run alongside or instead of AI_EVENTS_STAGE_ENABLED, same "A/B independently" precedent as
-    # STORE_VIDEO_ALERTS/TELEGRAM_ALERTS_MODE. Same per-type-override-can-start-it-anyway check.
-    if profile_config.any_ai_alerts_enabled(profile):
-        threading.Thread(target=alert_ai_worker.run_forever, args=(profile,), name="alert_ai_worker", daemon=True).start()
     uvicorn.run(app, host="0.0.0.0", port=config.API_PORT)
 
 

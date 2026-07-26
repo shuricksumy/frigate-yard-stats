@@ -1,9 +1,8 @@
 -- Debug/maintenance toolkit for both queue tables: raw_events (crop_status owned directly by
 -- ingest-worker; ai_status mechanically executed via its /ai-queue/* API or the internal
 -- ai_worker.py poll loop; video_status owned by video_worker.py) and visits (video_status owned
--- by alert_video_worker.py; alert_ai_status owned by alert_ai_worker.py -- see the VISITS section
--- below). Run these against postgres-projects / home_automation as needed -- nothing here runs
--- automatically.
+-- by alert_video_worker.py -- see the VISITS section below). Run these against postgres-projects /
+-- home_automation as needed -- nothing here runs automatically.
 
 -- ============================================================================
 -- RAW_EVENTS (events flow -- frigate/events, one row per Frigate object detection)
@@ -104,16 +103,22 @@ WHERE id IN (SELECT id FROM targets);
 DROP TABLE targets;
 
 -- ============================================================================
--- VISITS (alerts flow -- frigate/reviews) -- separate table, separate queue stages
--- (video_status/alert_ai_status) from raw_events' crop_status/ai_status/video_status above.
--- See CLAUDE.md's "Visit grouping"/"Alert AI stage" sections.
+-- VISITS (alerts flow -- frigate/reviews) -- separate table, own queue stage (video_status) from
+-- raw_events' crop_status/ai_status/video_status above. See CLAUDE.md's "Visit grouping" section.
+--
+-- alert_ai_status/alert_ai_attempt_count/alert_ai_status_changed_at below are DEPRECATED -- they
+-- backed the alert AI stage (alert_ai_worker.py), which was removed entirely (a visit's "alert" is
+-- now its video plus its own individually-analyzed connected events, not a second gathered-image
+-- VLM call -- see CLAUDE.md's "Alert AI stage" section). The columns still exist (unwritten by any
+-- code path) purely so any pre-existing data from before the removal can still be inspected/purged;
+-- resetting alert_ai_status on a row no longer causes any worker to pick it up.
 -- ============================================================================
 
 -- CHECK: current status breakdown
-SELECT objects, video_status, alert_ai_status, count(*)
+SELECT objects, video_status, count(*)
 FROM yard_stats.visits
-GROUP BY objects, video_status, alert_ai_status
-ORDER BY objects, video_status, alert_ai_status;
+GROUP BY objects, video_status
+ORDER BY objects, video_status;
 
 -- CHECK: what's in flight right now (visit video stage -- alert_video_worker), and for how long
 SELECT id, cameras, objects, video_status, video_status_changed_at, now() - video_status_changed_at AS age
@@ -121,17 +126,10 @@ FROM yard_stats.visits
 WHERE video_status = 'processing'
 ORDER BY video_status_changed_at;
 
--- CHECK: what's in flight right now (alert AI stage -- alert_ai_worker), and for how long
-SELECT id, cameras, objects, alert_ai_status, alert_ai_status_changed_at, now() - alert_ai_status_changed_at AS age
+-- CHECK: recently failed visits (video stage)
+SELECT id, cameras, objects, video_status, video_attempt_count, video_status_changed_at AS last_changed
 FROM yard_stats.visits
-WHERE alert_ai_status = 'processing'
-ORDER BY alert_ai_status_changed_at;
-
--- CHECK: recently failed visits, either stage
-SELECT id, cameras, objects, video_status, video_attempt_count, alert_ai_status, alert_ai_attempt_count,
-       greatest(video_status_changed_at, alert_ai_status_changed_at) AS last_changed
-FROM yard_stats.visits
-WHERE video_status = 'failed' OR alert_ai_status = 'failed'
+WHERE video_status = 'failed'
 ORDER BY last_changed DESC
 LIMIT 50;
 
@@ -146,30 +144,15 @@ GROUP BY v.id, v.cameras, v.objects
 ORDER BY v.id DESC
 LIMIT 50;
 
--- FIX: force everything stuck in a given visit stage back to 'retry' right now
+-- FIX: force everything stuck in the visit video stage back to 'retry' right now
 UPDATE yard_stats.visits SET video_status = 'retry', video_status_changed_at = now()
 WHERE video_status = 'processing';
 
-UPDATE yard_stats.visits SET alert_ai_status = 'retry', alert_ai_status_changed_at = now()
-WHERE alert_ai_status = 'processing';
-
--- FIX: retry every video-failed / alert-ai-failed visit (fresh attempt count -- these already
--- used up their max-attempts cap, so without resetting attempt_count they'd just fail again)
+-- FIX: retry every video-failed visit (fresh attempt count -- these already used up their
+-- max-attempts cap, so without resetting attempt_count they'd just fail again)
 UPDATE yard_stats.visits
 SET video_status = 'retry', video_attempt_count = 0, video_status_changed_at = now()
 WHERE video_status = 'failed';
-
-UPDATE yard_stats.visits
-SET alert_ai_status = 'retry', alert_ai_attempt_count = 0, alert_ai_status_changed_at = now()
-WHERE alert_ai_status = 'failed';
-
--- FIX: fully reprocess one visit's alert-AI stage that already has a sighting row (e.g. after a
--- prompt change you want re-run) -- delete its old result first, then reset alert_ai_status, or
--- the worker would insert a duplicate sighting alongside the old one. alert_ai_worker gathers its
--- own high-res crops fresh from Frigate at processing time -- there's no stored artifact to clear
--- first the way there used to be for the old composite grid.
-DELETE FROM yard_stats.visit_sightings WHERE visit_id = 1234; -- <-- replace
-UPDATE yard_stats.visits SET alert_ai_status = 'new', alert_ai_attempt_count = 0, alert_ai_status_changed_at = now() WHERE id = 1234; -- <-- replace
 
 -- ============================================================================
 -- RESET FROM SCRATCH (destructive -- only for test/dev data, not for production history)
@@ -186,12 +169,10 @@ UPDATE yard_stats.visits SET alert_ai_status = 'new', alert_ai_attempt_count = 0
 --   crop_status = 'new', crop_attempt_count = 0, crop_status_changed_at = now(), crop_image_base64 = NULL,
 --   ai_status = 'new', ai_attempt_count = 0, ai_status_changed_at = now();
 
--- Option B2: same idea, for visits' own video/alert-AI stages (STORE_VIDEO_ALERTS/
--- AI_ALERTS_ENABLED) -- independent of Option B above, since these are separate artifacts.
--- TRUNCATE yard_stats.visit_sightings;
+-- Option B2: same idea, for visits' own video stage (STORE_VIDEO_ALERTS) -- independent of
+-- Option B above, since these are separate artifacts.
 -- UPDATE yard_stats.visits SET
---   video_status = 'new', video_attempt_count = 0, video_status_changed_at = now(), video_path = NULL,
---   alert_ai_status = 'new', alert_ai_attempt_count = 0, alert_ai_status_changed_at = now();
+--   video_status = 'new', video_attempt_count = 0, video_status_changed_at = now(), video_path = NULL;
 
 -- Option C: nuke everything in the schema and let ingest-worker rebuild it
 -- DROP SCHEMA IF EXISTS yard_stats CASCADE;

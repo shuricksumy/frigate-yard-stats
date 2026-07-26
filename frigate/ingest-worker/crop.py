@@ -83,21 +83,24 @@ _FALLBACK_FRAME_OFFSET_SECONDS = 1.0
 
 
 def _build_vf_filter(
-    box: list[float], max_dimension: int,
+    box: list[float], max_dimension: int | None,
     crop_disabled: bool | None = None, crop_padding_pct: float | None = None,
 ) -> str:
     if crop_disabled is None:
         crop_disabled = config.CROP_DISABLED
     if crop_padding_pct is None:
         crop_padding_pct = config.CROP_PADDING_PCT
+    # max_dimension=None means no scale filter at all -- the crop stays at whatever resolution the
+    # record stream naturally gives it (used for the full-resolution storage copy; the AI-facing
+    # copy is produced afterward via scale_image_base64 instead of a second ffmpeg scale here).
     scale_filter = (
         f"scale='min({max_dimension},iw)':'min({max_dimension},ih)':"
         "force_original_aspect_ratio=decrease"
-    )
+    ) if max_dimension is not None else None
     if crop_disabled:
         # box is unused in this mode -- no validation needed, since it never affects the result
         # (the frame is scaled down but never cropped to a region).
-        return scale_filter
+        return scale_filter or "null"
     x1, y1, x2, y2 = box
     w, h = x2 - x1, y2 - y1
     if w <= 0 or h <= 0:
@@ -108,14 +111,18 @@ def _build_vf_filter(
     crop_x2 = min(config.RECORD_WIDTH, x2 + pad_x)
     crop_y2 = min(config.RECORD_HEIGHT, y2 + pad_y)
     crop_filter = f"crop={crop_x2 - crop_x1}:{crop_y2 - crop_y1}:{crop_x1}:{crop_y1}"
-    return f"{crop_filter},{scale_filter}"
+    return f"{crop_filter},{scale_filter}" if scale_filter else crop_filter
 
 
 def crop_and_scale(
     clip_url: str, timestamp_offset: float, box: list[float],
     crop_disabled: bool | None = None, crop_padding_pct: float | None = None,
+    max_dimension: int | None = None,
 ) -> str:
-    vf = _build_vf_filter(box, config.MAX_CROP_DIMENSION, crop_disabled, crop_padding_pct)
+    # max_dimension=None (the default) -- no scale filter, the crop is left at native record-stream
+    # resolution. Callers that want the original AI-facing capped size pass config.MAX_CROP_DIMENSION
+    # (or a per-type override) explicitly.
+    vf = _build_vf_filter(box, max_dimension, crop_disabled, crop_padding_pct)
 
     with tempfile.TemporaryDirectory() as tmp:
         frame_path = os.path.join(tmp, "frame.jpg")
@@ -139,70 +146,47 @@ def crop_and_scale(
             return base64.b64encode(f.read()).decode()
 
 
-def fetch_frigate_snapshot_base64(det_id: str) -> str:
-    # Frigate's own already-rendered best-detection-score frame -- no ffmpeg involved at all, just
-    # the raw JPEG bytes Frigate itself already produced. See FRIGATE_SNAPSHOT_ENABLED's comment in
-    # config.py for the resolution/overlay trade-off this accepts in exchange for better framing.
-    resp = requests.get(f"{config.FRIGATE_API_BASE}/api/events/{det_id}/snapshot.jpg", timeout=10)
-    resp.raise_for_status()
-    return base64.b64encode(resp.content).decode()
-
-
-def crop_event_high_res(
-    raw_event: dict,
-    crop_frame_offset_pct: float | None = None,
-    crop_disabled: bool | None = None,
-    crop_padding_pct: float | None = None,
-    event: dict | None = None,
-) -> str:
-    # A genuine ffmpeg seek+crop+scale from the record stream, via the event-id-scoped clip
-    # endpoint (/api/events/{det_id}/clip.mp4) -- NOT the continuous-recording start/end endpoint
-    # video.build_clip_url uses for visits, which is what caused the old visit-preview grid's
-    # abandoned unpredictable-padding bugs (see CLAUDE.md). This endpoint is confirmed far more
-    # durable (observed surviving over an hour vs. ~36 minutes for the continuous-recording one),
-    # so it's safe to call once per selected event when gathering high-res images for the alert
-    # stage, regardless of whether FRIGATE_SNAPSHOT_ENABLED is on for that same event's own
-    # (low-res) events-stage analysis. Factored out of crop_event so both callers share one
-    # implementation. `event` lets a caller that already fetched the Frigate event (crop_event's
-    # own non-snapshot branch) pass it through instead of fetching it a second time; omitted, it's
-    # fetched fresh (the shape every other caller, e.g. alert_ai_worker, actually needs).
-    if crop_frame_offset_pct is None:
-        crop_frame_offset_pct = config.CROP_FRAME_OFFSET_PCT
-    det_id = raw_event["det_id"]
-    if event is None:
-        event = fetch_frigate_event(det_id)
-    box = compute_full_res_box(event)
-    offset = compute_frame_offset_seconds(
-        raw_event["start_ts"], raw_event["end_ts"], crop_frame_offset_pct,
-    )
-    clip_url = f"{config.FRIGATE_API_BASE}/api/events/{det_id}/clip.mp4"
-    return crop_and_scale(clip_url, offset, box, crop_disabled, crop_padding_pct)
-
-
 def crop_event(
     raw_event: dict,
-    frigate_snapshot_enabled: bool | None = None,
     crop_disabled: bool | None = None,
     crop_frame_offset_pct: float | None = None,
     crop_padding_pct: float | None = None,
+    ai_image_max_dimension: int | None = None,
 ) -> dict:
     # sub_label/score come from this same Frigate API fetch (not the live MQTT "end" payload)
     # because LPR/sub_label resolution can settle after the event first fires -- this is the
     # settled, final read. Captured here rather than re-fetched later so the AI-processing
     # stage (n8n) never needs to call Frigate's API at all.
-    if frigate_snapshot_enabled is None:
-        frigate_snapshot_enabled = config.FRIGATE_SNAPSHOT_ENABLED
+    #
+    # A genuine ffmpeg seek+crop from the record stream, via the event-id-scoped clip endpoint
+    # (/api/events/{det_id}/clip.mp4) -- NOT the continuous-recording start/end endpoint
+    # video.build_clip_url uses for visits, which is what caused the old visit-preview grid's
+    # abandoned unpredictable-padding bugs (see CLAUDE.md). This endpoint is confirmed far more
+    # durable (observed surviving over an hour vs. ~36 minutes for the continuous-recording one).
+    # One seek produces one full-resolution crop; the AI-facing (and DB-stored) copy is a cheap
+    # scale_image_base64 downscale of that same crop, not a second seek/fetch. This is the same
+    # capture path the alert stage used to use on its own (crop_event_high_res, now folded in here
+    # since that was its only other caller) -- there is no longer a separate Frigate-snapshot image
+    # source to choose between (see FRIGATE_SNAPSHOT_ENABLED's removal in CLAUDE.md).
+    if crop_frame_offset_pct is None:
+        crop_frame_offset_pct = config.CROP_FRAME_OFFSET_PCT
     det_id = raw_event["det_id"]
     event = fetch_frigate_event(det_id)
     data = event.get("data") or {}
-    if frigate_snapshot_enabled:
-        crop_image_base64 = fetch_frigate_snapshot_base64(det_id)
-    else:
-        crop_image_base64 = crop_event_high_res(
-            raw_event, crop_frame_offset_pct, crop_disabled, crop_padding_pct, event=event,
-        )
+    box = compute_full_res_box(event)
+    offset = compute_frame_offset_seconds(
+        raw_event["start_ts"], raw_event["end_ts"], crop_frame_offset_pct,
+    )
+    clip_url = f"{config.FRIGATE_API_BASE}/api/events/{det_id}/clip.mp4"
+    full_res_image_base64 = crop_and_scale(clip_url, offset, box, crop_disabled, crop_padding_pct)
+    ai_image_base64 = scale_image_base64(
+        full_res_image_base64, ai_image_max_dimension or config.MAX_CROP_DIMENSION,
+    )
     return {
-        "crop_image_base64": crop_image_base64,
+        "crop_image_base64": ai_image_base64,
+        # Never stored in Postgres -- only written to disk (event_images.store_event_image) when
+        # STORE_EVENT_IMAGES resolves true for this event's own object type.
+        "full_res_image_base64": full_res_image_base64,
         "sub_label": event.get("sub_label"),
         "score": data.get("score"),
     }

@@ -139,10 +139,10 @@ def get_table_row_counts() -> dict:
 
 
 def get_stage_counts() -> dict:
-    # Per-stage status breakdown (crop/video/ai on raw_events; video/alert_ai on visits) for the
-    # admin dashboard's queue-health section -- table/column names below are always one of the
-    # fixed literals passed by this function's own callers below, never caller-supplied, so
-    # building the query with an f-string carries no injection risk.
+    # Per-stage status breakdown (crop/video/ai on raw_events; video on visits) for the admin
+    # dashboard's queue-health section -- table/column names below are always one of the fixed
+    # literals passed by this function's own callers below, never caller-supplied, so building the
+    # query with an f-string carries no injection risk.
     def _counts(table: str, column: str) -> dict:
         rows = _execute(
             f"SELECT {column} AS status, count(*)::int AS count FROM yard_stats.{table} "
@@ -159,7 +159,6 @@ def get_stage_counts() -> dict:
         },
         "visits": {
             "video_status": _counts("visits", "video_status"),
-            "alert_ai_status": _counts("visits", "alert_ai_status"),
         },
     }
 
@@ -253,7 +252,6 @@ _REQUEUE_TARGETS = {
     ("raw_events", "video"): ("yard_stats.raw_events", "video_status", "video_attempt_count", "video_status_changed_at"),
     ("raw_events", "ai"): ("yard_stats.raw_events", "ai_status", "ai_attempt_count", "ai_status_changed_at"),
     ("visits", "video"): ("yard_stats.visits", "video_status", "video_attempt_count", "video_status_changed_at"),
-    ("visits", "alert_ai"): ("yard_stats.visits", "alert_ai_status", "alert_ai_attempt_count", "alert_ai_status_changed_at"),
 }
 
 
@@ -447,12 +445,19 @@ def get_raw_event(event_id: int) -> dict | None:
     rows = _execute(
         """
         SELECT *, (video_path IS NOT NULL) AS has_video,
-               (crop_image_base64 IS NOT NULL) AS has_image
+               (image_path IS NOT NULL OR crop_image_base64 IS NOT NULL) AS has_image
         FROM yard_stats.raw_events WHERE id = %s
         """,
         (event_id,), fetch=True,
     )
     return rows[0] if rows else None
+
+
+def set_event_image_path(event_id: int, image_path: str) -> None:
+    _execute(
+        "UPDATE yard_stats.raw_events SET image_path = %s WHERE id = %s",
+        (image_path, event_id),
+    )
 
 
 def get_sighting_for_event(raw_event_id: int) -> dict | None:
@@ -567,8 +572,8 @@ def record_visit(review: dict, profile: dict | None = None) -> int | None:
     # built layer. Insert + link in one transaction, same pattern as complete_sighting.
     #
     # store_video_alerts is resolved against the visit's own representative object type (same
-    # single-type-per-visit convention claim_alert_ai_batch already uses for a visit that can span
-    # multiple distinct types) -- computed here via det_ids since the visit row (and its
+    # single-type-per-visit convention claim_visit_video_batch already uses for a visit that can
+    # span multiple distinct types) -- computed here via det_ids since the visit row (and its
     # raw_events.visit_id link, which get_representative_event_for_visit relies on) doesn't exist
     # yet at this point.
     representative_label = _get_representative_object_label_for_det_ids(review["det_ids"])
@@ -617,7 +622,7 @@ def get_representative_event_for_visit(visit_id: int) -> dict | None:
     # the review closes -- see telegram.send_visit_summary).
     rows = _execute(
         """
-        SELECT id, camera, objects, crop_image_base64, det_id
+        SELECT id, camera, objects, crop_image_base64, image_path, det_id
         FROM yard_stats.raw_events
         WHERE visit_id = %s
         ORDER BY start_ts ASC, id ASC
@@ -626,26 +631,6 @@ def get_representative_event_for_visit(visit_id: int) -> dict | None:
         (visit_id,), fetch=True,
     )
     return rows[0] if rows else None
-
-
-def get_raw_events_for_visit(visit_id: int) -> list[dict]:
-    # Every raw_event linked to a visit, with det_id/start_ts/end_ts -- what alert_ai_worker needs
-    # to gather a high-res crop per selected event (crop.crop_event_high_res, keyed by det_id/
-    # start_ts/end_ts). Deliberately a plain read, not a claim/lock function -- this stage never
-    # touches raw_events.ai_status at all (see claim_alert_ai_batch), so there's no state to guard
-    # here, just fresh data fetched every time a claimed visit is processed. list_events(visit_id=)
-    # isn't reusable for this since its own SELECT doesn't include det_id (it's a web-UI-facing
-    # query with a different column set). Ordered by (objects, start_ts) so the object-type-dedup
-    # selection alert_ai_worker does in Python can group same-type rows together for free.
-    return _execute(
-        """
-        SELECT id, det_id, objects, start_ts, end_ts
-        FROM yard_stats.raw_events
-        WHERE visit_id = %s
-        ORDER BY objects, start_ts
-        """,
-        (visit_id,), fetch=True,
-    )
 
 
 def set_visit_telegram_photo_message_id(visit_id: int, message_id: int) -> None:
@@ -695,11 +680,11 @@ def claim_visit_video_batch(
     # video. See alert_video_worker.py.
     #
     # object_types/exclude_object_types match against the visit's own *representative* event's
-    # objects (via a LATERAL join, same convention claim_alert_ai_batch already uses) rather than
-    # visits.objects, since a visit's objects column can span more than one distinct type -- see
-    # claim_alert_ai_batch's own comment for why. Only joined in at all when a filter is actually
-    # requested, so the unfiltered default case (both None) runs the exact same query as before
-    # per-type overrides existed.
+    # objects (via a LATERAL join) rather than visits.objects, since a visit's objects column can
+    # span more than one distinct type (e.g. "car,person") and there's no single-type-safe way to
+    # filter the row itself by one label. Only joined in at all when a filter is actually requested,
+    # so the unfiltered default case (both None) runs the exact same query as before per-type
+    # overrides existed.
     age_clause = ""
     type_clause = ""
     join_clause = ""
@@ -1018,8 +1003,22 @@ def run_retention_cleanup(retention_months: int) -> None:
             (retention_months,), fetch=True,
         )
     ]
-    # Same reasoning as video_path above -- a visit's alert_image_paths (STORE_ALERT_IMAGES) is
-    # comma-joined, so each row can contribute several individual files, not just one.
+    # raw_events.image_path (STORE_EVENT_IMAGES) -- the events stage's own full-resolution crop,
+    # collected the same way as video_path above.
+    video_paths += [
+        row["image_path"] for row in _execute(
+            """
+            SELECT image_path FROM yard_stats.raw_events
+            WHERE start_ts < now() - (%s || ' months')::interval AND image_path IS NOT NULL
+            """,
+            (retention_months,), fetch=True,
+        )
+    ]
+    # DEPRECATED -- visits.alert_image_paths (the now-removed alert stage's own gathered crops) can
+    # still have leftover rows/files from before that stage was removed; kept here as a one-time-ish
+    # courtesy cleanup so they don't become permanently orphaned on disk, even though no new row
+    # will ever populate this column going forward. Comma-joined, so each row can contribute
+    # several individual files, not just one.
     for row in _execute(
         """
         SELECT alert_image_paths FROM yard_stats.visits
@@ -1142,6 +1141,14 @@ def purge_older_than(
             [cutoff, *type_params, *camera_params], fetch=True,
         )
     ]
+    # raw_events.image_path (STORE_EVENT_IMAGES) -- single-object-type-per-row, so this applies
+    # under an object_label-scoped purge too (unlike visits.alert_image_paths below).
+    video_paths += [
+        row["image_path"] for row in _execute(
+            f"SELECT image_path FROM yard_stats.raw_events WHERE start_ts < %s AND image_path IS NOT NULL {type_clause_bare} {camera_clause_bare}",
+            [cutoff, *type_params, *camera_params], fetch=True,
+        )
+    ]
     if not object_label:
         video_paths += [
             row["video_path"] for row in _execute(
@@ -1149,8 +1156,9 @@ def purge_older_than(
                 [cutoff, *visits_camera_params], fetch=True,
             )
         ]
-        # Comma-joined -- each matching row can contribute several individual files (see
-        # visits.alert_image_paths / STORE_ALERT_IMAGES).
+        # DEPRECATED -- visits.alert_image_paths (the now-removed alert stage's own gathered
+        # crops), kept as a courtesy cleanup for any pre-existing rows/files; comma-joined, so each
+        # matching row can contribute several individual files.
         for row in _execute(
             f"SELECT alert_image_paths FROM yard_stats.visits WHERE start_ts < %s AND alert_image_paths IS NOT NULL {visits_camera_clause}",
             [cutoff, *visits_camera_params], fetch=True,
@@ -1215,7 +1223,7 @@ def purge_media_older_than(
     camera: str | None = None,
     delete_video: bool = True,
     delete_snapshots: bool = False,
-    delete_alert_images: bool = True,
+    delete_event_images: bool = True,
 ) -> dict:
     # POST /retention/purge's only_media=true mode (the default) -- clears stored media for rows
     # older than cutoff, but keeps the rows themselves and every text field on them (AI analysis,
@@ -1225,17 +1233,18 @@ def purge_media_older_than(
     #
     # Three independently toggleable categories -- video (raw_events.video_path + visits.video_path,
     # the actual files on disk), snapshots (raw_events.crop_image_base64, "Event Snapshots" -- the
-    # per-event still), and alert images (visits.alert_image_paths, STORE_ALERT_IMAGES -- the alert
-    # stage's own gathered high-res crops, comma-joined, several files per visit). Defaults (video
-    # and alert images on, snapshots off) match this project's own judgment on which artifacts are
-    # safe to routinely discard (large, rarely revisited) vs. which are worth keeping longer (small,
-    # still useful for a quick visual check). (The visit-level composite grid/GIF this used to also
-    # cover were removed entirely -- see CLAUDE.md's "Visit preview".)
+    # small AI-facing copy), and event images (raw_events.image_path, STORE_EVENT_IMAGES -- the
+    # events stage's own full-resolution crop). Defaults (video and event images on, snapshots off)
+    # match this project's own judgment on which artifacts are safe to routinely discard (large,
+    # rarely revisited) vs. which are worth keeping longer (small, still useful for a quick visual
+    # check). Unlike the old alert-images flag this replaced, event images live on raw_events (a
+    # single-object-type-per-row concept), so object_label scoping applies to it cleanly -- no
+    # visits-only exemption needed.
     #
-    # object_label (optional), same scoping decision as purge_older_than: only raw_events (a
-    # single-type-per-row concept) are filtered by it -- visits (which can span multiple object
-    # types in one row) are never touched at all when object_label is set, since there's no
-    # single-type-safe way to decide a multi-type visit's own media belongs to just one purge.
+    # object_label (optional): only raw_events are filtered by it -- visits (which can span
+    # multiple object types in one row) are never touched at all when object_label is set, since
+    # there's no single-type-safe way to decide a multi-type visit's own media belongs to just one
+    # purge.
     #
     # camera (optional), unlike object_label, DOES apply to visits too -- visit grouping is
     # per-camera only (see "Visit grouping" in CLAUDE.md), so visits.cameras is always a single,
@@ -1262,12 +1271,12 @@ def purge_media_older_than(
             f"SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE start_ts < %s AND crop_image_base64 IS NOT NULL {type_clause} {camera_clause}",
             [cutoff, *type_params, *camera_params], fetch=True,
         )[0]["c"],
+        "raw_events_image_files": _execute(
+            f"SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE start_ts < %s AND image_path IS NOT NULL {type_clause} {camera_clause}",
+            [cutoff, *type_params, *camera_params], fetch=True,
+        )[0]["c"],
         "visits_video_files": 0 if object_label else _execute(
             f"SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s AND video_path IS NOT NULL {visits_camera_clause}",
-            [cutoff, *visits_camera_params], fetch=True,
-        )[0]["c"],
-        "visits_alert_images": 0 if object_label else _execute(
-            f"SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s AND alert_image_paths IS NOT NULL {visits_camera_clause}",
             [cutoff, *visits_camera_params], fetch=True,
         )[0]["c"],
     }
@@ -1290,18 +1299,18 @@ def purge_media_older_than(
                 ]
             deleted_files = _delete_video_files(video_paths)
 
-        deleted_alert_image_files = 0
-        if delete_alert_images and not object_label:
-            alert_image_paths = []
-            for row in _execute(
-                f"SELECT alert_image_paths FROM yard_stats.visits WHERE start_ts < %s AND alert_image_paths IS NOT NULL {visits_camera_clause}",
-                [cutoff, *visits_camera_params], fetch=True,
-            ):
-                alert_image_paths += row["alert_image_paths"].split(",")
-            deleted_alert_image_files = _delete_video_files(alert_image_paths)
+        deleted_event_image_files = 0
+        if delete_event_images:
+            event_image_paths = [
+                row["image_path"] for row in _execute(
+                    f"SELECT image_path FROM yard_stats.raw_events WHERE start_ts < %s AND image_path IS NOT NULL {type_clause} {camera_clause}",
+                    [cutoff, *type_params, *camera_params], fetch=True,
+                )
+            ]
+            deleted_event_image_files = _delete_video_files(event_image_paths)
 
-        # raw_events: video_path and/or crop_image_base64 (Event Snapshots) -- one UPDATE covering
-        # whichever of the two toggles is actually on, rather than one query per column.
+        # raw_events: video_path and/or crop_image_base64 (Event Snapshots) and/or image_path
+        # (full-resolution event image) -- one UPDATE covering whichever toggles are actually on.
         re_sets, re_wheres = [], []
         if delete_video:
             re_sets.append("video_path = NULL")
@@ -1309,6 +1318,9 @@ def purge_media_older_than(
         if delete_snapshots:
             re_sets.append("crop_image_base64 = NULL")
             re_wheres.append("crop_image_base64 IS NOT NULL")
+        if delete_event_images:
+            re_sets.append("image_path = NULL")
+            re_wheres.append("image_path IS NOT NULL")
         if re_sets:
             _execute(
                 f"""
@@ -1318,30 +1330,23 @@ def purge_media_older_than(
                 [cutoff, *type_params, *camera_params],
             )
 
-        # visits: video_path and/or alert_image_paths -- never touched at all when object_label is
-        # set, same reasoning as the counts above.
-        v_sets, v_wheres = [], []
-        if delete_video:
-            v_sets.append("video_path = NULL")
-            v_wheres.append("video_path IS NOT NULL")
-        if delete_alert_images:
-            v_sets.append("alert_image_paths = NULL")
-            v_wheres.append("alert_image_paths IS NOT NULL")
-        if not object_label and v_sets:
+        # visits: video_path only -- never touched at all when object_label is set, same reasoning
+        # as the counts above.
+        if delete_video and not object_label:
             _execute(
                 f"""
-                UPDATE yard_stats.visits SET {', '.join(v_sets)}
-                WHERE start_ts < %s AND ({' OR '.join(v_wheres)}) {visits_camera_clause}
+                UPDATE yard_stats.visits SET video_path = NULL
+                WHERE start_ts < %s AND video_path IS NOT NULL {visits_camera_clause}
                 """,
                 [cutoff, *visits_camera_params],
             )
 
         counts["video_files_deleted"] = deleted_files
-        counts["alert_image_files_deleted"] = deleted_alert_image_files
+        counts["event_image_files_deleted"] = deleted_event_image_files
         logger.info(
             "Media-only purge executed (cutoff=%s, object_label=%s, camera=%s, delete_video=%s, "
-            "delete_snapshots=%s, delete_alert_images=%s, counts=%s)",
-            cutoff, object_label, camera, delete_video, delete_snapshots, delete_alert_images, counts,
+            "delete_snapshots=%s, delete_event_images=%s, counts=%s)",
+            cutoff, object_label, camera, delete_video, delete_snapshots, delete_event_images, counts,
         )
 
     return counts
@@ -1386,7 +1391,7 @@ def _build_events_query(
         # specific known event, or every event linked to one specific visit, should find them
         # regardless of whether they have media yet, same reasoning as event_id bypassing the time
         # window at the API layer.
-        clauses.append("(re.crop_image_base64 IS NOT NULL OR re.video_path IS NOT NULL)")
+        clauses.append("(re.crop_image_base64 IS NOT NULL OR re.image_path IS NOT NULL OR re.video_path IS NOT NULL)")
     if event_id is not None:
         clauses.append("re.id = %s")
         params.append(event_id)
@@ -1429,7 +1434,7 @@ def _build_events_query(
         SELECT DISTINCT re.id, re.camera, re.zone, re.objects, re.start_ts, re.end_ts,
                re.crop_status, re.ai_status, re.video_status,
                re.sub_label, re.score, (re.video_path IS NOT NULL) AS has_video,
-               (re.crop_image_base64 IS NOT NULL) AS has_image
+               (re.crop_image_base64 IS NOT NULL OR re.image_path IS NOT NULL) AS has_image
         FROM yard_stats.raw_events re
         {join}
         {where}
@@ -1550,7 +1555,7 @@ def _build_visits_query(
                 v.video_status AS visit_video_status,
                 (v.video_path IS NOT NULL) AS visit_has_video,
                 re.id AS event_id, re.ai_status, re.crop_status,
-                (re.crop_image_base64 IS NOT NULL) AS event_has_image,
+                (re.crop_image_base64 IS NOT NULL OR re.image_path IS NOT NULL) AS event_has_image,
                 row_number() OVER (PARTITION BY v.id ORDER BY re.start_ts ASC, re.id ASC) AS rn,
                 count(*) OVER (PARTITION BY v.id) AS event_count
             FROM yard_stats.visits v
@@ -1802,7 +1807,7 @@ def claim_ai_batch(
         WHERE yard_stats.raw_events.id = claimable.id
         RETURNING yard_stats.raw_events.*,
                   (yard_stats.raw_events.video_path IS NOT NULL) AS has_video,
-                  (yard_stats.raw_events.crop_image_base64 IS NOT NULL) AS has_image
+                  (yard_stats.raw_events.crop_image_base64 IS NOT NULL OR yard_stats.raw_events.image_path IS NOT NULL) AS has_image
         """,
         params,
         fetch=True,
@@ -1942,7 +1947,7 @@ def semantic_search_combined(
             f"""
             SELECT 'event' AS kind, re.id AS id, s.id AS sighting_id, re.start_ts, re.camera,
                    re.objects, s.object_label, s.description, s.embedding <=> %s::vector AS distance,
-                   (re.crop_image_base64 IS NOT NULL) AS has_image,
+                   (re.crop_image_base64 IS NOT NULL OR re.image_path IS NOT NULL) AS has_image,
                    (re.video_path IS NOT NULL) AS has_video, re.ai_status
             FROM yard_stats.sightings s
             JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
@@ -1974,7 +1979,7 @@ def semantic_search_combined(
             SELECT 'visit' AS kind, v.id AS id, vs.id AS sighting_id, v.start_ts, v.cameras AS camera,
                    v.objects, vs.object_label, vs.description, vs.embedding <=> %s::vector AS distance,
                    COALESCE((
-                       SELECT re.crop_image_base64 IS NOT NULL
+                       SELECT re.crop_image_base64 IS NOT NULL OR re.image_path IS NOT NULL
                        FROM yard_stats.raw_events re
                        WHERE re.visit_id = v.id
                        ORDER BY re.start_ts ASC, re.id ASC
@@ -2048,187 +2053,9 @@ def fail_ai_event(event_id: int, max_attempts: int) -> dict:
     return rows[0]
 
 
-def reap_stale_alert_ai_processing(stale_minutes: int) -> None:
-    _execute(
-        """
-        UPDATE yard_stats.visits
-        SET alert_ai_status = 'retry', alert_ai_status_changed_at = now()
-        WHERE alert_ai_status = 'processing'
-          AND alert_ai_status_changed_at < now() - (%s * interval '1 minute')
-        """,
-        (stale_minutes,),
-    )
-
-
-def count_alert_ai_in_progress() -> int:
-    rows = _execute(
-        "SELECT count(*)::int AS c FROM yard_stats.visits WHERE alert_ai_status = 'processing'",
-        fetch=True,
-    )
-    return rows[0]["c"] if rows else 0
-
-
-def claim_alert_ai_batch(
-    object_types: list[str],
-    parallel_limit: int,
-    stale_minutes: int,
-    max_age_hours: float | None = None,
-) -> list:
-    # Sixth queue stage (AI_ALERTS_ENABLED), claiming from visits.alert_ai_status instead of
-    # raw_events.ai_status -- mirrors claim_ai_batch's reap-stale + count-in-progress + CTE-claim
-    # shape (same FOR UPDATE SKIP LOCKED reason). A visit is claimable as soon as it exists (subject
-    # to the same reap-stale/capacity/object-type filters every other claim function already has) --
-    # there's no pre-built artifact to wait on: alert_ai_worker.process_claimed_visit gathers its own
-    # high-res crops directly from Frigate at processing time (see crop.crop_event_high_res), rather
-    # than depending on a separate thumb-crop stage having finished a grid ahead of time (the
-    # now-removed visits.thumb_crop_status gate this used to require). object_types is matched
-    # against the visit's own *representative* event's objects (the earliest-linked raw_event), not
-    # visits.objects (a comma-joined list that can span several distinct types per visit, e.g.
-    # "car,person" -- see record_visit) -- alert_prompt/provider selection is still single-type-at-
-    # a-time, so the representative event's own label is what determines which profiles.yaml prompt
-    # applies, same as before.
-    reap_stale_alert_ai_processing(stale_minutes)
-    in_progress = count_alert_ai_in_progress()
-    capacity = max(0, parallel_limit - in_progress)
-    if capacity == 0:
-        return []
-
-    age_clause = ""
-    params: list = [object_types]
-    if max_age_hours is not None:
-        age_clause = "AND v.start_ts >= now() - (%s * interval '1 hour')"
-        params.append(max_age_hours)
-    params.append(capacity)
-
-    return _execute(
-        f"""
-        WITH claimable AS (
-            SELECT v.id FROM yard_stats.visits v
-            JOIN LATERAL (
-                SELECT re.objects FROM yard_stats.raw_events re
-                WHERE re.visit_id = v.id
-                ORDER BY re.start_ts ASC, re.id ASC
-                LIMIT 1
-            ) rep ON true
-            WHERE v.alert_ai_status IN ('new', 'retry')
-              AND rep.objects = ANY(%s)
-              {age_clause}
-            ORDER BY v.start_ts DESC
-            LIMIT %s
-            FOR UPDATE SKIP LOCKED
-        )
-        UPDATE yard_stats.visits
-        SET alert_ai_status = 'processing', alert_ai_status_changed_at = now()
-        FROM claimable
-        JOIN LATERAL (
-            SELECT re.objects, re.det_id, re.id AS representative_event_id
-            FROM yard_stats.raw_events re
-            WHERE re.visit_id = claimable.id
-            ORDER BY re.start_ts ASC, re.id ASC
-            LIMIT 1
-        ) rep ON true
-        WHERE yard_stats.visits.id = claimable.id
-        RETURNING yard_stats.visits.*, rep.objects, rep.det_id, rep.representative_event_id
-        """,
-        params,
-        fetch=True,
-    )
-
-
-def complete_visit_sighting(
-    visit_id: int,
-    object_label: str | None,
-    description: str | None,
-    embedding: list[float] | None = None,
-) -> int:
-    # Same insert-plus-mark-done-in-one-transaction shape as complete_sighting, just against
-    # visit_sightings/visits.alert_ai_status instead of sightings/raw_events.ai_status.
-    conn = get_conn()
-    conn.autocommit = False
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                INSERT INTO yard_stats.visit_sightings (visit_id, object_label, description, embedding)
-                VALUES (%s, %s, %s, %s::vector)
-                RETURNING id
-                """,
-                (visit_id, object_label, description, _vector_literal(embedding)),
-            )
-            sighting_id = cur.fetchone()["id"]
-            cur.execute(
-                "UPDATE yard_stats.visits SET alert_ai_status = 'done', alert_ai_status_changed_at = now() WHERE id = %s",
-                (visit_id,),
-            )
-        conn.commit()
-        return sighting_id
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.autocommit = True
-
-
-def fail_alert_ai_event(visit_id: int, max_attempts: int) -> dict:
-    # Same retry-or-fail-with-cap CASE logic as fail_ai_event, against visits.alert_ai_status.
-    rows = _execute(
-        """
-        UPDATE yard_stats.visits
-        SET alert_ai_attempt_count = alert_ai_attempt_count + 1,
-            alert_ai_status = CASE WHEN alert_ai_attempt_count + 1 >= %s THEN 'failed' ELSE 'retry' END,
-            alert_ai_status_changed_at = now()
-        WHERE id = %s
-        RETURNING alert_ai_status, alert_ai_attempt_count
-        """,
-        (max_attempts, visit_id),
-        fetch=True,
-    )
-    return rows[0]
-
-
-def get_visit_alert_sighting(visit_id: int) -> dict | None:
-    # The visit's own alert-stage analysis (a series of high-res per-event crops, see
-    # alert_ai_worker.py), if AI_ALERTS_ENABLED has produced one -- used by
-    # GET /visits/{id}/sightings so the web UI's Visits-tab lightbox can prefer this over the
-    # representative event's own per-event sighting (see get_sightings_for_visit), falling back to
-    # that when this is null (alert stage off, or not finished yet for this visit).
-    rows = _execute(
-        """
-        SELECT id, visit_id, object_label, description
-        FROM yard_stats.visit_sightings WHERE visit_id = %s
-        ORDER BY id DESC LIMIT 1
-        """,
-        (visit_id,), fetch=True,
-    )
-    return rows[0] if rows else None
-
-
-def set_visit_alert_image_paths(visit_id: int, paths: list[str]) -> None:
-    # Persists the alert stage's gathered high-res crops' filesystem paths (STORE_ALERT_IMAGES,
-    # see alert_images.py) -- comma-joined, same convention as visits.objects. Called once per
-    # successful gather in alert_ai_worker.process_claimed_visit; an empty list clears the column
-    # back to NULL rather than storing an empty string.
-    _execute(
-        "UPDATE yard_stats.visits SET alert_image_paths = %s WHERE id = %s",
-        (",".join(paths) if paths else None, visit_id),
-    )
-
-
-def get_visit_alert_image_paths(visit_id: int) -> list[str]:
-    # Read side for the above -- also backs GET /visits/{id}/sightings' alert_image_count and
-    # GET /media/alert-image/{visit_id}/{index}'s lookup.
-    rows = _execute(
-        "SELECT alert_image_paths FROM yard_stats.visits WHERE id = %s",
-        (visit_id,), fetch=True,
-    )
-    if not rows or not rows[0]["alert_image_paths"]:
-        return []
-    return rows[0]["alert_image_paths"].split(",")
-
-
 def get_report_data(
     start: datetime, end: datetime, source: str = "events", include_image: bool = True,
-    object_label: str | None = None, include_alert_images: bool = False,
+    object_label: str | None = None,
 ) -> dict:
     # Same joins daily-report.json's two query nodes used to run directly -- filtered by
     # created_at (when the AI stage produced the sighting), not start_ts, matching that behavior.
@@ -2259,16 +2086,6 @@ def get_report_data(
     # comes back NULL, so no separate rendering path is needed for that case.
     if not include_image:
         crop_image_expr = "NULL"
-    # include_alert_images (source="visits" only -- an events-stage sighting has no visit-level
-    # alert image series at all) pulls visits.alert_image_paths in alongside the representative
-    # event's own crop, for report.py's _alert_images_cell thumbnail strip. A LEFT JOIN (a
-    # raw_event's visit_id can be NULL for one never grouped by Frigate's review stream) gated
-    # behind the same param so a caller that doesn't want this pays no extra join cost at all.
-    visit_join = ""
-    alert_image_paths_expr = "NULL"
-    if source == "visits" and include_alert_images:
-        visit_join = "LEFT JOIN yard_stats.visits v ON v.id = re.visit_id"
-        alert_image_paths_expr = "v.alert_image_paths"
     # visit_id is included so report.py can group a visit's sightings into one combined alert
     # entry (source="visits" only -- always NULL under source="events", where there's no grouping
     # concept and every sighting is its own entry). One universal query now -- object_label tells
@@ -2289,11 +2106,9 @@ def get_report_data(
         f"""
         SELECT re.id AS raw_event_id, re.visit_id, re.camera, re.zone, re.start_ts,
                {crop_image_expr} AS crop_image_base64,
-               {alert_image_paths_expr} AS alert_image_paths,
                s.object_label, s.description
         FROM yard_stats.sightings s
         JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
-        {visit_join}
         WHERE s.created_at >= %s AND s.created_at <= %s
         {visit_clause}
         {label_clause}

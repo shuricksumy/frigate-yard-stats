@@ -25,11 +25,11 @@ PROFILE = {
     "object_types": {
         "car": {
             "chat_path": "/vehicle-slot/v1/chat/completions",
-            "event_prompt": "vehicle event prompt", "alert_prompt": "vehicle alert prompt",
+            "event_prompt": "vehicle event prompt",
         },
         "person": {
             "chat_path": "/person-slot/v1/chat/completions",
-            "event_prompt": "person event prompt", "alert_prompt": "person alert prompt",
+            "event_prompt": "person event prompt",
         },
     },
 }
@@ -225,9 +225,7 @@ def test_load_profile_parses_real_file():
     assert set(profile["object_types"]) == {"car", "truck", "person"}
     assert "dog" not in profile["object_types"]
     assert profile["object_types"]["car"]["event_prompt"]
-    assert profile["object_types"]["car"]["alert_prompt"]
     assert profile["object_types"]["person"]["event_prompt"]
-    assert profile["object_types"]["person"]["alert_prompt"]
     # truck shares car's prompt via a YAML anchor -- confirms it actually resolved, not just present.
     assert profile["object_types"]["truck"]["event_prompt"] == profile["object_types"]["car"]["event_prompt"]
 

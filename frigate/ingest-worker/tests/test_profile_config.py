@@ -19,7 +19,6 @@ PROFILE = {
         },
         "dog": {
             "ai_events_stage_enabled": True,
-            "ai_alerts_enabled": True,
         },
         "person": {},
     },
@@ -67,12 +66,6 @@ def test_ai_events_stage_enabled_falls_back_to_global_when_no_override(monkeypat
     assert profile_config.ai_events_stage_enabled(PROFILE, "person") is False
 
 
-def test_ai_alerts_enabled_type_override_and_fallback(monkeypatch):
-    monkeypatch.setattr(config, "AI_ALERTS_ENABLED", False)
-    assert profile_config.ai_alerts_enabled(PROFILE, "dog") is True
-    assert profile_config.ai_alerts_enabled(PROFILE, "person") is False
-
-
 def test_any_ai_events_stage_enabled_true_when_global_on(monkeypatch):
     monkeypatch.setattr(config, "AI_EVENTS_STAGE_ENABLED", True)
     assert profile_config.any_ai_events_stage_enabled({}) is True
@@ -92,11 +85,6 @@ def test_any_ai_events_stage_enabled_false_when_nothing_enables_it(monkeypatch):
     monkeypatch.setattr(config, "AI_EVENTS_STAGE_ENABLED", False)
     assert profile_config.any_ai_events_stage_enabled({"object_types": {"car": {}}}) is False
     assert profile_config.any_ai_events_stage_enabled(None) is False
-
-
-def test_any_ai_alerts_enabled_true_when_any_type_opts_in(monkeypatch):
-    monkeypatch.setattr(config, "AI_ALERTS_ENABLED", False)
-    assert profile_config.any_ai_alerts_enabled(PROFILE) is True  # dog opts in
 
 
 # ---- profile-wide `defaults` section (common override tier, between per-type and global) ----
@@ -130,7 +118,7 @@ def test_any_ai_events_stage_enabled_true_via_defaults_section(monkeypatch):
 CROP_PROFILE = {
     "defaults": {"crop_padding_pct": 0.3},
     "object_types": {
-        "car": {"crop_disabled": True, "crop_frame_offset_pct": 0.9, "frigate_snapshot_enabled": False},
+        "car": {"crop_disabled": True, "crop_frame_offset_pct": 0.9, "ai_image_max_dimension": 640},
         "person": {},
     },
 }
@@ -149,33 +137,6 @@ def test_crop_frame_offset_pct_uses_type_override_and_falls_back_to_global(monke
     assert profile_config.crop_frame_offset_pct(CROP_PROFILE, "person") == 0.5
 
 
-def test_alert_crop_frame_offset_pct_falls_back_to_plain_crop_frame_offset_pct(monkeypatch):
-    # No alert_crop_frame_offset_pct set anywhere -- behaves exactly like the plain
-    # crop_frame_offset_pct resolution, so an existing profiles.yaml needs no edit.
-    monkeypatch.setattr(config, "CROP_FRAME_OFFSET_PCT", 0.5)
-    assert profile_config.alert_crop_frame_offset_pct(CROP_PROFILE, "car") == 0.9
-    assert profile_config.alert_crop_frame_offset_pct(CROP_PROFILE, "person") == 0.5
-    assert profile_config.alert_crop_frame_offset_pct(None, "car") == 0.5
-
-
-def test_alert_crop_frame_offset_pct_type_override_wins():
-    profile = {
-        "object_types": {
-            "car": {"crop_frame_offset_pct": 0.9, "alert_crop_frame_offset_pct": 0.3},
-        },
-    }
-    assert profile_config.alert_crop_frame_offset_pct(profile, "car") == 0.3
-
-
-def test_alert_crop_frame_offset_pct_defaults_section_applies_before_plain_fallback(monkeypatch):
-    monkeypatch.setattr(config, "CROP_FRAME_OFFSET_PCT", 0.5)
-    profile = {
-        "defaults": {"alert_crop_frame_offset_pct": 0.2},
-        "object_types": {"car": {}},
-    }
-    assert profile_config.alert_crop_frame_offset_pct(profile, "car") == 0.2
-
-
 def test_crop_padding_pct_uses_defaults_section_when_no_type_override(monkeypatch):
     monkeypatch.setattr(config, "CROP_PADDING_PCT", 0.2)
     # Neither "car" nor "person" sets crop_padding_pct of their own -- both inherit the `defaults`
@@ -185,10 +146,19 @@ def test_crop_padding_pct_uses_defaults_section_when_no_type_override(monkeypatc
     assert profile_config.crop_padding_pct(None, "car") == 0.2
 
 
-def test_frigate_snapshot_enabled_uses_type_override_and_falls_back_to_global(monkeypatch):
-    monkeypatch.setattr(config, "FRIGATE_SNAPSHOT_ENABLED", True)
-    assert profile_config.frigate_snapshot_enabled(CROP_PROFILE, "car") is False
-    assert profile_config.frigate_snapshot_enabled(CROP_PROFILE, "person") is True
+def test_ai_image_max_dimension_uses_type_override_and_falls_back_to_global(monkeypatch):
+    monkeypatch.setattr(config, "MAX_CROP_DIMENSION", 1280)
+    assert profile_config.ai_image_max_dimension(CROP_PROFILE, "car") == 640
+    assert profile_config.ai_image_max_dimension(CROP_PROFILE, "person") == 1280
+    assert profile_config.ai_image_max_dimension(None, "car") == 1280
+
+
+def test_store_event_images_uses_type_override_and_falls_back_to_global(monkeypatch):
+    monkeypatch.setattr(config, "STORE_EVENT_IMAGES", False)
+    profile = {"object_types": {"car": {"store_event_images": True}, "person": {}}}
+    assert profile_config.store_event_images(profile, "car") is True
+    assert profile_config.store_event_images(profile, "person") is False
+    assert profile_config.store_event_images(None, "car") is False
 
 
 # ---- store_video / store_video_alerts claim filters ----

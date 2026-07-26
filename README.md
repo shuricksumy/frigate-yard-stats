@@ -22,17 +22,15 @@ footage) — just to show the UI itself in motion. Same recording as an
   stores the result — no image analysis yet at this point. Optionally stores the clip itself
   (per-event and/or per-visit) and sends Telegram notifications (photo/video per event, or one
   summary + video per visit).
-- Two internal AI-stage poll loops (off by default): `ai_worker.py` sends each event's own single
-  cropped image to a VLM; `alert_ai_worker.py` gathers a series of several genuinely high-resolution
-  crops from the events linked to a visit (built fresh at analysis time, never stored) and sends
-  those in one call, for a richer read on what happened across the whole visit. Both are
-  locally-hosted by default, or OpenAI/Claude per object type — and per stage, so a type's alert
-  analysis can route to a different provider than its own event analysis — if you'd rather use a
-  hosted provider for one or more types (see
-  [`docs/configuration.md`](docs/configuration.md#hosted-vlm-providers-openai--claude)) — using
-  whatever prompt `profiles.yaml` defines for that Frigate object type — a vehicle prompt asking
-  for color/body-type/plate, a person prompt asking for a clothing description, and so on.
-  Frigate's own LPR read is kept alongside whatever the VLM says as a cross-check.
+- An internal AI-stage poll loop (off by default): `ai_worker.py` sends each event's own cropped
+  image to a VLM, using whatever prompt `profiles.yaml` defines for that Frigate object type — a
+  vehicle prompt asking for color/body-type/plate, a person prompt asking for a clothing
+  description, and so on. Locally-hosted by default, or OpenAI/Claude per object type if you'd
+  rather use a hosted provider for one or more types (see
+  [`docs/configuration.md`](docs/configuration.md#hosted-vlm-providers-openai--claude)). Frigate's
+  own LPR read is kept alongside whatever the VLM says as a cross-check. A visit's own lightbox in
+  the web UI shows every one of its linked events' sightings together, plus its own stored video —
+  there's no separate visit-level VLM call.
 - A read/query/report/AI-queue API on `ingest-worker` (events, visits, sightings, aggregate stats,
   HTML report generation, plus the AI-stage queue mechanics the internal stage uses and n8n or any
   other caller can use instead) and a natural-language
@@ -81,19 +79,17 @@ ingest-worker/  (Python, one container, no LLM calls)
      at /ui over that same API
    │  (crop_status = 'done')
    ▼
-AI stages (ai_worker.py + alert_ai_worker.py, internal ingest-worker poll-loop threads, off by
+AI stage (ai_worker.py, an internal ingest-worker poll-loop thread, off by
           default -- or a custom n8n workflow/script calling the same /ai-queue/* API instead)
-   - ai_worker.py claims individual events, calls the VLM with that event's own single crop
-   - alert_ai_worker.py claims visits, gathers a series of high-res per-event crops fresh at
-     analysis time (never stored) and calls the VLM with all of them in one request
-   - either way: per profiles.yaml's prompt for that object type, writes the sighting back
+   - claims individual events, calls the VLM with that event's own crop, per profiles.yaml's
+     prompt for that object type, writes the sighting back
    │
    ▼
 Daily/alerts report + Q&A workflows (n8n) -- read-only, call ingest-worker's report/query API
 ```
 
-Three independent retry-with-backoff queue stages live on `raw_events` (crop, video, AI) and two
-more on `visits` (video, alert AI) — `ingest-worker` owns all of them mechanically,
+Three independent retry-with-backoff queue stages live on `raw_events` (crop, video, AI) and one
+more on `visits` (video) — `ingest-worker` owns all of them mechanically,
 including the AI stage's own policy (parallel limit, stale/max-age cutoffs, all tunable in
 `profiles.yaml`/`.env`) when using the built-in `ai_worker.py`; an external caller driving the same
 `/ai-queue/*` API instead (e.g. a custom n8n workflow) would decide that policy itself via query

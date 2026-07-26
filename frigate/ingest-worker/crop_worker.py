@@ -4,6 +4,7 @@ import time
 import config
 import crop
 import db
+import event_images
 import profile_config
 import retention
 import telegram
@@ -23,13 +24,26 @@ def process_claimed_event(row: dict, profile: dict | None = None) -> None:
         object_label = row.get("objects")
         result = crop.crop_event(
             row,
-            frigate_snapshot_enabled=profile_config.frigate_snapshot_enabled(profile, object_label),
             crop_disabled=profile_config.crop_disabled(profile, object_label),
             crop_frame_offset_pct=profile_config.crop_frame_offset_pct(profile, object_label),
             crop_padding_pct=profile_config.crop_padding_pct(profile, object_label),
+            ai_image_max_dimension=profile_config.ai_image_max_dimension(profile, object_label),
         )
         db.mark_crop_done(event_id, result["crop_image_base64"], result["sub_label"], result["score"])
         logger.info("Cropped raw_event id=%s det_id=%s", event_id, row.get("det_id"))
+
+        if profile_config.store_event_images(profile, object_label):
+            # Best-effort, non-fatal -- a disk-write failure (full disk, permissions) shouldn't
+            # take down the crop stage. Deterministic filename (object type + event id, not a
+            # timestamp) means a later retry of this same event overwrites the file rather than
+            # accumulating duplicates.
+            try:
+                image_path = event_images.store_event_image(row, result["full_res_image_base64"])
+                db.set_event_image_path(event_id, image_path)
+            except Exception:
+                logger.warning(
+                    "Failed to persist event image to disk for raw_event id=%s", event_id, exc_info=True,
+                )
 
         # Photo-first Telegram notification -- runs regardless of STORE_VIDEO (photo-only is a
         # valid steady state; video_worker sends a reply video later if video storage is on).
