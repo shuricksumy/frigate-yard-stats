@@ -1411,6 +1411,40 @@ Frigate already rendered, base64-encoded directly. `sub_label`/`score` still com
 back to `false` -- with the new default, there's no frame-seeking or region-cropping happening on
 our side to tune unless you opt back into it.
 
+**Confirmed again, live, against a real production event**: Frigate exposes no timestamp for its
+own best-frame/snapshot choice anywhere -- not in `GET /api/events/<id>`'s JSON (`data.score`/
+`data.top_score` are bare numbers with no associated time; `data.path_data` is a movement trail,
+`[[x, y], timestamp]` pairs for drawing a path overlay, not a per-frame score), not in the snapshot
+image's own HTTP response headers (no `Last-Modified`, no custom header), and not in its EXIF (none
+present at all). The *only* place a moment's real wall-clock time is visible at all is the camera's
+own burned-in on-screen timestamp overlay baked into the image's pixels -- readable by eye, not
+programmatically extractable without OCR (fragile: overlay position/format varies per camera, and
+the low-res snapshot makes it small). This means any offset-based seek -- `CROP_FRAME_OFFSET_PCT`
+for events, or the alert stage's own per-event seek below -- is fundamentally a guess, not a sync to
+Frigate's actual choice, and a single fixed percentage can't universally be "more correct": one real
+comparison for this section showed the snapshot's actual best moment landing right at the very
+start of a 14-second event (not the midpoint), consistent with the "content-dependent, no universal
+value" conclusion already reached above from separate live comparisons.
+
+**Bug found and fixed**: `alert_ai_worker.py`'s `_gather_alert_images`/`process_claimed_visit` never
+resolved or threaded `crop_frame_offset_pct` through to `crop.crop_event_high_res` at all -- every
+alert-stage high-res crop silently fell back to `crop_event_high_res`'s own default parameter
+handling (`config.CROP_FRAME_OFFSET_PCT`, the hardcoded module constant), regardless of whatever
+`profiles.yaml` actually set for `crop_frame_offset_pct`. Confirmed live: changing production's
+`defaults: crop_frame_offset_pct` had zero observable effect on the alert stage, since the value
+was never read from there in the first place. Fixed by resolving
+`profile_config.alert_crop_frame_offset_pct(profile, object_label)` in `process_claimed_visit` and
+threading it through `_gather_alert_images` into `crop.crop_event_high_res`, the same way
+`crop_disabled`/`crop_padding_pct` already were (those two *were* correctly threaded through the
+whole time -- only the offset was missing). `alert_crop_frame_offset_pct` is a new optional
+alert-stage-specific override (`profile_config.py`, same two-tier-then-fallback shape as every
+other per-row resolver): a type's own entry, then `defaults:`, then falls back to the plain
+`crop_frame_offset_pct` resolution unchanged -- so a `profiles.yaml` that never sets this new key
+keeps behaving exactly as before this fix (still ultimately `config.CROP_FRAME_OFFSET_PCT`'s
+hardcoded default, unless the plain `crop_frame_offset_pct` is itself now correctly reaching this
+path). Lets one type's alert-stage timing be tuned independently of its own event-stage value,
+same rationale `alert_provider`/`alert_model`/`alert_chat_path` already established.
+
 **Events only, deliberately** -- the events stage is entirely unaffected by anything below; it
 never used the visit-level preview feature this used to gate on.
 

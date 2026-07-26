@@ -61,9 +61,14 @@ instead — see "Per-object-type overrides" below for the full mechanism.
   detected region, so the crop isn't razor-tight around the object.
 - `crop_frame_offset_pct` (default `0.5`, in `profiles.yaml`) — *where* in the event's timespan to
   grab the frame (`0.0` = right at the start, `0.5` = midpoint, `1.0` = right at the end). There's
-  no universally "correct" value — Frigate picks its own best-scoring frame per event using logic
-  it doesn't expose, so this is a starting point to tune against your own footage if `0.5`
-  consistently looks off.
+  no universally "correct" value — Frigate never exposes a timestamp for its own best-frame choice
+  anywhere in its API (checked directly: not in the event JSON, not in the snapshot's response
+  headers, not in EXIF — the only place it's visible at all is the camera's own burned-in
+  on-screen clock, readable by eye but not extractable programmatically), so this is a starting
+  point to tune against your own footage if `0.5` consistently looks off, not a value that can be
+  computed or synced to Frigate's exact choice. This also drives the alert stage's own per-event
+  high-res crops (see "Internal AI stages" below) — set `alert_crop_frame_offset_pct` instead if
+  you want that stage's timing to differ from the events stage's own value for the same type.
 - `crop_disabled` (default `false`, in `profiles.yaml`) — skips cropping entirely; the full
   original camera frame (still scaled to `max_crop_dimension`) is used instead of a region around
   the object. This is a real trade-off, not a strict improvement: a full wide frame gives more
@@ -260,6 +265,8 @@ currently being processed:
 - `store_video` / `store_video_alerts` / `store_alert_images`
 - `provider` / `model` / `chat_path` (event-stage VLM routing) and `alert_provider` /
   `alert_model` / `alert_chat_path` (alert-stage override — see "Hosted VLM providers" below)
+- `alert_crop_frame_offset_pct` — alert-stage-only override of `crop_frame_offset_pct` (see
+  "Crop tuning" below), falling back to the plain `crop_frame_offset_pct` value when unset
 
 Two tiers, checked in this order:
 

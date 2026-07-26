@@ -74,6 +74,16 @@
 # self-hosted llama.cpp+mmproj backend is unverified, so this project doesn't assume it works;
 # ai_worker.py logs a warning (once) when this happens so it's not a silent surprise.
 #
+# alert_crop_frame_offset_pct (optional, per type or in defaults:) -- alert-stage-only override of
+# crop_frame_offset_pct below, letting one type's alert-stage high-res crops use a different seek
+# offset than its own event-stage value. Falls back to the plain crop_frame_offset_pct resolution
+# when unset -- an existing profiles.yaml needs no edit. Worth knowing: Frigate never exposes a
+# timestamp for its own best-frame choice anywhere in its API (confirmed directly -- checked the
+# event JSON, the snapshot's response headers, and its EXIF; the only place it's visible at all is
+# the camera's own burned-in on-screen clock overlay, readable by eye, not extractable
+# programmatically), so any offset here is a tuned approximation, not a sync to Frigate's exact
+# choice -- see crop_frame_offset_pct's own comment below for the same caveat on the events side.
+#
 # ---------------------------------------------------------------------------------------------
 # Three complete, mutually-exclusive shapes for wiring up ONE object type's chat call, shown
 # side by side so it's clear exactly which keys travel together -- don't mix keys from two of
@@ -273,6 +283,7 @@ object_types:
     # ai_alerts_enabled: true
     # crop_disabled: false
     # crop_frame_offset_pct: 0.5
+    # alert_crop_frame_offset_pct: 0.3
     # crop_padding_pct: 0.2
     # frigate_snapshot_enabled: true
     # store_video: true

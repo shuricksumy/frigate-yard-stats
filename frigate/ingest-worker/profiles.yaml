@@ -80,6 +80,13 @@
 #     the effective alert provider is "llama_proxy" (the default either way), only the first image
 #     in the gathered series is ever sent -- multi-image support on a self-hosted backend is
 #     unverified.
+#   alert_crop_frame_offset_pct -- alert-stage-only override of crop_frame_offset_pct, letting one
+#     type's alert-stage high-res crops seek a different point in each linked event's span than its
+#     own event-stage value. Falls back to the plain crop_frame_offset_pct resolution when unset.
+#     Frigate never exposes a timestamp for its own best-frame choice anywhere in its API (checked
+#     directly -- not in the event JSON, not in the snapshot's response headers, not in EXIF; only
+#     visible at all via the camera's own burned-in on-screen clock, not programmatically
+#     extractable), so this is always a tuned approximation, not a sync to Frigate's exact choice.
 #   alert_ai_initial_wait_seconds (defaults: only, default 5) / alert_ai_max_images (defaults:
 #     only, default 4) -- alert-stage-only technical tuning knobs, see profiles.yaml.example.
 #
@@ -104,6 +111,7 @@ object_types:
     # ai_alerts_enabled: true
     # crop_disabled: false
     # crop_frame_offset_pct: 0.5
+    # alert_crop_frame_offset_pct: 0.3
     # crop_padding_pct: 0.2
     # frigate_snapshot_enabled: true
     # store_video: true

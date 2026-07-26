@@ -67,6 +67,7 @@ def _select_events_for_alert(events: list[dict], max_images: int) -> list[dict]:
 
 def _gather_alert_images(
     events: list[dict], crop_disabled: bool | None = None, crop_padding_pct: float | None = None,
+    crop_frame_offset_pct: float | None = None,
 ) -> list[tuple[dict, str]]:
     # A single bad/expired linked event (Frigate's own event-id clip already rolled off, a
     # transient fetch error, ...) shouldn't fail the whole visit's alert analysis -- same "a gap
@@ -80,7 +81,8 @@ def _gather_alert_images(
     for event in events:
         try:
             image = crop.crop_event_high_res(
-                event, crop_disabled=crop_disabled, crop_padding_pct=crop_padding_pct,
+                event, crop_frame_offset_pct=crop_frame_offset_pct,
+                crop_disabled=crop_disabled, crop_padding_pct=crop_padding_pct,
             )
             gathered.append((event, image))
         except Exception:
@@ -128,11 +130,12 @@ def process_claimed_visit(row: dict, profile: dict) -> None:
     object_label = row.get("objects")
     crop_disabled = profile_config.crop_disabled(profile, object_label)
     crop_padding_pct = profile_config.crop_padding_pct(profile, object_label)
+    crop_frame_offset_pct = profile_config.alert_crop_frame_offset_pct(profile, object_label)
 
     try:
         linked_events = db.get_raw_events_for_visit(visit_id)
         selected = _select_events_for_alert(linked_events, config.ALERT_AI_MAX_IMAGES)
-        gathered = _gather_alert_images(selected, crop_disabled, crop_padding_pct)
+        gathered = _gather_alert_images(selected, crop_disabled, crop_padding_pct, crop_frame_offset_pct)
         if not gathered:
             raise ValueError(f"Could not gather any high-res images for visit id={visit_id}")
         gathered_events = [event for event, _image in gathered]

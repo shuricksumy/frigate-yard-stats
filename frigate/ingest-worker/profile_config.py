@@ -79,6 +79,24 @@ def crop_frame_offset_pct(profile: dict | None, object_label: str | None) -> flo
     return _resolve(profile, object_label, "crop_frame_offset_pct", config.CROP_FRAME_OFFSET_PCT)
 
 
+def alert_crop_frame_offset_pct(profile: dict | None, object_label: str | None) -> float:
+    # Optional alert-stage-specific override, same shape as alert_provider/alert_model/
+    # alert_chat_path -- lets one type's alert-stage crop timing differ from its own event-stage
+    # value, since the two stages can reasonably want different offsets (the events stage's own
+    # value is moot whenever frigate_snapshot_enabled is on, but the alert stage always does a
+    # real seek, so its offset choice actually matters regardless of that other setting). Checked
+    # at both tiers (the type's own entry, then `defaults:`) before falling back to the plain
+    # crop_frame_offset_pct resolution unchanged, so an existing profiles.yaml that never sets
+    # this needs no edit to keep working.
+    type_cfg = _type_config(profile, object_label)
+    if "alert_crop_frame_offset_pct" in type_cfg:
+        return type_cfg["alert_crop_frame_offset_pct"]
+    defaults_cfg = _defaults_config(profile)
+    if "alert_crop_frame_offset_pct" in defaults_cfg:
+        return defaults_cfg["alert_crop_frame_offset_pct"]
+    return crop_frame_offset_pct(profile, object_label)
+
+
 def crop_padding_pct(profile: dict | None, object_label: str | None) -> float:
     return _resolve(profile, object_label, "crop_padding_pct", config.CROP_PADDING_PCT)
 

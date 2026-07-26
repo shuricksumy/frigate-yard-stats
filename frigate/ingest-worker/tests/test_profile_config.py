@@ -149,6 +149,33 @@ def test_crop_frame_offset_pct_uses_type_override_and_falls_back_to_global(monke
     assert profile_config.crop_frame_offset_pct(CROP_PROFILE, "person") == 0.5
 
 
+def test_alert_crop_frame_offset_pct_falls_back_to_plain_crop_frame_offset_pct(monkeypatch):
+    # No alert_crop_frame_offset_pct set anywhere -- behaves exactly like the plain
+    # crop_frame_offset_pct resolution, so an existing profiles.yaml needs no edit.
+    monkeypatch.setattr(config, "CROP_FRAME_OFFSET_PCT", 0.5)
+    assert profile_config.alert_crop_frame_offset_pct(CROP_PROFILE, "car") == 0.9
+    assert profile_config.alert_crop_frame_offset_pct(CROP_PROFILE, "person") == 0.5
+    assert profile_config.alert_crop_frame_offset_pct(None, "car") == 0.5
+
+
+def test_alert_crop_frame_offset_pct_type_override_wins():
+    profile = {
+        "object_types": {
+            "car": {"crop_frame_offset_pct": 0.9, "alert_crop_frame_offset_pct": 0.3},
+        },
+    }
+    assert profile_config.alert_crop_frame_offset_pct(profile, "car") == 0.3
+
+
+def test_alert_crop_frame_offset_pct_defaults_section_applies_before_plain_fallback(monkeypatch):
+    monkeypatch.setattr(config, "CROP_FRAME_OFFSET_PCT", 0.5)
+    profile = {
+        "defaults": {"alert_crop_frame_offset_pct": 0.2},
+        "object_types": {"car": {}},
+    }
+    assert profile_config.alert_crop_frame_offset_pct(profile, "car") == 0.2
+
+
 def test_crop_padding_pct_uses_defaults_section_when_no_type_override(monkeypatch):
     monkeypatch.setattr(config, "CROP_PADDING_PCT", 0.2)
     # Neither "car" nor "person" sets crop_padding_pct of their own -- both inherit the `defaults`

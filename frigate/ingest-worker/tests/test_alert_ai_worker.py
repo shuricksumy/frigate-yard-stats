@@ -401,6 +401,53 @@ def test_select_events_for_alert_single_event_under_cap():
     assert alert_ai_worker._select_events_for_alert(events, max_images=4) == events
 
 
+# ---- alert_ai_worker._gather_alert_images (crop_frame_offset_pct threading) ----
+
+def test_gather_alert_images_passes_crop_frame_offset_pct_through(monkeypatch):
+    captured = {}
+
+    def fake_crop(event, **kwargs):
+        captured.update(kwargs)
+        return "crop-b64"
+
+    monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", fake_crop)
+    alert_ai_worker._gather_alert_images(
+        [{"id": 1, "det_id": "d1"}], crop_frame_offset_pct=0.3,
+    )
+    assert captured["crop_frame_offset_pct"] == 0.3
+
+
+def test_process_claimed_visit_resolves_alert_crop_frame_offset_pct(monkeypatch):
+    # Regression test: process_claimed_visit must actually resolve and thread
+    # profile_config.alert_crop_frame_offset_pct through to crop.crop_event_high_res -- previously
+    # this was never wired up at all, so profiles.yaml's crop_frame_offset_pct/
+    # alert_crop_frame_offset_pct had zero effect on the alert stage regardless of what was set,
+    # silently falling back to crop.py's own hardcoded default every time.
+    monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
+    monkeypatch.setattr(config, "ALERT_AI_INITIAL_WAIT_SECONDS", 0)
+    monkeypatch.setattr(db, "get_raw_events_for_visit", lambda visit_id: [
+        {"id": 100, "det_id": "d1", "objects": "car", "start_ts": 10, "end_ts": 20},
+    ])
+    captured = {}
+
+    def fake_crop(event, **kwargs):
+        captured.update(kwargs)
+        return "high-res-base64"
+    monkeypatch.setattr(alert_ai_worker.crop, "crop_event_high_res", fake_crop)
+    monkeypatch.setattr(alert_ai_worker.ai_worker, "_chat_request", lambda *a, **k: {"choices": [{"message": {"content": "x"}}]})
+    monkeypatch.setattr(db, "complete_visit_sighting", lambda *a, **k: 1)
+    monkeypatch.setattr(db, "fail_alert_ai_event", lambda *a, **k: None)
+
+    profile = {
+        "defaults": {"alert_crop_frame_offset_pct": 0.7},
+        "object_types": {"car": {**PROFILE["object_types"]["car"]}},
+    }
+    row = {"id": 9, "objects": "car", "det_id": "d1", "alert_ai_attempt_count": 0}
+    alert_ai_worker.process_claimed_visit(row, profile)
+
+    assert captured["crop_frame_offset_pct"] == 0.7
+
+
 # ---- alert_ai_worker._gather_alert_images (per-event failure tolerance) ----
 
 def test_gather_alert_images_skips_individual_failures(monkeypatch):
