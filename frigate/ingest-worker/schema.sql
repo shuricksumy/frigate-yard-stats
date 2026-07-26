@@ -118,11 +118,6 @@ CREATE TABLE IF NOT EXISTS yard_stats.raw_events (
   -- always a downscale (crop.py's scale_image_base64) of the full-resolution crop crop.crop_event
   -- itself built -- see image_path below for the full-resolution original.
   crop_image_base64 TEXT,
-  -- Optional filesystem path to the full-resolution version of the same crop (STORE_EVENT_IMAGES/
-  -- store_event_images, see event_images.py) -- only the path lives here, the JPEG bytes live
-  -- under EVENT_IMAGES_STORAGE_PATH on disk, never in Postgres. NULL until the crop stage has both
-  -- run and had this option enabled for the event's own object type.
-  image_path TEXT,
   -- Captured from the same Frigate API fetch used to get the crop region -- the settled/final LPR
   -- read and detection score, not the live MQTT "end" payload's values (sub_label in particular
   -- can resolve after the event first fires). Kept here so n8n's AI stage never calls Frigate's
@@ -146,6 +141,14 @@ CREATE INDEX IF NOT EXISTS idx_raw_events_crop_status ON yard_stats.raw_events (
 CREATE INDEX IF NOT EXISTS idx_raw_events_ai_status ON yard_stats.raw_events (ai_status);
 CREATE INDEX IF NOT EXISTS idx_raw_events_video_status ON yard_stats.raw_events (video_status);
 CREATE INDEX IF NOT EXISTS idx_raw_events_visit_id ON yard_stats.raw_events (visit_id);
+
+-- Optional filesystem path to the full-resolution version of the same event's crop
+-- (STORE_EVENT_IMAGES/store_event_images, see event_images.py) -- only the path lives here, the
+-- JPEG bytes live under EVENT_IMAGES_STORAGE_PATH on disk, never in Postgres. NULL until the crop
+-- stage has both run and had this option enabled for the event's own object type. Added after the
+-- initial baseline, so (per this file's own convention at the top) this is an ALTER TABLE, not
+-- part of the CREATE TABLE block above -- that block only takes effect for a brand-new table.
+ALTER TABLE yard_stats.raw_events ADD COLUMN IF NOT EXISTS image_path TEXT;
 
 -- Widens ai_status's CHECK constraint to allow 'skipped' -- CREATE TABLE IF NOT EXISTS above only
 -- takes effect for a brand new table, so an already-deployed database's constraint (added before
