@@ -278,6 +278,20 @@ button:disabled { opacity: 0.4; cursor: default; }
   display: block;
 }
 
+.lightbox-no-media {
+  width: 100%;
+  max-width: 95vw;
+  min-height: 200px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  color: var(--muted);
+  font-size: 0.9rem;
+  background: #16181c;
+}
+
 .lightbox-back-bar {
   background: var(--card);
   padding: 8px 16px;

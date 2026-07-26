@@ -135,6 +135,26 @@ e.g. skip storing clips for `person` while `car` still gets them. Setting either
 least one type is enough to start that stage's poll thread even if nothing else enables it (same
 precedent the AI stages below use).
 
+### Video storage layout
+
+Clips are written under `{VIDEO_STORAGE_PATH}/{camera}/{YYYY}/{MM}/{DD}/{object_type}-{event_id}-
+{start_ts_epoch}-{start_ts_iso}.mp4` (visit clips: `{VIDEO_STORAGE_PATH_ALERTS}/{camera}/{YYYY}/
+{MM}/{DD}/visit-{object_type}-{visit_id}-...`) — the camera name is the top-level directory, so
+you can `du -sh` one camera's own usage directly, or point a backup/retention tool at just one
+camera's tree, without parsing filenames or querying Postgres. This is only the layout for files
+written going forward: a clip stored before this existed sits directly under a `{YYYY}/{MM}/{DD}`
+folder with no camera directory above it (today's original layout) — nothing migrates existing
+files into the new structure automatically, matching this project's usual "no compatibility shim"
+approach to layout changes. Only the on-disk path changed; the value stored in Postgres
+(`raw_events.video_path`/`visits.video_path`) is always whatever `store_clip`/`store_visit_clip`
+actually returned, so existing rows keep pointing at their real (pre-migration) location and
+nothing needs to be re-pathed in the database.
+
+The admin dashboard's "By camera" section (see [`web-ui.md`](web-ui.md#admin-dashboard)) walks
+each camera's own top-level directory to report real on-disk video bytes — this only works
+because of the layout above, so a pre-migration file (still under a bare year directory) won't be
+attributed to a real camera name there; it'll show up bucketed under that year instead.
+
 ## Visit previews (composite grid + GIF)
 
 `visit_thumb_crop_enabled` (default `false`, in `profiles.yaml` — see "Per-object-type overrides"
@@ -190,18 +210,31 @@ not `.env` (see "Per-object-type overrides" below):
   before an automatic sweep deletes it.
 - `retention_check_interval_seconds` (default `86400`, once a day) — how often that sweep runs.
 
-`POST /retention/purge` (Swagger UI, or the "Media only" checkbox on `/ui/admin`) is a separate,
-ad-hoc counterpart if you want to purge on a cutoff of your own choosing right now rather than
-waiting for or reconfiguring the scheduled sweep — defaults to a dry run (just shows you counts)
-until you pass `confirm=true`. `only_media` (default `true`) keeps every row and its AI analysis
-text/plate reads searchable forever, only clearing stored video/images/GIFs; set it to `false` for
-the original full-row delete (rebuilds the semantic search index afterward).
+`POST /retention/purge` (Swagger UI, or the checkboxes on `/ui/admin` — see
+[`web-ui.md`](web-ui.md#admin-dashboard)) is a separate, ad-hoc counterpart if you want to purge on
+a cutoff of your own choosing right now rather than waiting for or reconfiguring the scheduled
+sweep — defaults to a dry run (just shows you counts) until you pass `confirm=true`. `only_media`
+(default `true`) keeps every row and its AI analysis text/plate reads searchable forever; what it
+actually clears is four independent flags, not one all-or-nothing "media" switch: `delete_video`
+(default `true`), `delete_gif` (default `true`), `delete_snapshots` (default `false`),
+`delete_puzzled_preview` (default `false`) — see `web-ui.md` for what each one maps to. Set
+`only_media=false` for the original full-row delete instead (rebuilds the semantic search index
+afterward); the four `delete_*` params are ignored entirely in that mode, since a full row delete
+already covers all of their columns.
 
-An optional `object_label` param (also a dropdown on `/ui/admin`) restricts either mode to a
-single Frigate object type, e.g. clean up just `dog` events without touching everything else's
-retention. Only ever affects events/sightings of that type — visits (which can span multiple
-distinct object types in one row) are never touched by a type-scoped purge; omit `object_label`
-(the default) to keep covering visits too, same as before this param existed.
+Two optional, composable scoping params (both also dropdowns on `/ui/admin`) restrict any of the
+above to a subset of your data:
+
+- `object_label` restricts to a single Frigate object type, e.g. clean up just `dog` events
+  without touching everything else's retention. Only ever affects events/sightings of that type —
+  visits (which can span multiple distinct object types in one row) are never touched by a
+  type-scoped purge; omit `object_label` (the default) to keep covering visits too, same as before
+  this param existed.
+- `camera` restricts to a single Frigate camera. Unlike `object_label`, this **does** apply to
+  visits/visit_sightings too — visit grouping is per-camera only, so a visit's own camera is
+  always a single, unambiguous value, with none of `object_label`'s multi-type-per-visit ambiguity.
+
+Both can be set at once (e.g. `object_label=car&camera=outside2`) to narrow to their intersection.
 
 ## Per-object-type overrides
 

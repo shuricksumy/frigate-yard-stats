@@ -48,6 +48,7 @@ function adminApp() {
     overview: null,
     diskUsage: null,
     objectTypes: [],
+    cameras: [],
 
     checkingEmbed: false,
     embedCheck: null,
@@ -64,8 +65,20 @@ function adminApp() {
     skipFailedResult: {},
 
     purgeDays: 60,
-    purgeOnlyMedia: true,
+    // Four independently toggleable media categories (only meaningful while purgeDeleteAll is
+    // false) rather than one all-or-nothing "media" checkbox -- they have very different storage
+    // cost and "still worth keeping" answers (a 4K video clip vs. a single still crop). Defaults
+    // match this project's own judgment on what's safe to routinely discard.
+    purgeDeleteVideo: true,
+    purgeDeleteGif: true,
+    purgeDeleteSnapshots: false,
+    purgeDeletePuzzledPreview: false,
+    // Full row delete (today's only_media=false) -- a separate, more drastic checkbox rather than
+    // the old checkbox's inverse meaning, so its own destructive intent reads clearly at a glance
+    // next to the four (non-destructive-to-rows) media categories above.
+    purgeDeleteAll: false,
     purgeObjectLabel: "",
+    purgeCamera: "",
     purging: false,
     purgePreview: null,
     purgeResult: "",
@@ -189,6 +202,12 @@ function adminApp() {
       if (this.objectTypes.length === 0) {
         this._get("/object-types").then((d) => { this.objectTypes = d.object_types || []; }).catch(() => {});
       }
+      if (this.cameras.length === 0) {
+        // Queried live (not sourced from a config value) so a newly added camera shows up
+        // without needing an env var edit -- same reasoning GET /cameras already documents for
+        // the report UI's own Camera filter.
+        this._get("/cameras").then((d) => { this.cameras = d.cameras || []; }).catch(() => {});
+      }
     },
 
     flagEntries() {
@@ -280,6 +299,41 @@ function adminApp() {
       }));
     },
 
+    // Same idea as objectTypeRows(), grouped by camera instead -- row counts come straight from
+    // /admin/overview's row_counts_by_camera (a cheap query); video bytes come from
+    // /admin/disk-usage's video_storage[_alerts]_by_camera, which only works because store_clip/
+    // store_visit_clip now write under a camera-named top-level directory (no filename parsing
+    // needed, unlike the by-object-type breakdown). No per-camera DB-size figure -- that would
+    // need the same join-back-to-raw_events cost for every table just for a "nice to have"
+    // duplicate of the totals already shown elsewhere.
+    cameraRows() {
+      if (!this.overview) return [];
+      const rc = this.overview.row_counts_by_camera || {};
+      const diskEvents = (this.diskUsage && this.diskUsage.video_storage_by_camera) || {};
+      const diskAlerts = (this.diskUsage && this.diskUsage.video_storage_alerts_by_camera) || {};
+
+      const cams = new Set();
+      const addKeys = (list) => (list || []).forEach((r) => cams.add(r.camera));
+      addKeys(rc.raw_events);
+      addKeys(rc.sightings);
+      addKeys(rc.visit_sightings);
+      Object.keys(diskEvents).forEach((c) => cams.add(c));
+      Object.keys(diskAlerts).forEach((c) => cams.add(c));
+
+      const lookup = (list, camera) => {
+        const row = (list || []).find((r) => r.camera === camera);
+        return row ? row.count : 0;
+      };
+
+      return Array.from(cams).sort().map((camera) => ({
+        camera,
+        events: lookup(rc.raw_events, camera),
+        sightings: lookup(rc.sightings, camera),
+        visitSightings: lookup(rc.visit_sightings, camera),
+        videoBytes: (diskEvents[camera] ? diskEvents[camera].bytes : 0) + (diskAlerts[camera] ? diskAlerts[camera].bytes : 0),
+      }));
+    },
+
     async checkEmbeddingBackend() {
       this.checkingEmbed = true;
       this.embedCheck = null;
@@ -362,8 +416,14 @@ function adminApp() {
     },
 
     _purgeUrl(confirm) {
-      let url = `/retention/purge?older_than_days=${this.purgeDays}&confirm=${confirm}&only_media=${this.purgeOnlyMedia}`;
+      const onlyMedia = !this.purgeDeleteAll;
+      let url = `/retention/purge?older_than_days=${this.purgeDays}&confirm=${confirm}&only_media=${onlyMedia}`;
+      if (onlyMedia) {
+        url += `&delete_video=${this.purgeDeleteVideo}&delete_gif=${this.purgeDeleteGif}` +
+               `&delete_snapshots=${this.purgeDeleteSnapshots}&delete_puzzled_preview=${this.purgeDeletePuzzledPreview}`;
+      }
       if (this.purgeObjectLabel) url += `&object_label=${encodeURIComponent(this.purgeObjectLabel)}`;
+      if (this.purgeCamera) url += `&camera=${encodeURIComponent(this.purgeCamera)}`;
       return url;
     },
 
@@ -383,26 +443,42 @@ function adminApp() {
     async confirmPurge() {
       if (!this.purgePreview) return;
       const c = this.purgePreview.counts;
-      const scope = this.purgeObjectLabel ? ` (object type: ${this.purgeObjectLabel})` : " (all object types)";
-      const ok = this.purgeOnlyMedia
-        ? confirm(
-            `This will clear ${c.raw_events_video_files + c.visits_video_files} stored video files and ` +
-            `${c.raw_events_images + c.visits_images_or_gifs} stored images/GIFs older than ${this.purgeDays} days${scope}. ` +
-            `Rows and all AI analysis text are kept. This cannot be undone. Continue?`
-          )
-        : confirm(
-            `This will PERMANENTLY delete ${c.raw_events} events, ${c.visits} visits, ` +
-            `${c.sightings} sightings, and ${c.visit_sightings} alert sightings ` +
-            `older than ${this.purgeDays} days${scope}, then rebuild the vector search index. This cannot be undone. Continue?`
-          );
+      const scopeParts = [];
+      scopeParts.push(this.purgeObjectLabel ? `object type: ${this.purgeObjectLabel}` : "all object types");
+      if (this.purgeCamera) scopeParts.push(`camera: ${this.purgeCamera}`);
+      const scope = ` (${scopeParts.join(", ")})`;
+      let ok;
+      if (this.purgeDeleteAll) {
+        ok = confirm(
+          `This will PERMANENTLY delete ${c.raw_events} events, ${c.visits} visits, ` +
+          `${c.sightings} sightings, and ${c.visit_sightings} alert sightings ` +
+          `older than ${this.purgeDays} days${scope}, then rebuild the vector search index. This cannot be undone. Continue?`
+        );
+      } else {
+        // Summarize only the categories actually checked -- an unchecked category's count still
+        // shows in the preview grid below, but shouldn't be implied as "about to be cleared" here.
+        const parts = [];
+        if (this.purgeDeleteVideo) parts.push(`${c.raw_events_video_files + c.visits_video_files} video files`);
+        if (this.purgeDeleteGif) parts.push(`${c.visits_gifs} GIFs`);
+        if (this.purgeDeleteSnapshots) parts.push(`${c.raw_events_snapshots} event snapshots`);
+        if (this.purgeDeletePuzzledPreview) parts.push(`${c.visits_puzzled_previews} puzzled previews`);
+        if (parts.length === 0) {
+          this.purgeResult = "Select at least one category to clear (or check \"Delete ALL\").";
+          return;
+        }
+        ok = confirm(
+          `This will clear ${parts.join(", ")} older than ${this.purgeDays} days${scope}. ` +
+          `Rows and all AI analysis text are kept. This cannot be undone. Continue?`
+        );
+      }
       if (!ok) return;
       this.purging = true;
       try {
         const r = await fetch(this._purgeUrl(true), { method: "POST", headers: this._headers() });
         const d = await r.json();
-        this.purgeResult = this.purgeOnlyMedia
-          ? `Cleared: ${JSON.stringify(d.counts)}`
-          : `Deleted: ${JSON.stringify(d.counts)}` + (d.reindexed ? ` -- reindexed: ${d.reindexed.join(", ")}` : "");
+        this.purgeResult = this.purgeDeleteAll
+          ? `Deleted: ${JSON.stringify(d.counts)}` + (d.reindexed ? ` -- reindexed: ${d.reindexed.join(", ")}` : "")
+          : `Cleared: ${JSON.stringify(d.counts)}`;
         this.purgePreview = null;
         await this.refreshAll();
       } catch (e) {

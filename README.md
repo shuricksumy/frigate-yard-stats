@@ -201,10 +201,12 @@ the most common situations.
 Plate text and clips are treated as semi-sensitive — `ingest-worker` runs a retention sweep
 (`RETENTION_MONTHS`, default 12) on its own schedule, deleting both the DB rows and any stored
 video files, rather than accumulating data indefinitely. `POST /retention/purge` (also exposed as
-a button on the [admin dashboard](docs/web-ui.md#admin-dashboard)) is an ad-hoc counterpart for
-purging on a caller-chosen cutoff (dry-run by default) — `only_media=true` (the default) keeps every row
-and its AI analysis text/plate reads searchable forever, only clearing stored video/images/GIFs;
-`only_media=false` deletes the rows entirely. See
+five checkboxes on the [admin dashboard](docs/web-ui.md#admin-dashboard)) is an ad-hoc counterpart
+for purging on a caller-chosen cutoff (dry-run by default) — `only_media=true` (the default) keeps
+every row and its AI analysis text/plate reads searchable forever, clearing only the media
+categories you choose (video/GIF on by default, still-image snapshots/grids off by default);
+`only_media=false` deletes the rows entirely. An optional `object_label` and/or `camera` param
+scopes either mode to a single Frigate object type and/or camera. See
 [`frigate/sql/queue-debug.sql`](frigate/sql/queue-debug.sql) for manual checks/fixes/resets if you
 need to inspect or intervene by hand.
 

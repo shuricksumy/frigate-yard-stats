@@ -142,14 +142,20 @@ both pages). It shows:
   per-object-type override (see "Per-object-type overrides" in [`configuration.md`](configuration.md))
   even though it's actually in effect for that type. For AI stage/video storage/Telegram/crop
   settings specifically, treat this summary as unreliable — check `profiles.yaml` directly instead.
-  The "By object type" row counts below do reflect whatever actually happened, since those come
-  from real data, not the static flag summary.
+  The "By object type"/"By camera" row counts below do reflect whatever actually happened, since
+  those come from real data, not the static flag summary.
 - **Counts** — total events, visits, sightings (any object type), and retention info (how many months
   you're keeping, and the oldest event still in the database).
 - **By object type** — one row per Frigate object label (car/truck/person/dog/...) showing its own
   event/sighting row counts, an approximate Postgres byte footprint, and real on-disk video bytes
   (parsed from stored clip filenames, which always start with the object type). Lets you see at a
   glance which type is actually driving disk/DB growth instead of only a pipeline-wide total.
+- **By camera** — the same idea, one row per Frigate camera instead of object type: event/sighting
+  row counts and real on-disk video bytes. The video byte figure comes straight from each camera's
+  own top-level storage directory (`video.py` stores clips under `camera/YYYY/MM/DD/...` — see
+  [`configuration.md`](configuration.md#video-storage-layout)), not filename parsing, so a clip
+  stored before that layout existed won't show up under a real camera name here (it lands under
+  whichever year directory it was written to instead).
 - **Semantic search coverage** — how many sightings have an embedding vs. don't, with buttons to
   backfill missing ones or reindex the vector database.
 - **Queue health** — a status breakdown (new/processing/retry/failed/done) for every queue stage
@@ -160,20 +166,39 @@ both pages). It shows:
   down per table.
 - **Retention purge** — pick a cutoff in days, then hit Preview to see exactly what would happen,
   and Delete/Clear now, which asks for an explicit confirmation spelling out those same numbers
-  before anything actually changes. Nothing happens from a single click. A "Media only" checkbox
-  (on by default) controls what "purge" actually means:
-  - **Checked (default)** — keeps every row and all its AI analysis text/plate reads searchable
-    forever; only deletes the stored video files and clears the stored crop images/preview GIFs
-    for anything older than the cutoff. Use this to reclaim disk/database space while keeping your
-    full history searchable.
-  - **Unchecked** — deletes the matching events/visits (and their sightings) entirely, the
-    original full purge, then rebuilds the semantic search index against whatever remains.
+  before anything actually changes. Nothing happens from a single click. Five checkboxes control
+  what "purge" actually clears — four independent media categories, plus a separate, clearly
+  destructive "Delete ALL":
+  - **Delete video files** (on by default) — clears stored video clips (`raw_events` and `visits`)
+    older than the cutoff, and deletes the files off disk.
+  - **Delete GIF (visit preview)** (on by default) — clears the animated visit preview
+    (`visits.preview_gif_base64`).
+  - **Delete Event Snapshots** (off by default) — clears the per-event still crop
+    (`raw_events.crop_image_base64`).
+  - **Delete puzzled preview (visit grid)** (off by default) — clears the visit-level composite
+    grid of sampled frames (`visits.crop_image_base64` — a different artifact from an event
+    snapshot despite the same column name on the other table).
+  - **Delete ALL (rows, text, and media — permanent)** (off by default) — a separate, more drastic
+    switch: instead of clearing media and keeping the row, this deletes the matching events/visits
+    (and their sightings) entirely, then rebuilds the semantic search index against whatever
+    remains. Checking it visually disables the four media checkboxes above, since they no longer
+    mean anything once the whole row is going away.
 
-  An "Object type" dropdown (defaults to "All types") restricts either mode to one Frigate label
-  at a time -- e.g. clean up just `dog` events without touching everything else's retention. Only
-  ever affects events/sightings of that type: visits (which can span multiple distinct object
+  Video and GIF default on because they're by far the largest stored payloads; still-images
+  default off since a still crop/grid is comparatively cheap to keep and often still useful to
+  glance at even once a row is old. All four media checkboxes are independent and composable — you
+  can check just "Delete Event Snapshots" alone, for example, and nothing else is touched. Rows,
+  embeddings, and every text field (AI analysis, plate reads) always survive a media-only purge
+  regardless of which boxes are checked — only "Delete ALL" removes the row itself.
+
+  An "Object type" dropdown (defaults to "All types") restricts any of the above to one Frigate
+  label at a time -- e.g. clean up just `dog` events without touching everything else's retention.
+  Only ever affects events/sightings of that type: visits (which can span multiple distinct object
   types in one row) are never touched by a type-scoped purge, so leave "All types" selected to
-  also cover those.
+  also cover those. A "Camera" dropdown (defaults to "All cameras") does the equivalent for a
+  single camera — unlike object type, this **does** apply to visits too, since visit grouping is
+  per-camera only (a visit's own camera is always a single, unambiguous value). Object type and
+  camera compose — set both to restrict to, say, just `car` events on one specific camera.
 - **Reports** — generate a report on demand (Events or Visits/alerts, any object type or all,
   a time window, and the same GIF/image/none preview modes `/reports/generate` accepts) and open
   it in a new tab -- the exact same HTML n8n's scheduled report workflows email/Telegram, without

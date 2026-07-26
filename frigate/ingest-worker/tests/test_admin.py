@@ -1,6 +1,6 @@
 """Tests for admin.py (disk usage, embedding backend health check) and the admin-dashboard-only
-db.py functions (get_table_row_counts, get_stage_counts, get_db_size_info,
-get_vector_index_status, reindex_vector_indexes, requeue_failed).
+db.py functions (get_table_row_counts, get_stage_counts, get_row_counts_by_camera,
+get_db_size_info, get_vector_index_status, reindex_vector_indexes, requeue_failed).
 
 Requires a reachable Postgres with schema.sql applied -- see test_db_video_queue.py's module
 docstring for setup notes. Additionally requires the pgvector extension (pgvector/pgvector:pg16),
@@ -126,6 +126,38 @@ def test_get_db_size_by_object_type_reports_positive_bytes_for_a_type_with_rows(
         _cleanup_event(event_id)
 
 
+def test_get_row_counts_by_camera_reflects_inserted_rows(conn_ok):
+    camera_a = f"pytest-admin-bycam-a-{uuid.uuid4()}"
+    camera_b = f"pytest-admin-bycam-b-{uuid.uuid4()}"
+    a_id = _insert_event(camera=camera_a, objects="car")
+    b_id = _insert_event(camera=camera_b, objects="dog")
+    try:
+        result = db.get_row_counts_by_camera()
+        by_camera = {r["camera"]: r["count"] for r in result["raw_events"]}
+        assert by_camera.get(camera_a, 0) >= 1
+        assert by_camera.get(camera_b, 0) >= 1
+        assert set(result.keys()) == {"raw_events", "sightings", "visit_sightings"}
+    finally:
+        _cleanup_event(a_id)
+        _cleanup_event(b_id)
+
+
+def test_get_row_counts_by_camera_includes_sightings(conn_ok):
+    camera = f"pytest-admin-bycam-{uuid.uuid4()}"
+    event_id = _insert_event(camera=camera, objects="car")
+    db._execute(
+        "INSERT INTO yard_stats.sightings (raw_event_id, object_label, description) VALUES (%s, 'car', 'red suv')",
+        (event_id,),
+    )
+    try:
+        result = db.get_row_counts_by_camera()
+        sightings_by_camera = {r["camera"]: r["count"] for r in result["sightings"]}
+        assert sightings_by_camera.get(camera, 0) >= 1
+    finally:
+        db._execute("DELETE FROM yard_stats.sightings WHERE raw_event_id = %s", (event_id,))
+        _cleanup_event(event_id)
+
+
 # ---- admin.dir_size_by_object_type ----
 
 def test_dir_size_by_object_type_missing_path_reports_empty():
@@ -144,6 +176,41 @@ def test_dir_size_by_object_type_buckets_event_and_visit_filenames(tmp_path):
     assert result["car"] == {"bytes": 160, "file_count": 3}  # 100 + 50 + 10 (event x2 + visit x1)
     assert result["person"] == {"bytes": 25, "file_count": 1}
     assert result["some"] == {"bytes": 5, "file_count": 1}  # unrelated file -- first hyphen token
+
+
+# ---- admin.dir_size_by_camera ----
+
+def test_dir_size_by_camera_missing_path_reports_empty():
+    assert admin.dir_size_by_camera("/no/such/path/on/this/machine") == {}
+
+
+def test_dir_size_by_camera_buckets_by_top_level_directory(tmp_path):
+    outside = tmp_path / "outside" / "2026" / "07" / "15"
+    outside.mkdir(parents=True)
+    (outside / "car-1-1700000000-20231114T220000Z.mp4").write_bytes(b"x" * 100)
+    (outside / "person-2-1700000100-20231114T220140Z.mp4").write_bytes(b"y" * 50)
+
+    outside2 = tmp_path / "outside2" / "2026" / "07" / "15"
+    outside2.mkdir(parents=True)
+    (outside2 / "car-3-1700000200-20231114T220320Z.mp4").write_bytes(b"z" * 25)
+
+    result = admin.dir_size_by_camera(str(tmp_path))
+
+    assert result["outside"] == {"bytes": 150, "file_count": 2}
+    assert result["outside2"] == {"bytes": 25, "file_count": 1}
+
+
+def test_dir_size_by_camera_ignores_files_directly_under_the_root(tmp_path):
+    # Only real directories are buckets -- a stray file sitting directly at the top level (not
+    # under any camera dir) isn't itself a camera and shouldn't be counted.
+    (tmp_path / "stray.txt").write_bytes(b"q" * 5)
+    cam = tmp_path / "outside"
+    cam.mkdir()
+    (cam / "car-1-1700000000-20231114T220000Z.mp4").write_bytes(b"x" * 10)
+
+    result = admin.dir_size_by_camera(str(tmp_path))
+
+    assert result == {"outside": {"bytes": 10, "file_count": 1}}
 
 
 # ---- db.requeue_failed ----

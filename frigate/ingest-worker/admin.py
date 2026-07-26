@@ -63,6 +63,33 @@ def dir_size_by_object_type(path: str) -> dict:
     return totals
 
 
+def dir_size_by_camera(path: str) -> dict:
+    # Same walk as dir_size_bytes, bucketed by camera -- for the admin dashboard's "By camera"
+    # disk-usage breakdown. Unlike dir_size_by_object_type (which has to parse each filename, since
+    # object type isn't otherwise encoded in the path), this only works because video.py's
+    # store_clip/store_visit_clip now write under a camera-named top-level directory
+    # (VIDEO_STORAGE_PATH/{camera}/{YYYY}/{MM}/{DD}/...) -- the camera is just that top-level
+    # directory's own name, no filename parsing needed. A file stored before that layout existed
+    # sits directly under a year directory instead of a camera one, so it buckets under that year
+    # (e.g. "2026") rather than a real camera name -- a one-time artifact of files predating this
+    # change, not a bug to special-case; new files always land under their real camera.
+    if not path or not os.path.isdir(path):
+        return {}
+    totals: dict[str, dict[str, int]] = {}
+    for entry in os.scandir(path):
+        if not entry.is_dir():
+            continue
+        bucket = totals.setdefault(entry.name, {"bytes": 0, "file_count": 0})
+        for root, _dirs, files in os.walk(entry.path):
+            for name in files:
+                try:
+                    bucket["bytes"] += os.path.getsize(os.path.join(root, name))
+                    bucket["file_count"] += 1
+                except OSError:
+                    continue
+    return totals
+
+
 def check_embedding_backend(timeout_seconds: float = 8.0) -> dict:
     # Live smoke test against LLAMA_PROXY_BASE_URL/LLAMA_PROXY_EMBED_PATH -- confirms both that
     # something answers at all and that it returns the dimension this deployment is configured

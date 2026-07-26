@@ -238,12 +238,30 @@ returns counts of matching rows/files, and only actually acts when `confirm=true
 explicitly. A second mode, `only_media` (defaults to `true`), decides *what* gets purged:
 
 - **`only_media=true`** (default) -- `db.purge_media_older_than`: deletes stored video files off
-  disk and clears the stored image/GIF columns (`crop_image_base64`/`preview_gif_base64` on both
-  `raw_events` and `visits`) for rows older than the cutoff, but keeps every row and all its
+  disk and clears media columns on rows older than the cutoff, but keeps every row and all its
   text fields (AI analysis description, embeddings) -- old data stays
   fully searchable via `/events`'/`/visits`' `q` filter and `/search/semantic`, just with the media
   payload gone. Never touches `sightings`/`visit_sightings` at all -- neither table carries media
-  columns of its own.
+  columns of its own. **Which media gets cleared is itself four independent flags**, not an
+  all-or-nothing "clear everything media" switch: `delete_video` (default `true`) clears
+  `video_path` on both tables and deletes the file off disk; `delete_gif` (default `true`) clears
+  `visits.preview_gif_base64`; `delete_snapshots` (default `false`) clears `raw_events.
+  crop_image_base64` (the per-event still crop, "Event Snapshots" in the admin UI); `delete_
+  puzzled_preview` (default `false`) clears `visits.crop_image_base64` (the composite grid of
+  sampled visit frames -- same column name as `raw_events.crop_image_base64`, but a visually
+  distinct artifact, hence its own flag and its own admin-UI label). Video and GIF default on
+  because they're by far the largest stored payloads (a multi-second clip or animated GIF vs. one
+  JPEG); still-images default off since a still crop/grid is comparatively cheap to keep and often
+  still useful to glance at even once a row is old. All four are independent and composable (e.g.
+  `delete_snapshots=true` alone clears only `raw_events.crop_image_base64`, leaving video/GIF/
+  puzzled-preview untouched) -- the response's `counts` preview always reports all five metrics
+  (`raw_events_video_files`, `raw_events_snapshots`, `visits_video_files`, `visits_puzzled_
+  previews`, `visits_gifs`) regardless of which flags are set, so a dry run shows everything
+  that's *available* to clear even if the caller only plans to clear a subset. The admin
+  dashboard's Retention section exposes these as five checkboxes (four media-category ones plus a
+  separate, clearly-destructive "Delete ALL" checkbox that switches to `only_media=false` --
+  checking it visually disables the four media checkboxes, since they no longer mean anything once
+  the whole row is going away).
 - **`only_media=false`** -- `db.purge_older_than` (today's original behavior): deletes the rows
   entirely -- same FK-safe child-before-parent delete order as `db.run_retention_cleanup`, extended
   to also delete `visit_sightings` before `visits` (added
@@ -262,6 +280,17 @@ since a visit can span multiple distinct object types (`visits.objects` is comma
 its own composite-grid media) belongs to just one type's purge. Omitting `object_label` (the
 default) still covers `visits`/`visit_sightings` exactly as it did before this param existed --
 only a type-scoped purge narrows to events/sightings alone.
+
+A fourth, optional `camera` param restricts either mode to a single Frigate camera -- composable
+with `object_label` (both can be set at once, narrowing to their intersection). Unlike
+`object_label`, this **does** apply to `visits`/`visit_sightings` too: visit grouping is
+per-camera only (see "Visit grouping" below), so `visits.cameras` is always a single, unambiguous
+value with none of `object_label`'s multi-type-per-visit ambiguity -- there's no reason to exempt
+visits from a camera-scoped purge the way a type-scoped one has to. `purge_older_than`/
+`purge_media_older_than` both thread `camera` through every one of their raw_events- and
+visits-scoped queries (counts, video-path lookups, and the DELETE/UPDATE statements themselves)
+via the same pattern `object_label` already established, just without the "skip visits entirely"
+branch.
 
 **Bug found and fixed while adding this**: both `purge_older_than` and `run_retention_cleanup`
 deleted `visits` *before* `raw_events`, but `raw_events.visit_id` references `visits(id)` -- the
@@ -872,11 +901,21 @@ download attempt; the clip is fetched from Frigate's own
 `/api/{camera}/start/{start_ts-5s}/end/{end_ts+5s}/clip.mp4` endpoint (not the event-id endpoint
 `crop.py` uses), and a response at/below `VIDEO_MIN_VALID_BYTES` is treated as Frigate's
 not-ready-yet placeholder rather than a real clip, retried up to `VIDEO_MAX_ATTEMPTS` times. Only
-the resulting filesystem path (`VIDEO_STORAGE_PATH/{YYYY}/{MM}/{DD}/{object_type}-{event_id}-
-{start_ts_epoch}-{start_ts_iso}.mp4` -- epoch for a stable/sortable key, an ISO-ish UTC timestamp
-alongside it since the epoch alone isn't recognizable at a glance in a directory listing) is
-stored in Postgres (`video_path`) -- the file itself lives on disk only. The `{YYYY}/{MM}/{DD}`
-folder is keyed on the *event's* `start_ts`, not on when the file was actually written -- under a
+the resulting filesystem path (`VIDEO_STORAGE_PATH/{camera}/{YYYY}/{MM}/{DD}/{object_type}-
+{event_id}-{start_ts_epoch}-{start_ts_iso}.mp4` -- epoch for a stable/sortable key, an ISO-ish UTC
+timestamp alongside it since the epoch alone isn't recognizable at a glance in a directory
+listing) is stored in Postgres (`video_path`) -- the file itself lives on disk only. The
+camera-first directory (`video.store_clip`/`store_visit_clip`, `row.get("camera")`/
+`visit.get("cameras")`, falling back to `"unknown"` if somehow absent) lets disk usage/backup/
+retention be reasoned about per-camera directly on the filesystem, the same thing that motivated
+the admin dashboard's "By camera" disk-usage breakdown (`admin.dir_size_by_camera`, see "Admin
+dashboard" below) -- it only works because the camera is now the top-level directory, not
+something to parse out of a filename. This is the layout for newly-stored files only: a clip
+stored before this existed sits directly under a `{YYYY}/{MM}/{DD}` folder with no camera
+directory above it, and nothing migrates existing files into the new layout automatically (the
+value stored in `raw_events.video_path`/`visits.video_path` is always whatever `store_clip`/
+`store_visit_clip` actually returned, so an old row's path stays correct regardless). The
+`{YYYY}/{MM}/{DD}` folder itself is keyed on the *event's* `start_ts`, not on when the file was actually written -- under a
 backlog, a folder for a day that's already passed can still gain new files today if that backlog
 hasn't been swept up yet (`claim_video_batch` claims newest-first, see above, so this is now the
 exception once fresh events are caught up, not the default state it was before that change). The
@@ -1367,6 +1406,36 @@ The lightbox's toggle order is Preview/Video/Image (`static/index.html`), and `o
 defaults to `'preview'` when `has_preview_gif` is true (falling back to `'video'`, then `'image'`)
 -- the GIF is richer than a still frame and already framed to the sampled moments of interest, so
 it's the best default when available, ahead of even the full video.
+
+#### Bug: a media-only retention purge made its own rows permanently unopenable
+
+`purge_media_older_than` (see "Query/report/AI-queue API" above) deliberately clears media columns
+but keeps every row and its AI analysis text, specifically so old data stays "fully searchable...
+just with the media payload gone." But every card's clickability in the web UI (Events, Visits,
+Search) was gated purely on `has_image || has_video` -- once a purge cleared those, the card
+stopped being clickable at all, taking the description text down with it even though `ai_status`
+(and the underlying `sightings`/`visit_sightings` row) was untouched. There was no way to reach
+that surviving text from the grid view once its media was gone -- confirmed by reading the actual
+gating logic, not just inferred from the purge's own behavior.
+
+Fixed with a shared `isOpenable(row)` helper in `static/app.js`
+(`row.has_image || row.has_video || row.ai_status === "done"`), used by all three views' card
+`clickable` class and click handler instead of the old `has_image || has_video` check directly --
+`ai_status === 'done'` survives a media purge by design (see above), so it's the correct fallback
+signal for "there's still something worth opening this for." Each card's own `.no-image`
+placeholder is similarly now two-state, not a flat "no media (crop_status)" -- once `ai_status`
+is `'done'`, it reads "media cleared — click for description" instead, so the empty thumbnail
+itself hints that clicking still does something.
+
+The lightbox's own media template had a matching gap once purged-but-analyzed rows became
+openable: `<img :src="lightboxImageUrl()">` rendered unconditionally whenever no video/preview
+applied, with no check that `has_image` was actually true -- would have shown a broken image for
+exactly the rows this fix was meant to make openable. Fixed by adding `lightboxEvent.has_image &&`
+to that template's condition, plus a new sibling `.lightbox-no-media` placeholder (shown only when
+none of `has_image`/`has_video`/`has_preview_gif` are true) explaining the media was likely cleared
+by a retention purge and that the AI analysis below is still preserved. The `.lightbox-info` panel
+itself needed no change -- it was already gated on `visitId || ai_status === 'done'`, independent
+of media presence.
 
 #### Bug: no defense against Frigate's clip endpoint returning a not-yet-finalized/placeholder clip
 
@@ -1897,6 +1966,14 @@ the authoritative whole-table sizes; this is for relative "which type is using t
 comparison, not a precise accounting. The dashboard's "By object type" section combines this with
 disk usage below into one row per type.
 
+`row_counts` also includes `row_counts_by_camera` (`db.get_row_counts_by_camera`) -- same shape as
+`row_counts_by_object_type`, grouped by camera instead. `raw_events` has its own `camera` column
+directly; `sightings`/`visit_sightings` don't (only `object_label`), so those two lists join back
+to `raw_events`/`visits` to attribute a camera. No per-camera DB-size figure exists (unlike
+object type) -- that would need the same join-back cost for every table just to duplicate totals
+already shown elsewhere in this endpoint, for a "nice to have" the video-storage-by-camera figure
+below already covers the actual "what's using space" question per camera.
+
 **`frigate_health` on `GET /admin/overview`** -- Frigate's own system-health heartbeat over MQTT
 (`frigate/stats`, a periodic JSON blob every `frigate.conf`'s `mqtt.stats_interval` seconds, and
 `frigate/available`, an online/offline flag), surfaced on the admin dashboard's "Frigate health"
@@ -1933,6 +2010,20 @@ so the type is always either the first hyphen-token or the token right after a l
 A name that doesn't match this pattern at all buckets under `"unknown"` rather than raising or
 being silently dropped from the total.
 
+Also returns `video_storage[_alerts]_by_camera` (`admin.dir_size_by_camera`) -- unlike the
+object-type breakdown, this needs no filename parsing at all: `video.py`'s `store_clip`/
+`store_visit_clip` now write under a camera-named top-level directory
+(`VIDEO_STORAGE_PATH/{camera}/{YYYY}/{MM}/{DD}/...` -- see "Video storage" below), so the camera is
+just that top-level directory's own name. `admin.dir_size_by_camera` walks one level with
+`os.scandir` to enumerate the top-level directories (the cameras), then `os.walk`s each one to sum
+its bytes -- a file sitting directly at the root (not under any camera directory) isn't itself a
+camera and is correctly excluded from every bucket, unlike `dir_size_by_object_type`'s flat walk
+which has no such root/non-root distinction to make. A clip stored before this layout existed sits
+directly under a year directory instead of a camera one, so it buckets under that year (e.g.
+`"2026"`) rather than a real camera name -- an expected one-time artifact of files predating this
+change, not a bug: nothing migrates existing files into the new layout automatically (see "Video
+storage" below).
+
 **`GET /admin/embedding-backend/check`** is a live, on-demand smoke test against
 `LLAMA_PROXY_BASE_URL`/`LLAMA_PROXY_EMBED_PATH` (`admin.check_embedding_backend`) -- sends a tiny
 real embedding request and checks both that something answers at all and that the dimension
@@ -1962,15 +2053,26 @@ resolved by hand over SSH before this button existed.
 
 **Embeddings backfill and retention purge are exposed as buttons too, reusing the existing
 endpoints** (`POST /embeddings/backfill?confirm=true&limit=200`, `POST /retention/purge`) -- both
-already had the right dry-run-by-default shape. The retention purge control adds a "Media only"
-checkbox (checked by default) mapping directly to the API's `only_media` param -- checked shows a
-media-focused preview (video/image/GIF counts) and its own lighter confirmation text ("rows and
-all AI analysis text are kept"); unchecked shows the full row-count preview and a starker
-PERMANENTLY-delete confirmation that also mentions the vector-index rebuild that follows. Either
-way, a native JS `confirm()` dialog spells out exact counts (from a mandatory preview call first)
-before the real `confirm=true` call fires -- the same two-step preview-then-confirm flow the API
-itself already enforces, just made impossible to skip from the UI as well, since both modes are
-irreversible once confirmed.
+already had the right dry-run-by-default shape. The retention purge control mirrors the API's five
+independent purge flags directly (`purgeDeleteVideo`/`purgeDeleteGif`/`purgeDeleteSnapshots`/
+`purgeDeletePuzzledPreview`/`purgeDeleteAll` -- see "Query/report/AI-queue API" above for what each
+one clears): the four media checkboxes are disabled (greyed, not just ignored) while "Delete ALL"
+is checked, since they no longer mean anything once the whole row is going away. Checking "Delete
+ALL" switches the effective `only_media` param to `false` and shows the full row-count preview
+plus a starker PERMANENTLY-delete confirmation that also mentions the vector-index rebuild that
+follows; leaving it unchecked keeps `only_media=true` and shows a media-focused preview (video
+file/snapshot/GIF/puzzled-preview counts) with a lighter confirmation listing only the categories
+actually checked ("rows and all AI analysis text are kept"). Confirming with every media checkbox
+unchecked and "Delete ALL" also unchecked is a no-op the UI catches before the confirm dialog even
+opens ("Select at least one category to clear (or check \"Delete ALL\")."), rather than silently
+doing nothing after a scary-sounding dialog. Either way, a native JS `confirm()` dialog spells out
+exact counts (from a mandatory preview call first) before the real `confirm=true` call fires --
+the same two-step preview-then-confirm flow the API itself already enforces, just made impossible
+to skip from the UI as well, since both modes are irreversible once confirmed. An "Object type"
+dropdown and a "Camera" dropdown (backed by `GET /object-types`/`GET /cameras`, the latter fetched
+once on first login the same way `objectTypes` already was) map to `object_label`/`camera` and
+compose with each other and with every checkbox above -- see "Query/report/AI-queue API" above for
+why `camera` (unlike `object_label`) also scopes visits.
 
 ### Schema (`yard_stats`)
 

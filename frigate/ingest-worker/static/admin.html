@@ -153,6 +153,31 @@
       </table>
     </section>
 
+    <!-- ============ By camera ============ -->
+    <section class="admin-card" x-show="overview">
+      <h2>By camera</h2>
+      <p class="status-line">
+        Row counts are exact Postgres counts; "Video bytes" is a real filesystem walk of each
+        camera's own top-level storage directory (video.py writes clips under
+        camera/YYYY/MM/DD/...) -- files stored before that layout existed bucket under a year
+        directory instead, so they won't show up under a real camera name here.
+      </p>
+      <table class="admin-table">
+        <thead><tr><th>Camera</th><th class="num">Events</th><th class="num">Sightings</th><th class="num">Alert sightings</th><th class="num">Video bytes</th></tr></thead>
+        <tbody>
+          <template x-for="row in cameraRows()" :key="row.camera">
+            <tr>
+              <td x-text="row.camera"></td>
+              <td class="num" x-text="fmtNum(row.events)"></td>
+              <td class="num" x-text="fmtNum(row.sightings)"></td>
+              <td class="num" x-text="fmtNum(row.visitSightings)"></td>
+              <td class="num" x-text="diskUsage ? fmtBytes(row.videoBytes) : '...'"></td>
+            </tr>
+          </template>
+        </tbody>
+      </table>
+    </section>
+
     <!-- ============ Embedding coverage ============ -->
     <section class="admin-card" x-show="overview">
       <h2>Semantic search coverage</h2>
@@ -243,32 +268,65 @@
             </template>
           </select>
         </label>
+        <label>
+          Camera
+          <select x-model="purgeCamera" @change="purgePreview = null">
+            <option value="">All cameras</option>
+            <template x-for="c in cameras" :key="c">
+              <option :value="c" x-text="c"></option>
+            </template>
+          </select>
+        </label>
+      </div>
+      <div class="admin-row">
+        <label class="checkbox-label" :title="purgeDeleteAll ? 'Ignored while Delete ALL is checked' : ''">
+          <input type="checkbox" x-model="purgeDeleteVideo" :disabled="purgeDeleteAll" @change="purgePreview = null">
+          Delete video files
+        </label>
+        <label class="checkbox-label" :title="purgeDeleteAll ? 'Ignored while Delete ALL is checked' : ''">
+          <input type="checkbox" x-model="purgeDeleteGif" :disabled="purgeDeleteAll" @change="purgePreview = null">
+          Delete GIF (visit preview)
+        </label>
+        <label class="checkbox-label" :title="purgeDeleteAll ? 'Ignored while Delete ALL is checked' : ''">
+          <input type="checkbox" x-model="purgeDeleteSnapshots" :disabled="purgeDeleteAll" @change="purgePreview = null">
+          Delete Event Snapshots
+        </label>
+        <label class="checkbox-label" :title="purgeDeleteAll ? 'Ignored while Delete ALL is checked' : ''">
+          <input type="checkbox" x-model="purgeDeletePuzzledPreview" :disabled="purgeDeleteAll" @change="purgePreview = null">
+          Delete puzzled preview (visit grid)
+        </label>
         <label class="checkbox-label">
-          <input type="checkbox" x-model="purgeOnlyMedia" @change="purgePreview = null">
-          Media only (keep rows &amp; AI analysis text -- only clear stored video/images/GIFs)
+          <input type="checkbox" x-model="purgeDeleteAll" @change="purgePreview = null">
+          Delete ALL (rows, text, and media -- permanent)
         </label>
         <button @click="previewPurge()" :disabled="purging">Preview</button>
         <button class="btn-danger" x-show="purgePreview" @click="confirmPurge()" :disabled="purging">
-          <span x-text="purgeOnlyMedia ? 'Clear media now' : 'Delete rows now'"></span>
+          <span x-text="purgeDeleteAll ? 'Delete rows now' : 'Clear media now'"></span>
         </button>
       </div>
-      <p class="status-line" x-show="purgeOnlyMedia">
-        Rows, embeddings, and every text field (AI analysis, plate reads, descriptions) are kept and stay searchable -- only stored video files, crop images, and preview GIFs older than the cutoff are removed.
+      <p class="status-line" x-show="!purgeDeleteAll">
+        Rows, embeddings, and every text field (AI analysis, plate reads, descriptions) are always
+        kept and stay searchable in this mode -- only the media categories checked above, older
+        than the cutoff, are cleared.
       </p>
-      <p class="status-line" x-show="!purgeOnlyMedia">
+      <p class="status-line" x-show="purgeDeleteAll">
         Deletes matching events/visits (and their sightings) entirely. The vector search index is rebuilt afterward against whatever data remains.
       </p>
       <p class="status-line" x-show="purgeObjectLabel">
         Restricted to object type "<span x-text="purgeObjectLabel"></span>" -- only affects events/sightings of that type. Visits (and their alert sightings/media) span potentially multiple types and are never touched by a type-scoped purge; leave "All types" selected to also cover those.
       </p>
-      <div x-show="purgePreview && purgeOnlyMedia" class="admin-row">
-        <span>Would clear:</span>
+      <p class="status-line" x-show="purgeCamera">
+        Restricted to camera "<span x-text="purgeCamera"></span>" -- unlike object type, this also covers visits (visit grouping is per-camera only, so there's no ambiguity there).
+      </p>
+      <div x-show="purgePreview && !purgeDeleteAll" class="admin-row">
+        <span>Available to clear:</span>
         <span x-text="'event videos: ' + (purgePreview && purgePreview.counts.raw_events_video_files)"></span>
-        <span x-text="'event images: ' + (purgePreview && purgePreview.counts.raw_events_images)"></span>
+        <span x-text="'event snapshots: ' + (purgePreview && purgePreview.counts.raw_events_snapshots)"></span>
         <span x-text="'visit videos: ' + (purgePreview && purgePreview.counts.visits_video_files)"></span>
-        <span x-text="'visit images/GIFs: ' + (purgePreview && purgePreview.counts.visits_images_or_gifs)"></span>
+        <span x-text="'puzzled previews: ' + (purgePreview && purgePreview.counts.visits_puzzled_previews)"></span>
+        <span x-text="'GIFs: ' + (purgePreview && purgePreview.counts.visits_gifs)"></span>
       </div>
-      <div x-show="purgePreview && !purgeOnlyMedia" class="admin-row">
+      <div x-show="purgePreview && purgeDeleteAll" class="admin-row">
         <span>Would delete:</span>
         <span x-text="'events: ' + (purgePreview && purgePreview.counts.raw_events)"></span>
         <span x-text="'visits: ' + (purgePreview && purgePreview.counts.visits)"></span>

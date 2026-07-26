@@ -57,8 +57,14 @@ def _primary_object_type(row: dict) -> str:
 
 def store_clip(row: dict, content: bytes) -> str:
     start = _as_datetime(row["start_ts"])
+    # Camera-first directory layout (camera/YYYY/MM/DD/...) -- lets disk usage/retention be
+    # reasoned about per-camera by just looking at the filesystem, not only by parsing filenames
+    # or querying Postgres. A row with no camera (shouldn't happen in practice -- every raw_event
+    # is ingested with one) buckets under "unknown" rather than raising.
+    camera = row.get("camera") or "unknown"
     day_dir = os.path.join(
         config.VIDEO_STORAGE_PATH,
+        camera,
         f"{start:%Y}", f"{start:%m}", f"{start:%d}",
     )
     os.makedirs(day_dir, exist_ok=True)
@@ -82,8 +88,12 @@ def store_visit_clip(visit: dict, content: bytes) -> str:
     # numeric id (visit ids and raw_event ids are independent sequences) -- see
     # alert_video_worker.py.
     start = _as_datetime(visit["start_ts"])
+    # Same camera-first layout store_clip uses -- visits store the camera under "cameras"
+    # (singular value, per-camera-only grouping -- see alert_video_worker.py).
+    camera = visit.get("cameras") or "unknown"
     day_dir = os.path.join(
         config.VIDEO_STORAGE_PATH_ALERTS,
+        camera,
         f"{start:%Y}", f"{start:%m}", f"{start:%d}",
     )
     os.makedirs(day_dir, exist_ok=True)

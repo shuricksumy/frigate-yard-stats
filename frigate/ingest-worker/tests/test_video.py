@@ -48,18 +48,30 @@ def test_primary_object_type_empty_falls_back_to_event():
     assert video._primary_object_type({}) == "event"
 
 
-def test_store_clip_writes_date_partitioned_path(tmp_path, monkeypatch):
+def test_store_clip_writes_camera_and_date_partitioned_path(tmp_path, monkeypatch):
     monkeypatch.setattr(video.config, "VIDEO_STORAGE_PATH", str(tmp_path))
-    row = {"id": 42, "objects": "car", "start_ts": datetime(2026, 7, 15, 22, 22, 55, tzinfo=timezone.utc)}
+    row = {
+        "id": 42, "objects": "car", "camera": "outside2",
+        "start_ts": datetime(2026, 7, 15, 22, 22, 55, tzinfo=timezone.utc),
+    }
     content = b"fake-mp4-bytes"
 
     path = video.store_clip(row, content)
 
-    # Epoch seconds plus a human-readable UTC timestamp alongside it (epoch alone isn't
-    # recognizable at a glance in a directory listing).
-    expected_path = tmp_path / "2026" / "07" / "15" / "car-42-1784154175-20260715T222255Z.mp4"
+    # Camera-first layout (camera/YYYY/MM/DD/...) -- epoch seconds plus a human-readable UTC
+    # timestamp alongside it (epoch alone isn't recognizable at a glance in a directory listing).
+    expected_path = tmp_path / "outside2" / "2026" / "07" / "15" / "car-42-1784154175-20260715T222255Z.mp4"
     assert path == str(expected_path)
     assert expected_path.read_bytes() == content
+
+
+def test_store_clip_falls_back_to_unknown_camera_dir_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(video.config, "VIDEO_STORAGE_PATH", str(tmp_path))
+    row = {"id": 43, "objects": "car", "start_ts": datetime(2026, 7, 15, tzinfo=timezone.utc)}
+
+    path = video.store_clip(row, b"x")
+
+    assert os.path.dirname(path) == str(tmp_path / "unknown" / "2026" / "07" / "15")
 
 
 def test_store_clip_falls_back_to_event_for_empty_objects(tmp_path, monkeypatch):
@@ -75,19 +87,31 @@ def test_store_visit_clip_writes_to_separate_alerts_path(tmp_path, monkeypatch):
     # Uses VIDEO_STORAGE_PATH_ALERTS, not VIDEO_STORAGE_PATH -- a genuinely separate storage
     # location for the alerts/visits flow, not a subfolder of the events flow's path.
     monkeypatch.setattr(video.config, "VIDEO_STORAGE_PATH_ALERTS", str(tmp_path))
-    visit = {"id": 6, "objects": "car,truck", "start_ts": datetime(2026, 7, 16, 11, 40, 51, tzinfo=timezone.utc)}
+    visit = {
+        "id": 6, "objects": "car,truck", "cameras": "outside2",
+        "start_ts": datetime(2026, 7, 16, 11, 40, 51, tzinfo=timezone.utc),
+    }
     content = b"fake-mp4-bytes"
 
     path = video.store_visit_clip(visit, content)
 
-    expected_path = tmp_path / "2026" / "07" / "16" / "visit-car-6-1784202051-20260716T114051Z.mp4"
+    expected_path = tmp_path / "outside2" / "2026" / "07" / "16" / "visit-car-6-1784202051-20260716T114051Z.mp4"
     assert path == str(expected_path)
     assert expected_path.read_bytes() == content
 
 
+def test_store_visit_clip_falls_back_to_unknown_camera_dir_when_missing(tmp_path, monkeypatch):
+    monkeypatch.setattr(video.config, "VIDEO_STORAGE_PATH_ALERTS", str(tmp_path))
+    visit = {"id": 9, "objects": "car", "start_ts": datetime(2026, 7, 16, tzinfo=timezone.utc)}
+
+    path = video.store_visit_clip(visit, b"x")
+
+    assert os.path.dirname(path) == str(tmp_path / "unknown" / "2026" / "07" / "16")
+
+
 def test_store_visit_clip_filename_distinguishes_from_per_event_clip(tmp_path, monkeypatch):
     monkeypatch.setattr(video.config, "VIDEO_STORAGE_PATH_ALERTS", str(tmp_path))
-    visit = {"id": 42, "objects": "person", "start_ts": datetime(2026, 1, 1, tzinfo=timezone.utc)}
+    visit = {"id": 42, "objects": "person", "cameras": "outside", "start_ts": datetime(2026, 1, 1, tzinfo=timezone.utc)}
 
     path = video.store_visit_clip(visit, b"x")
 

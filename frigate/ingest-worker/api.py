@@ -86,23 +86,43 @@ def run_retention_now():
 def purge_old_records(
     older_than_days: int = Query(..., ge=1, description="Delete/clear data with start_ts older than this many days"),
     confirm: bool = Query(False, description="Must be true to actually delete. Omitted/false previews counts only -- no rows are removed"),
-    only_media: bool = Query(True, description="Default true: keeps every row and all its text/structured AI analysis (including embeddings) -- only deletes stored video files off disk and clears stored images/GIFs (crop_image_base64/preview_gif_base64), so old data stays searchable with just the media gone. false: deletes the rows entirely (raw_events, visits, and their dependent sightings) -- today's original full purge -- and rebuilds the vector search index afterward against whatever data remains."),
+    only_media: bool = Query(True, description="Default true: keeps every row and all its text/structured AI analysis (including embeddings) -- only clears the media categories selected below, so old data stays searchable with just the media gone. false: deletes the rows entirely (raw_events, visits, and their dependent sightings) -- today's original full purge -- and rebuilds the vector search index afterward against whatever data remains. When false, the four delete_* params below are ignored entirely (a full row delete already covers all of their columns)."),
+    delete_video: bool = Query(True, description="only_media=true only: delete stored video clip files off disk and clear video_path (raw_events and visits)."),
+    delete_gif: bool = Query(True, description="only_media=true only: clear visits.preview_gif_base64 (the animated visit preview)."),
+    delete_snapshots: bool = Query(False, description="only_media=true only: clear raw_events.crop_image_base64 (the per-event still crop, aka 'Event Snapshots')."),
+    delete_puzzled_preview: bool = Query(False, description="only_media=true only: clear visits.crop_image_base64 (the flat composite grid of sampled visit frames)."),
     object_label: str | None = Query(None, description="Restrict this purge to a single Frigate object label (e.g. 'car'). Only ever affects raw_events and their sightings -- visits/visit_sightings are never touched when this is set, since a visit can span multiple distinct object types and there's no single-type-safe way to decide the visit row (or its own composite-grid media) belongs to just one type's purge. Omit for the existing all-types behavior, which does cover visits/visit_sightings same as before this param existed."),
+    camera: str | None = Query(None, description="Restrict this purge to a single Frigate camera. Unlike object_label, this DOES apply to visits/visit_sightings too -- visit grouping is per-camera only, so a visit's own `cameras` column is always a single, unambiguous value. Composes with object_label (both can be set at once)."),
 ):
     """Ad-hoc bulk purge with a caller-chosen cutoff, independent of the scheduled
     RETENTION_MONTHS sweep -- e.g. to clear out a backlog of old test data, reclaim space sooner
     than the configured retention window, or (only_media=true, the default) strip old
-    video/image/GIF payloads while keeping every row's AI analysis text and plate reads
-    searchable indefinitely. Unlike /retention/run, the cutoff here is caller-controlled and the
-    delete has no undo, so this requires X-API-Key and defaults to a dry run: call once without
-    confirm=true to see how many rows/files would be affected, then again with confirm=true to
-    actually apply it."""
+    media while keeping every row's AI analysis text and plate reads searchable indefinitely.
+    only_media mode is itself four independently toggleable categories (delete_video/delete_gif/
+    delete_snapshots/delete_puzzled_preview) rather than one all-or-nothing "media" concept, since
+    they have very different storage cost and "still worth keeping" answers. Unlike /retention/run,
+    the cutoff here is caller-controlled and the delete has no undo, so this requires X-API-Key and
+    defaults to a dry run: call once without confirm=true to see how many rows/files would be
+    affected, then again with confirm=true to actually apply it."""
     cutoff = datetime.now(timezone.utc) - timedelta(days=older_than_days)
     if only_media:
-        counts = db.purge_media_older_than(cutoff, execute=confirm, object_label=object_label)
-        return {"cutoff": cutoff, "dry_run": not confirm, "only_media": True, "object_label": object_label, "counts": counts}
-    counts = db.purge_older_than(cutoff, execute=confirm, object_label=object_label)
-    result = {"cutoff": cutoff, "dry_run": not confirm, "only_media": False, "object_label": object_label, "counts": counts}
+        counts = db.purge_media_older_than(
+            cutoff, execute=confirm, object_label=object_label, camera=camera,
+            delete_video=delete_video, delete_gif=delete_gif,
+            delete_snapshots=delete_snapshots, delete_puzzled_preview=delete_puzzled_preview,
+        )
+        return {
+            "cutoff": cutoff, "dry_run": not confirm, "only_media": True, "object_label": object_label,
+            "camera": camera,
+            "delete_video": delete_video, "delete_gif": delete_gif,
+            "delete_snapshots": delete_snapshots, "delete_puzzled_preview": delete_puzzled_preview,
+            "counts": counts,
+        }
+    counts = db.purge_older_than(cutoff, execute=confirm, object_label=object_label, camera=camera)
+    result = {
+        "cutoff": cutoff, "dry_run": not confirm, "only_media": False,
+        "object_label": object_label, "camera": camera, "counts": counts,
+    }
     if confirm:
         # A full purge can remove a large fraction of the embedded rows the HNSW index was built
         # over -- rebuilding it against whatever survives keeps the index accurate/compact rather
@@ -512,6 +532,7 @@ def admin_overview():
     return {
         "row_counts": row_counts,
         "row_counts_by_object_type": db.get_row_counts_by_object_type(),
+        "row_counts_by_camera": db.get_row_counts_by_camera(),
         "stage_counts": db.get_stage_counts(),
         # Frigate's own system-health heartbeat (frigate/stats + frigate/available over MQTT) --
         # live current-state kept in memory by mqtt_ingest, not a DB query. None/None if the MQTT
@@ -552,6 +573,8 @@ def admin_disk_usage():
         "video_storage_alerts": admin.dir_size_bytes(config.VIDEO_STORAGE_PATH_ALERTS),
         "video_storage_by_object_type": admin.dir_size_by_object_type(config.VIDEO_STORAGE_PATH),
         "video_storage_alerts_by_object_type": admin.dir_size_by_object_type(config.VIDEO_STORAGE_PATH_ALERTS),
+        "video_storage_by_camera": admin.dir_size_by_camera(config.VIDEO_STORAGE_PATH),
+        "video_storage_alerts_by_camera": admin.dir_size_by_camera(config.VIDEO_STORAGE_PATH_ALERTS),
     }
 
 

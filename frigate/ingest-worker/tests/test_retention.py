@@ -124,11 +124,14 @@ def test_purge_media_older_than_preview_matches_execute_counts(conn_ok):
     event_id, visit_id = _make_old_visit_with_everything()
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+        # Preview always reports all four categories regardless of which are selected -- lets the
+        # admin dashboard show the full picture before the caller decides what to check.
         preview = db.purge_media_older_than(cutoff, execute=False)
         assert preview["raw_events_video_files"] >= 1
-        assert preview["raw_events_images"] >= 1
+        assert preview["raw_events_snapshots"] >= 1
         assert preview["visits_video_files"] >= 1
-        assert preview["visits_images_or_gifs"] >= 1
+        assert preview["visits_puzzled_previews"] >= 1
+        assert preview["visits_gifs"] >= 1
         assert "video_files_deleted" not in preview  # dry run never reports an action taken
 
         result = db.purge_media_older_than(cutoff, execute=True)
@@ -142,7 +145,10 @@ def test_purge_media_older_than_preview_matches_execute_counts(conn_ok):
         _cleanup(event_id, visit_id)
 
 
-def test_purge_media_older_than_clears_media_but_keeps_rows_and_text(conn_ok):
+def test_purge_media_older_than_default_flags_clear_video_and_gif_only(conn_ok):
+    # Defaults: delete_video/delete_gif on, delete_snapshots/delete_puzzled_preview off -- the
+    # smaller, still-useful-for-a-quick-look artifacts survive a default-flags purge; only the
+    # large video files and the animated GIF (arguably the least-revisited artifact) go.
     event_id, visit_id = _make_old_visit_with_everything()
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=60)
@@ -151,14 +157,14 @@ def test_purge_media_older_than_clears_media_but_keeps_rows_and_text(conn_ok):
         event = db.get_raw_event(event_id)
         assert event is not None  # row kept
         assert event["video_path"] is None
-        assert event["crop_image_base64"] is None
+        assert event["crop_image_base64"] is not None  # snapshot: default off, survives
         assert event["ai_status"] == "done"  # queue-state/text metadata untouched
 
         visit = db.get_visit(visit_id)
         assert visit is not None
         assert visit["video_path"] is None
-        assert visit["crop_image_base64"] is None
-        assert visit["preview_gif_base64"] is None
+        assert visit["crop_image_base64"] is not None  # puzzled preview: default off, survives
+        assert visit["preview_gif_base64"] is None  # gif: default on, cleared
 
         sighting = db.get_visit_alert_sighting(visit_id)
         assert sighting is not None  # alert-stage text analysis fully preserved
@@ -168,11 +174,58 @@ def test_purge_media_older_than_clears_media_but_keeps_rows_and_text(conn_ok):
         _cleanup(event_id, visit_id)
 
 
+def test_purge_media_older_than_all_four_flags_clear_everything(conn_ok):
+    event_id, visit_id = _make_old_visit_with_everything()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+        db.purge_media_older_than(
+            cutoff, execute=True,
+            delete_video=True, delete_gif=True, delete_snapshots=True, delete_puzzled_preview=True,
+        )
+
+        event = db.get_raw_event(event_id)
+        assert event["video_path"] is None
+        assert event["crop_image_base64"] is None
+
+        visit = db.get_visit(visit_id)
+        assert visit["video_path"] is None
+        assert visit["crop_image_base64"] is None
+        assert visit["preview_gif_base64"] is None
+    finally:
+        _cleanup(event_id, visit_id)
+
+
+def test_purge_media_older_than_snapshots_only(conn_ok):
+    # Only delete_snapshots on -- video/gif/puzzled_preview all left alone, confirming these four
+    # categories are truly independent, not bundled pairs.
+    event_id, visit_id = _make_old_visit_with_everything()
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+        db.purge_media_older_than(
+            cutoff, execute=True,
+            delete_video=False, delete_gif=False, delete_snapshots=True, delete_puzzled_preview=False,
+        )
+
+        event = db.get_raw_event(event_id)
+        assert event["crop_image_base64"] is None  # cleared
+        assert event["video_path"] is not None  # untouched
+
+        visit = db.get_visit(visit_id)
+        assert visit["crop_image_base64"] is not None  # untouched (puzzled preview is a separate flag)
+        assert visit["preview_gif_base64"] is not None  # untouched
+        assert visit["video_path"] is not None  # untouched
+    finally:
+        _cleanup(event_id, visit_id)
+
+
 def test_purge_media_older_than_never_touches_recent_rows(conn_ok):
     event_id, visit_id = _make_old_visit_with_everything(days_old=1)
     try:
         cutoff = datetime.now(timezone.utc) - timedelta(days=60)
-        db.purge_media_older_than(cutoff, execute=True)
+        db.purge_media_older_than(
+            cutoff, execute=True,
+            delete_video=True, delete_gif=True, delete_snapshots=True, delete_puzzled_preview=True,
+        )
         event = db.get_raw_event(event_id)
         assert event["crop_image_base64"] is not None
         assert event["video_path"] is not None
@@ -266,11 +319,12 @@ def test_purge_media_older_than_object_label_only_affects_matching_type(conn_ok)
         cutoff = datetime.now(timezone.utc) - timedelta(days=60)
         preview = db.purge_media_older_than(cutoff, execute=False, object_label="car")
         assert preview["raw_events_video_files"] == 1
-        assert preview["raw_events_images"] == 1
+        assert preview["raw_events_snapshots"] == 1
         assert preview["visits_video_files"] == 0
-        assert preview["visits_images_or_gifs"] == 0
+        assert preview["visits_puzzled_previews"] == 0
+        assert preview["visits_gifs"] == 0
 
-        db.purge_media_older_than(cutoff, execute=True, object_label="car")
+        db.purge_media_older_than(cutoff, execute=True, object_label="car", delete_snapshots=True)
         car_event = db.get_raw_event(car_id)
         person_event = db.get_raw_event(person_id)
         assert car_event["crop_image_base64"] is None
@@ -279,3 +333,79 @@ def test_purge_media_older_than_object_label_only_affects_matching_type(conn_ok)
         assert person_event["video_path"] is not None
     finally:
         _cleanup_events(car_id, person_id)
+
+
+# ---- camera filter -- unlike object_label, this DOES scope visits/visit_sightings too, since
+# visit grouping is per-camera only (visits.cameras is always a single, unambiguous value) ----
+
+def test_purge_older_than_camera_only_affects_matching_camera(conn_ok):
+    cam_a = f"pytest-retention-cam-a-{uuid.uuid4()}"
+    cam_b = f"pytest-retention-cam-b-{uuid.uuid4()}"
+    event_a, visit_a = _make_old_visit_with_everything(camera=cam_a)
+    event_b, visit_b = _make_old_visit_with_everything(camera=cam_b)
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+        preview = db.purge_older_than(cutoff, execute=False, camera=cam_a)
+        assert preview["raw_events"] == 1
+        assert preview["visits"] == 1  # unlike object_label, camera DOES scope visits
+        assert preview["visit_sightings"] == 1
+
+        db.purge_older_than(cutoff, execute=True, camera=cam_a)
+        assert db.get_raw_event(event_a) is None
+        assert db.get_visit(visit_a) is None
+        assert db.get_raw_event(event_b) is not None  # untouched -- different camera
+        assert db.get_visit(visit_b) is not None
+    finally:
+        _cleanup(event_a, visit_a)
+        _cleanup(event_b, visit_b)
+
+
+def test_purge_older_than_object_label_and_camera_compose(conn_ok):
+    cam = f"pytest-retention-both-{uuid.uuid4()}"
+    other_cam = f"{cam}-other"
+    car_id = _make_old_raw_event(100, "car", cam)
+    person_id = _make_old_raw_event(100, "person", cam)
+    other_cam_car_id = _make_old_raw_event(100, "car", other_cam)
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+        db.purge_older_than(cutoff, execute=True, object_label="car", camera=cam)
+        assert db.get_raw_event(car_id) is None  # matches both filters
+        assert db.get_raw_event(person_id) is not None  # wrong type
+        assert db.get_raw_event(other_cam_car_id) is not None  # wrong camera
+    finally:
+        _cleanup_events(car_id, person_id, other_cam_car_id)
+
+
+def test_purge_media_older_than_camera_only_affects_matching_camera(conn_ok):
+    cam_a = f"pytest-retention-cam-a-{uuid.uuid4()}"
+    cam_b = f"pytest-retention-cam-b-{uuid.uuid4()}"
+    event_a, visit_a = _make_old_visit_with_everything(camera=cam_a)
+    event_b, visit_b = _make_old_visit_with_everything(camera=cam_b)
+    try:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=60)
+        preview = db.purge_media_older_than(cutoff, execute=False, camera=cam_a)
+        assert preview["raw_events_video_files"] == 1
+        assert preview["visits_video_files"] == 1  # unlike object_label, camera DOES scope visits
+        assert preview["visits_puzzled_previews"] == 1
+        assert preview["visits_gifs"] == 1
+
+        db.purge_media_older_than(
+            cutoff, execute=True, camera=cam_a,
+            delete_video=True, delete_gif=True, delete_snapshots=True, delete_puzzled_preview=True,
+        )
+        event_a_row = db.get_raw_event(event_a)
+        visit_a_row = db.get_visit(visit_a)
+        event_b_row = db.get_raw_event(event_b)
+        visit_b_row = db.get_visit(visit_b)
+
+        assert event_a_row["crop_image_base64"] is None
+        assert event_a_row["video_path"] is None
+        assert visit_a_row["crop_image_base64"] is None
+        assert visit_a_row["video_path"] is None
+        assert visit_a_row["preview_gif_base64"] is None
+
+        assert event_b_row["crop_image_base64"] is not None  # untouched -- different camera
+        assert visit_b_row["crop_image_base64"] is not None
+    finally:
+        _cleanup(event_a, visit_a)
+        _cleanup(event_b, visit_b)

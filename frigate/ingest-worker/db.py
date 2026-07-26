@@ -191,6 +191,33 @@ def get_row_counts_by_object_type() -> dict:
     }
 
 
+def get_row_counts_by_camera() -> dict:
+    # Same shape as get_row_counts_by_object_type, but grouped by camera instead of object type --
+    # for the admin dashboard's "By camera" section, the natural companion view once video storage
+    # (video.py's store_clip/store_visit_clip) and retention purge both went camera-aware.
+    # raw_events has its own `camera` column directly; sightings/visit_sightings don't (only
+    # object_label), so those need a join back to raw_events/visits to attribute a camera.
+    return {
+        "raw_events": _execute(
+            "SELECT camera, count(*)::int AS count FROM yard_stats.raw_events "
+            "GROUP BY camera ORDER BY count DESC",
+            fetch=True,
+        ),
+        "sightings": _execute(
+            "SELECT re.camera AS camera, count(*)::int AS count FROM yard_stats.sightings s "
+            "JOIN yard_stats.raw_events re ON re.id = s.raw_event_id "
+            "GROUP BY re.camera ORDER BY count DESC",
+            fetch=True,
+        ),
+        "visit_sightings": _execute(
+            "SELECT v.cameras AS camera, count(*)::int AS count FROM yard_stats.visit_sightings vs "
+            "JOIN yard_stats.visits v ON v.id = vs.visit_id "
+            "GROUP BY v.cameras ORDER BY count DESC",
+            fetch=True,
+        ),
+    }
+
+
 def get_db_size_by_object_type() -> dict:
     # Approximate per-type Postgres footprint -- sum(pg_column_size(t.*)) over each table's own
     # rows, grouped by that table's label column. This is a real byte count of each row's stored
@@ -1158,7 +1185,9 @@ def run_retention_cleanup(retention_months: int) -> None:
     )
 
 
-def purge_older_than(cutoff: datetime, execute: bool, object_label: str | None = None) -> dict:
+def purge_older_than(
+    cutoff: datetime, execute: bool, object_label: str | None = None, camera: str | None = None,
+) -> dict:
     # Ad-hoc counterpart to run_retention_cleanup above -- same FK-safe child-before-parent
     # delete order, but keyed on a caller-supplied cutoff timestamp instead of the fixed
     # config.RETENTION_MONTHS, and always counts first so a dry run (execute=False) and a real
@@ -1171,48 +1200,60 @@ def purge_older_than(cutoff: datetime, execute: bool, object_label: str | None =
     # media) belongs to just one type's purge -- only the type-scoped raw_events/sightings have an
     # unambiguous single label to filter on. Purging "all types" (object_label=None) still covers
     # visits/visit_sightings exactly as before this param existed.
+    #
+    # camera (optional) scopes to a single Frigate camera -- unlike object_label, this DOES apply
+    # to visits/visit_sightings too: visit grouping is per-camera only (see "Visit grouping" in
+    # CLAUDE.md), so a visit's own `cameras` column is always a single, unambiguous value, with none
+    # of object_label's multi-type-per-visit ambiguity.
     type_clause = "AND re.objects = %s" if object_label else ""
     type_clause_bare = "AND objects = %s" if object_label else ""
     type_params = [object_label] if object_label else []
+
+    camera_clause = "AND re.camera = %s" if camera else ""
+    camera_clause_bare = "AND camera = %s" if camera else ""
+    camera_params = [camera] if camera else []
+
+    visits_camera_clause = "AND cameras = %s" if camera else ""
+    visits_camera_params = [camera] if camera else []
 
     counts = {
         "sightings": _execute(
             f"""
             SELECT count(*)::int AS c FROM yard_stats.sightings s
             JOIN yard_stats.raw_events re ON re.id = s.raw_event_id
-            WHERE re.start_ts < %s {type_clause}
+            WHERE re.start_ts < %s {type_clause} {camera_clause}
             """,
-            [cutoff, *type_params], fetch=True,
+            [cutoff, *type_params, *camera_params], fetch=True,
         )[0]["c"],
         "visit_sightings": 0 if object_label else _execute(
-            """
+            f"""
             SELECT count(*)::int AS c FROM yard_stats.visit_sightings vs
             JOIN yard_stats.visits v ON v.id = vs.visit_id
-            WHERE v.start_ts < %s
+            WHERE v.start_ts < %s {visits_camera_clause}
             """,
-            (cutoff,), fetch=True,
+            [cutoff, *visits_camera_params], fetch=True,
         )[0]["c"],
         "visits": 0 if object_label else _execute(
-            "SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s",
-            (cutoff,), fetch=True,
+            f"SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s {visits_camera_clause}",
+            [cutoff, *visits_camera_params], fetch=True,
         )[0]["c"],
         "raw_events": _execute(
-            f"SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE start_ts < %s {type_clause_bare}",
-            [cutoff, *type_params], fetch=True,
+            f"SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE start_ts < %s {type_clause_bare} {camera_clause_bare}",
+            [cutoff, *type_params, *camera_params], fetch=True,
         )[0]["c"],
     }
 
     video_paths = [
         row["video_path"] for row in _execute(
-            f"SELECT video_path FROM yard_stats.raw_events WHERE start_ts < %s AND video_path IS NOT NULL {type_clause_bare}",
-            [cutoff, *type_params], fetch=True,
+            f"SELECT video_path FROM yard_stats.raw_events WHERE start_ts < %s AND video_path IS NOT NULL {type_clause_bare} {camera_clause_bare}",
+            [cutoff, *type_params, *camera_params], fetch=True,
         )
     ]
     if not object_label:
         video_paths += [
             row["video_path"] for row in _execute(
-                "SELECT video_path FROM yard_stats.visits WHERE start_ts < %s AND video_path IS NOT NULL",
-                (cutoff,), fetch=True,
+                f"SELECT video_path FROM yard_stats.visits WHERE start_ts < %s AND video_path IS NOT NULL {visits_camera_clause}",
+                [cutoff, *visits_camera_params], fetch=True,
             )
         ]
     counts["video_files"] = len(video_paths)
@@ -1222,113 +1263,186 @@ def purge_older_than(cutoff: datetime, execute: bool, object_label: str | None =
         _execute(
             f"""
             DELETE FROM yard_stats.sightings WHERE raw_event_id IN (
-                SELECT id FROM yard_stats.raw_events WHERE start_ts < %s {type_clause_bare}
+                SELECT id FROM yard_stats.raw_events WHERE start_ts < %s {type_clause_bare} {camera_clause_bare}
             )
             """,
-            [cutoff, *type_params],
+            [cutoff, *type_params, *camera_params],
         )
         if not object_label:
             # visit_sightings references visits(id) with no ON DELETE CASCADE -- must go before
             # the visits DELETE below, same reasoning as sightings above. Skipped entirely under
             # an object_label-scoped purge (visits/visit_sightings are never touched -- see above).
             _execute(
-                """
+                f"""
                 DELETE FROM yard_stats.visit_sightings WHERE visit_id IN (
-                    SELECT id FROM yard_stats.visits WHERE start_ts < %s
+                    SELECT id FROM yard_stats.visits WHERE start_ts < %s {visits_camera_clause}
                 )
                 """,
-                (cutoff,),
+                [cutoff, *visits_camera_params],
             )
             # raw_events.visit_id references visits(id) -- the opposite direction from the delete
             # order below (visits before raw_events); decouple first so a visit about to be deleted
             # can never still have a raw_event pointing at it, same reasoning as
             # run_retention_cleanup's identical fix.
             _execute(
-                """
+                f"""
                 UPDATE yard_stats.raw_events SET visit_id = NULL WHERE visit_id IN (
-                    SELECT id FROM yard_stats.visits WHERE start_ts < %s
+                    SELECT id FROM yard_stats.visits WHERE start_ts < %s {visits_camera_clause}
                 )
                 """,
-                (cutoff,),
+                [cutoff, *visits_camera_params],
             )
-            _execute("DELETE FROM yard_stats.visits WHERE start_ts < %s", (cutoff,))
-        _execute(f"DELETE FROM yard_stats.raw_events WHERE start_ts < %s {type_clause_bare}", [cutoff, *type_params])
+            _execute(
+                f"DELETE FROM yard_stats.visits WHERE start_ts < %s {visits_camera_clause}",
+                [cutoff, *visits_camera_params],
+            )
+        _execute(
+            f"DELETE FROM yard_stats.raw_events WHERE start_ts < %s {type_clause_bare} {camera_clause_bare}",
+            [cutoff, *type_params, *camera_params],
+        )
         logger.info(
-            "Ad-hoc purge executed (cutoff=%s, object_label=%s, counts=%s, video_files_deleted=%s)",
-            cutoff, object_label, counts, deleted_files,
+            "Ad-hoc purge executed (cutoff=%s, object_label=%s, camera=%s, counts=%s, video_files_deleted=%s)",
+            cutoff, object_label, camera, counts, deleted_files,
         )
 
     return counts
 
 
-def purge_media_older_than(cutoff: datetime, execute: bool, object_label: str | None = None) -> dict:
-    # POST /retention/purge's only_media=true mode (the default) -- deletes stored video files off
-    # disk and clears the stored image/GIF columns (crop_image_base64/preview_gif_base64) for rows
+def purge_media_older_than(
+    cutoff: datetime,
+    execute: bool,
+    object_label: str | None = None,
+    camera: str | None = None,
+    delete_video: bool = True,
+    delete_gif: bool = True,
+    delete_snapshots: bool = False,
+    delete_puzzled_preview: bool = False,
+) -> dict:
+    # POST /retention/purge's only_media=true mode (the default) -- clears stored media for rows
     # older than cutoff, but keeps the rows themselves and every text field on them (AI analysis,
     # embeddings) intact and searchable. Unlike purge_older_than, this never touches
     # sightings/visit_sightings at all -- those tables carry no media columns of their own, only
     # text.
     #
+    # Four independently toggleable categories, not one all-or-nothing "media" concept -- the four
+    # columns this touches have very different storage cost and "do I still want this" answers
+    # (a 4K video clip vs. a single still crop): video (raw_events.video_path + visits.video_path,
+    # the actual files on disk), gif (visits.preview_gif_base64, the animated visit preview),
+    # snapshots (raw_events.crop_image_base64, "Event Snapshots" -- the per-event still), and
+    # puzzled_preview (visits.crop_image_base64, the flat composite grid -- the visit-level
+    # counterpart to a snapshot, named for how it reads to a human: several moments tiled into one
+    # "puzzled" image). Defaults (video/gif on, snapshots/puzzled_preview off) match this project's
+    # own judgment on which artifacts are safe to routinely discard (large, rarely revisited) vs.
+    # which are worth keeping longer (small, still useful for a quick visual check).
+    #
     # object_label (optional), same scoping decision as purge_older_than: only raw_events (a
     # single-type-per-row concept) are filtered by it -- visits (which can span multiple object
     # types in one row) are never touched at all when object_label is set, since there's no
     # single-type-safe way to decide a multi-type visit's own media belongs to just one purge.
+    #
+    # camera (optional), unlike object_label, DOES apply to visits too -- visit grouping is
+    # per-camera only (see "Visit grouping" in CLAUDE.md), so visits.cameras is always a single,
+    # unambiguous value, with none of object_label's multi-type-per-visit ambiguity.
     type_clause = "AND objects = %s" if object_label else ""
     type_params = [object_label] if object_label else []
 
+    camera_clause = "AND camera = %s" if camera else ""
+    camera_params = [camera] if camera else []
+
+    visits_camera_clause = "AND cameras = %s" if camera else ""
+    visits_camera_params = [camera] if camera else []
+
+    # Preview counts are always computed for all four categories regardless of which are actually
+    # selected -- lets the admin dashboard show the full picture before the caller decides what to
+    # check, without a separate round-trip per checkbox toggle. Only the checked categories are
+    # actually touched below when execute=True.
     counts = {
         "raw_events_video_files": _execute(
-            f"SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE start_ts < %s AND video_path IS NOT NULL {type_clause}",
-            [cutoff, *type_params], fetch=True,
+            f"SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE start_ts < %s AND video_path IS NOT NULL {type_clause} {camera_clause}",
+            [cutoff, *type_params, *camera_params], fetch=True,
         )[0]["c"],
-        "raw_events_images": _execute(
-            f"SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE start_ts < %s AND crop_image_base64 IS NOT NULL {type_clause}",
-            [cutoff, *type_params], fetch=True,
+        "raw_events_snapshots": _execute(
+            f"SELECT count(*)::int AS c FROM yard_stats.raw_events WHERE start_ts < %s AND crop_image_base64 IS NOT NULL {type_clause} {camera_clause}",
+            [cutoff, *type_params, *camera_params], fetch=True,
         )[0]["c"],
         "visits_video_files": 0 if object_label else _execute(
-            "SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s AND video_path IS NOT NULL",
-            (cutoff,), fetch=True,
+            f"SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s AND video_path IS NOT NULL {visits_camera_clause}",
+            [cutoff, *visits_camera_params], fetch=True,
         )[0]["c"],
-        "visits_images_or_gifs": 0 if object_label else _execute(
-            "SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s "
-            "AND (crop_image_base64 IS NOT NULL OR preview_gif_base64 IS NOT NULL)",
-            (cutoff,), fetch=True,
+        "visits_puzzled_previews": 0 if object_label else _execute(
+            f"SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s AND crop_image_base64 IS NOT NULL {visits_camera_clause}",
+            [cutoff, *visits_camera_params], fetch=True,
+        )[0]["c"],
+        "visits_gifs": 0 if object_label else _execute(
+            f"SELECT count(*)::int AS c FROM yard_stats.visits WHERE start_ts < %s AND preview_gif_base64 IS NOT NULL {visits_camera_clause}",
+            [cutoff, *visits_camera_params], fetch=True,
         )[0]["c"],
     }
 
     if execute:
-        video_paths = [
-            row["video_path"] for row in _execute(
-                f"SELECT video_path FROM yard_stats.raw_events WHERE start_ts < %s AND video_path IS NOT NULL {type_clause}",
-                [cutoff, *type_params], fetch=True,
-            )
-        ]
-        if not object_label:
-            video_paths += [
+        deleted_files = 0
+        if delete_video:
+            video_paths = [
                 row["video_path"] for row in _execute(
-                    "SELECT video_path FROM yard_stats.visits WHERE start_ts < %s AND video_path IS NOT NULL",
-                    (cutoff,), fetch=True,
+                    f"SELECT video_path FROM yard_stats.raw_events WHERE start_ts < %s AND video_path IS NOT NULL {type_clause} {camera_clause}",
+                    [cutoff, *type_params, *camera_params], fetch=True,
                 )
             ]
-        deleted_files = _delete_video_files(video_paths)
-        _execute(
-            f"""
-            UPDATE yard_stats.raw_events SET video_path = NULL, crop_image_base64 = NULL
-            WHERE start_ts < %s AND (video_path IS NOT NULL OR crop_image_base64 IS NOT NULL) {type_clause}
-            """,
-            [cutoff, *type_params],
-        )
-        if not object_label:
+            if not object_label:
+                video_paths += [
+                    row["video_path"] for row in _execute(
+                        f"SELECT video_path FROM yard_stats.visits WHERE start_ts < %s AND video_path IS NOT NULL {visits_camera_clause}",
+                        [cutoff, *visits_camera_params], fetch=True,
+                    )
+                ]
+            deleted_files = _delete_video_files(video_paths)
+
+        # raw_events: video_path and/or crop_image_base64 (Event Snapshots) -- one UPDATE covering
+        # whichever of the two toggles is actually on, rather than one query per column.
+        re_sets, re_wheres = [], []
+        if delete_video:
+            re_sets.append("video_path = NULL")
+            re_wheres.append("video_path IS NOT NULL")
+        if delete_snapshots:
+            re_sets.append("crop_image_base64 = NULL")
+            re_wheres.append("crop_image_base64 IS NOT NULL")
+        if re_sets:
             _execute(
-                """
-                UPDATE yard_stats.visits SET video_path = NULL, crop_image_base64 = NULL, preview_gif_base64 = NULL
-                WHERE start_ts < %s
-                  AND (video_path IS NOT NULL OR crop_image_base64 IS NOT NULL OR preview_gif_base64 IS NOT NULL)
+                f"""
+                UPDATE yard_stats.raw_events SET {', '.join(re_sets)}
+                WHERE start_ts < %s AND ({' OR '.join(re_wheres)}) {type_clause} {camera_clause}
                 """,
-                (cutoff,),
+                [cutoff, *type_params, *camera_params],
             )
+
+        # visits: video_path, crop_image_base64 (puzzled preview grid), preview_gif_base64 (GIF) --
+        # never touched at all when object_label is set, same reasoning as the counts above.
+        if not object_label:
+            v_sets, v_wheres = [], []
+            if delete_video:
+                v_sets.append("video_path = NULL")
+                v_wheres.append("video_path IS NOT NULL")
+            if delete_puzzled_preview:
+                v_sets.append("crop_image_base64 = NULL")
+                v_wheres.append("crop_image_base64 IS NOT NULL")
+            if delete_gif:
+                v_sets.append("preview_gif_base64 = NULL")
+                v_wheres.append("preview_gif_base64 IS NOT NULL")
+            if v_sets:
+                _execute(
+                    f"""
+                    UPDATE yard_stats.visits SET {', '.join(v_sets)}
+                    WHERE start_ts < %s AND ({' OR '.join(v_wheres)}) {visits_camera_clause}
+                    """,
+                    [cutoff, *visits_camera_params],
+                )
+
         counts["video_files_deleted"] = deleted_files
-        logger.info("Media-only purge executed (cutoff=%s, object_label=%s, counts=%s)", cutoff, object_label, counts)
+        logger.info(
+            "Media-only purge executed (cutoff=%s, object_label=%s, camera=%s, delete_video=%s, delete_gif=%s, "
+            "delete_snapshots=%s, delete_puzzled_preview=%s, counts=%s)",
+            cutoff, object_label, camera, delete_video, delete_gif, delete_snapshots, delete_puzzled_preview, counts,
+        )
 
     return counts
 

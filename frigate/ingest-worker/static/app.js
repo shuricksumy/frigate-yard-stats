@@ -523,6 +523,15 @@ function eventsApp() {
       return Math.max(0, Math.min(100, Math.round((1 - distance) * 100)));
     },
 
+    // Whether a card is worth opening the lightbox for -- media (image/video) obviously qualifies,
+    // but a row whose media was cleared by a retention purge (only_media mode keeps the row and
+    // every text field, just clears crop_image_base64/video_path/preview_gif_base64) still has its
+    // AI analysis description worth reading, and previously had no way to reach it at all once
+    // has_image/has_video both went false. Shared by Events/Visits/Search's card click handlers.
+    isOpenable(row) {
+      return !!(row.has_image || row.has_video || row.ai_status === "done");
+    },
+
     // Routes a clicked search result into the same shared lightbox Events/Visits already use --
     // same {id, visitId, has_video, has_image, has_preview_gif, ai_status} shape openVisitLightbox
     // builds below, just sourced from the search result row instead of a VisitSummary/EventSummary

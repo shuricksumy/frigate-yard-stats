@@ -146,9 +146,12 @@
     <template x-if="viewMode === 'events'">
       <div class="grid" x-show="!loading">
         <template x-for="event in events" :key="event.id">
-          <div class="card" :class="{ clickable: event.has_image || event.has_video }" @click="(event.has_image || event.has_video) && openLightbox(event)">
+          <div class="card" :class="{ clickable: isOpenable(event) }" @click="isOpenable(event) && openLightbox(event)">
             <img x-show="event.has_image || event.has_video" :src="thumbnailUrl(event.id)" loading="lazy" alt="event thumbnail">
-            <div class="no-image" x-show="!event.has_image && !event.has_video">no media (<span x-text="event.crop_status"></span>)</div>
+            <div class="no-image" x-show="!event.has_image && !event.has_video">
+              <span x-show="event.ai_status === 'done'">media cleared — click for description</span>
+              <span x-show="event.ai_status !== 'done'">no media (<span x-text="event.crop_status"></span>)</span>
+            </div>
             <div class="meta">
               <div><strong x-text="event.objects || 'event'"></strong> — <span x-text="event.camera"></span></div>
               <div class="ts" x-text="formatTs(event.start_ts)"></div>
@@ -165,9 +168,12 @@
     <template x-if="viewMode === 'visits'">
       <div class="grid" x-show="!loading">
         <template x-for="visit in visits" :key="visit.id">
-          <div class="card" :class="{ clickable: visit.has_image || visit.has_video }" @click="(visit.has_image || visit.has_video) && openVisitLightbox(visit)">
+          <div class="card" :class="{ clickable: isOpenable(visit) }" @click="isOpenable(visit) && openVisitLightbox(visit)">
             <img x-show="visit.has_image || visit.has_video" :src="visitThumbnailUrl(visit.id)" loading="lazy" alt="visit thumbnail">
-            <div class="no-image" x-show="!visit.has_image && !visit.has_video">no media (<span x-text="visit.crop_status"></span>)</div>
+            <div class="no-image" x-show="!visit.has_image && !visit.has_video">
+              <span x-show="visit.ai_status === 'done'">media cleared — click for description</span>
+              <span x-show="visit.ai_status !== 'done'">no media (<span x-text="visit.crop_status"></span>)</span>
+            </div>
             <div class="meta">
               <div><strong x-text="visit.objects || 'visit'"></strong> — <span x-text="visit.cameras"></span></div>
               <div class="ts" x-text="formatTs(visit.start_ts)"></div>
@@ -185,7 +191,7 @@
     <template x-if="viewMode === 'search'">
       <div class="grid" x-show="!loading">
         <template x-for="result in searchResults" :key="result.kind + '-' + result.id">
-          <div class="card" :class="{ clickable: result.has_image || result.has_video }" @click="(result.has_image || result.has_video) && openSearchResult(result)">
+          <div class="card" :class="{ clickable: isOpenable(result) }" @click="isOpenable(result) && openSearchResult(result)">
             <img x-show="result.has_image || result.has_video"
                  :src="result.kind === 'visit' ? visitThumbnailUrl(result.id) : thumbnailUrl(result.id)"
                  loading="lazy" alt="result thumbnail">
@@ -230,9 +236,15 @@
       <template x-if="lightboxEvent && lightboxEvent.has_video && lightboxMode === 'video'">
         <video controls autoplay :src="lightboxVideoUrl()"></video>
       </template>
-      <template x-if="lightboxEvent && (lightboxMode === 'image' || (!lightboxEvent.has_video && lightboxMode !== 'preview'))">
+      <template x-if="lightboxEvent && lightboxEvent.has_image && (lightboxMode === 'image' || (!lightboxEvent.has_video && lightboxMode !== 'preview'))">
         <img :src="lightboxImageUrl()" alt="event full image">
       </template>
+      <!-- A row can still be openable with no media left at all (a retention purge clears
+           crop_image_base64/video_path/preview_gif_base64 but keeps the row and its AI analysis
+           text) -- show a placeholder instead of a broken image/video. -->
+      <div class="lightbox-no-media" x-show="lightboxEvent && !lightboxEvent.has_image && !lightboxEvent.has_video && !lightboxEvent.has_preview_gif" style="display:none">
+        No media available — likely cleared by a retention purge. AI analysis below is still preserved.
+      </div>
       <!-- Only shown after drilling into one of a visit's own "Connected events" -- not gated on
            that event's own ai_status (unlike .lightbox-info below), since the way back should
            still be available even if this particular connected event hasn't been analyzed yet. -->
