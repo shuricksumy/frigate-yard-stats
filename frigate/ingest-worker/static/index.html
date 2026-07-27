@@ -222,11 +222,15 @@
        (Video/Image) let you switch whenever both are available. -->
   <div class="modal-backdrop" x-show="lightboxEvent" @click.self="closeLightbox()" style="display:none">
     <div class="modal lightbox">
-      <button class="close" @click="closeLightbox()">&times;</button>
-      <a class="download" x-show="lightboxEvent" style="display:none" :href="lightboxDownloadUrl()" :download="lightboxDownloadFilename()" title="Download">&#8681;</a>
-      <div class="lightbox-toggle" x-show="lightboxEvent && lightboxEvent.has_video && lightboxEvent.has_image" style="display:none">
-        <button x-show="lightboxEvent && lightboxEvent.has_video" :class="{ active: lightboxMode === 'video' }" @click="lightboxMode = 'video'">Video</button>
-        <button x-show="lightboxEvent && lightboxEvent.has_image" :class="{ active: lightboxMode === 'image' }" @click="lightboxMode = 'image'">Image</button>
+      <div class="lightbox-controls">
+        <div class="lightbox-toggle" x-show="lightboxEvent && lightboxEvent.has_video && lightboxEvent.has_image" style="display:none">
+          <button x-show="lightboxEvent && lightboxEvent.has_video" :class="{ active: lightboxMode === 'video' }" @click="lightboxMode = 'video'">Video</button>
+          <button x-show="lightboxEvent && lightboxEvent.has_image" :class="{ active: lightboxMode === 'image' }" @click="lightboxMode = 'image'">Image</button>
+        </div>
+        <div class="lightbox-action-buttons">
+          <a class="download" x-show="lightboxEvent" style="display:none" :href="lightboxDownloadUrl()" :download="lightboxDownloadFilename()" title="Download">&#8681;</a>
+          <button class="close" @click="closeLightbox()">&times;</button>
+        </div>
       </div>
       <template x-if="lightboxEvent && lightboxEvent.has_video && lightboxMode === 'video'">
         <video controls autoplay :src="lightboxVideoUrl()"></video>
@@ -278,12 +282,15 @@
       </div>
       <!-- Every raw_event this visit grouped together (Frigate's own review/tracker grouping),
            not just the deduped AI-analyzed sighting(s) above -- click one to open its own
-           per-event lightbox. Visits only; a plain event has no connected events of its own. -->
-      <div class="lightbox-connected-events" x-show="lightboxEvent && lightboxEvent.visitId && lightboxConnectedEvents.length > 0" style="display:none">
+           per-event lightbox. Stays visible (and usable as a nav bar) whether the currently open
+           item is the visit's own representative or one of its connected events already drilled
+           into -- gated on lightboxVisitId, not lightboxEvent.visitId, for exactly that reason.
+           Visits only; a plain event opened outside any visit context has no strip at all. -->
+      <div class="lightbox-connected-events" x-show="lightboxEvent && lightboxVisitId && lightboxConnectedEvents.length > 0" style="display:none">
         <h4>Connected events (<span x-text="lightboxConnectedEvents.length"></span>)</h4>
         <div class="connected-events-strip">
           <template x-for="ev in lightboxConnectedEvents" :key="ev.id">
-            <div class="connected-event-card" @click="openConnectedEvent(ev)">
+            <div class="connected-event-card" :class="{ active: lightboxEvent && ev.id === lightboxEvent.id }" @click="openConnectedEvent(ev)">
               <img :src="thumbnailUrl(ev.id)" :alt="ev.objects" loading="lazy">
               <span class="connected-event-ts" x-text="formatTs(ev.start_ts)"></span>
               <span class="badge" :class="'ai-' + ev.ai_status" x-text="ev.ai_status"></span>

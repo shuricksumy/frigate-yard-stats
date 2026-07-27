@@ -99,8 +99,17 @@ function eventsApp() {
     // e.g. a car and a person in the same visit each get their own entry here.
     lightboxGroups: [],
     // Every raw_event a visit grouped together (GET /events?visit_id=...), for the "Connected
-    // events" strip -- always empty for a plain event (no visitId to fetch by).
+    // events" strip -- always empty for a plain event (no visitId to fetch by). Persists across
+    // drilling into one connected event after another (see lightboxVisitId below) so the strip
+    // stays usable as a navigation bar between siblings, not just a one-way door out of the visit.
     lightboxConnectedEvents: [],
+    // Which visit's connected-events strip is currently relevant -- distinct from
+    // lightboxEvent.visitId, which is only set on the visit's own representative-event lightbox.
+    // Sourced from lightboxEvent.visitId when there, or lightboxParentVisit.id when the current
+    // lightbox is one of that visit's connected events (drilled in via openConnectedEvent).
+    // lightboxConnectedEvents is only re-fetched when this actually changes -- clicking between
+    // siblings of the SAME visit reuses what's already loaded rather than refetching every click.
+    lightboxVisitId: null,
     // visit_summary_worker.py's synthesized text for this visit (string) or null -- always null
     // for a plain event, and null for a visit until that stage is enabled and has finished.
     lightboxVisitSummary: null,
@@ -655,14 +664,30 @@ function eventsApp() {
       // (shown whenever both are available) let you switch between them freely.
       this.lightboxMode = event.has_video ? "video" : "image";
       this.lightboxGroups = [];
-      this.lightboxConnectedEvents = [];
       this.lightboxVisitSummary = null;
+
+      // event.visitId is only set on the visit's own representative-event lightbox; a connected
+      // event opened via openConnectedEvent has none of its own, so fall back to
+      // lightboxParentVisit (set by openConnectedEvent just before calling this) to keep treating
+      // it as part of the same visit's navigation context.
+      const visitId = event.visitId || (this.lightboxParentVisit && this.lightboxParentVisit.id) || null;
+      if (visitId !== this.lightboxVisitId) {
+        // Actually switching visit context (opened from the grid/search, or a different visit
+        // entirely) -- whatever was loaded belongs to a different visit now, so drop it rather
+        // than briefly showing a stale strip from before the fetch below completes.
+        this.lightboxConnectedEvents = [];
+        this.lightboxVisitId = visitId;
+      }
+
       // A visit's own ai_status (event.ai_status) only reflects its single earliest-linked
       // event -- a second, different-object-type event in the same visit can still be
       // analyzed (or still pending) independently of that one, so the visit branch always
       // fetches rather than gating on it. A plain event has exactly one status, so that gate
       // still applies there.
-      if (!event.visitId && event.ai_status !== "done") return;
+      if (!event.visitId && event.ai_status !== "done") {
+        if (visitId && this.lightboxConnectedEvents.length === 0) await this.fetchConnectedEvents(visitId);
+        return;
+      }
       // The AI analysis result (plate, color, description) isn't in the list response -- keeps
       // GET /events / GET /visits light -- so fetch it only when actually opening an item.
       this.lightboxLoading = true;
@@ -670,9 +695,9 @@ function eventsApp() {
         if (event.visitId) {
           // Sightings and connected-events are independent fetches -- run them in parallel rather
           // than one after the other, since neither depends on the other's result.
-          const [sightingsResp, eventsResp] = await Promise.all([
+          const [sightingsResp] = await Promise.all([
             fetch(`/visits/${event.visitId}/sightings`, { headers: { "X-API-Key": this.apiKey } }),
-            fetch(`/events?visit_id=${event.visitId}&has_media=false&limit=50`, { headers: { "X-API-Key": this.apiKey } }),
+            this.fetchConnectedEvents(event.visitId),
           ]);
           if (sightingsResp.ok) {
             const data = await sightingsResp.json();
@@ -680,12 +705,6 @@ function eventsApp() {
               title: this.titleCase(s.object_label), fields: this.sightingFields(s),
             }));
             this.lightboxVisitSummary = data.visit_summary ? data.visit_summary.summary : null;
-          }
-          if (eventsResp.ok) {
-            // Earliest-first -- GET /events itself orders newest-first for normal browsing, but
-            // reading a visit's connected events chronologically (what happened, in order) reads
-            // more naturally than newest-first for this specific strip.
-            this.lightboxConnectedEvents = (await eventsResp.json()).reverse();
           }
         } else {
           const resp = await fetch(`/events/${event.id}`, { headers: { "X-API-Key": this.apiKey } });
@@ -697,11 +716,29 @@ function eventsApp() {
               });
             }
           }
+          // Drilling into a connected event that's already loaded in the strip doesn't need a
+          // refetch (visitId === lightboxVisitId, list untouched above) -- this only fires the
+          // first time a visit's connected events are loaded via one of its own siblings.
+          if (visitId && this.lightboxConnectedEvents.length === 0) await this.fetchConnectedEvents(visitId);
         }
       } catch (err) {
         console.error(err);
       } finally {
         this.lightboxLoading = false;
+      }
+    },
+
+    // Earliest-first -- GET /events itself orders newest-first for normal browsing, but reading a
+    // visit's connected events chronologically (what happened, in order) reads more naturally than
+    // newest-first for this specific strip.
+    async fetchConnectedEvents(visitId) {
+      try {
+        const resp = await fetch(`/events?visit_id=${visitId}&has_media=false&limit=50`, {
+          headers: { "X-API-Key": this.apiKey },
+        });
+        if (resp.ok) this.lightboxConnectedEvents = (await resp.json()).reverse();
+      } catch (err) {
+        console.error(err);
       }
     },
 
@@ -711,6 +748,7 @@ function eventsApp() {
       this.lightboxConnectedEvents = [];
       this.lightboxVisitSummary = null;
       this.lightboxParentVisit = null;
+      this.lightboxVisitId = null;
     },
 
     // A sighting is just {object_label, description} in this universal model -- no per-type

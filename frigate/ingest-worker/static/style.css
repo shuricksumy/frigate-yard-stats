@@ -355,13 +355,29 @@ button:disabled { opacity: 0.4; cursor: default; }
   font-size: 0.85rem;
 }
 
-.lightbox-toggle {
+/* Video/Image toggle, download, and close all live in one right-aligned cluster (in that
+   left-to-right order) rather than the toggle sitting alone on the opposite corner -- one group
+   of controls to look for instead of two. Shifted in from the edge (not flush) so it doesn't
+   crowd the lightbox's own rounded corner. */
+.lightbox-controls {
   position: absolute;
   top: 8px;
-  left: 8px;
+  right: 5%;
   z-index: 1;
   display: flex;
+  align-items: center;
+  gap: 20px;
+}
+
+.lightbox-toggle {
+  display: flex;
   gap: 4px;
+}
+
+.lightbox-action-buttons {
+  display: flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .lightbox-toggle button {
@@ -380,9 +396,6 @@ input:disabled, select:disabled {
 }
 
 .modal .close {
-  position: absolute;
-  top: 8px;
-  right: 8px;
   background: rgba(0, 0, 0, 0.6);
   border: none;
   color: white;
@@ -392,13 +405,9 @@ input:disabled, select:disabled {
   font-size: 1.2rem;
   line-height: 1;
   cursor: pointer;
-  z-index: 1;
 }
 
 .modal .download {
-  position: absolute;
-  top: 8px;
-  right: 48px;
   background: rgba(0, 0, 0, 0.6);
   border: none;
   color: white;
@@ -410,7 +419,6 @@ input:disabled, select:disabled {
   text-align: center;
   text-decoration: none;
   cursor: pointer;
-  z-index: 1;
 }
 
 /* ============ Admin dashboard (admin.html/admin.js) ============ */
@@ -562,6 +570,13 @@ input:disabled, select:disabled {
   border-radius: 6px;
   overflow: hidden;
   border: 1px solid var(--border);
+}
+
+/* Whichever connected event is currently open in the lightbox above -- lets the strip double as
+   a "you are here" indicator once it stays visible across sibling navigation, not just a
+   one-directional list of things to click away to. */
+.connected-event-card.active {
+  border: 2px solid var(--accent);
 }
 
 .connected-event-card img {
