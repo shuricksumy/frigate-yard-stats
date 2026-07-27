@@ -247,6 +247,23 @@ OBJECT_TYPES = [t.strip() for t in _env("OBJECT_TYPES", "car,truck,person,dog").
 # project's original default) for a deployment that never sets it in profiles.yaml at all.
 # -------------------------------------------------
 AI_EVENTS_STAGE_ENABLED = False
+# Per-object-type resolvable (profile_config.ai_only_visit_representative), same defaults-then-
+# hardcoded-fallback shape as AI_EVENTS_STAGE_ENABLED above -- whether ai_worker only analyzes one
+# representative raw_event per (visit_id, objects) instead of every duplicate det_id a visit
+# grouped (db.claim_ai_batch's only_visit_representative param, already used by POST
+# /ai-queue/claim's own source=visits and /reports/generate, just not previously wired into this
+# stage's own claim call). Confirmed live: a burst of repeated tracker re-detections of the same
+# stationary parked car (occlusion from foot traffic passing near it, or motion/glare flicker --
+# see CLAUDE.md's "Cropping"/frigate.conf's own tracker-flicker comments) can generate dozens of
+# raw_events collapsing into a single visit, each getting its own full (and identical) VLM call
+# under the old always-source=events behavior. Defaults to True (dedup ON) -- a deliberate default
+# CHANGE from this project's prior behavior (every raw_event analyzed individually, no exceptions)
+# -- an existing deployment upgrading across this change gets deduped analysis with no config edit
+# needed; set `ai_only_visit_representative: false` (globally in defaults:, or per flood-prone
+# object type) to restore the old per-event behavior. A raw_event Frigate's review never grouped
+# into any visit (visit_id IS NULL) is always still analyzed one-to-one regardless of this setting
+# -- only same-visit duplicates are affected.
+AI_ONLY_VISIT_REPRESENTATIVE = True
 # Same idea as SCHEMA_SQL_PATH -- baked into the image by default, bind-mount a different file and
 # point this at it to customize prompts/models without a rebuild.
 AI_STAGE_PROFILE_PATH = _env("AI_STAGE_PROFILE_PATH", "/app/profiles.yaml")

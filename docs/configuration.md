@@ -349,6 +349,18 @@ by this one stage, cover the same ground; see the web UI's Visit lightbox in
   `event_prompt`. If you ever build your own n8n workflow against the same `/ai-queue/claim`
   endpoint, don't run it alongside this at once against the same queue (safe either way — `FOR
   UPDATE SKIP LOCKED` prevents a double-claim — just wasteful/confusing).
+- **`ai_only_visit_representative`** (default `true`) — analyzes only one representative event per
+  distinct object type within a Frigate visit, instead of every duplicate det_id the visit grouped.
+  Guards against a real, confirmed pattern: Frigate's tracker has no true re-identification, so
+  anything that briefly occludes a stationary object (a person walking past a parked car, motion/
+  glare flicker) can make it repeatedly re-detect the *same* physical object as a brand-new tracked
+  one — dozens of near-identical raw_events, each previously getting its own full VLM call. Set
+  `false` (globally in `defaults:`, or for just the one type that's actually flooding, e.g. `car`)
+  to go back to analyzing every single event. A raw_event Frigate's review never grouped into any
+  visit at all is always still analyzed one-to-one either way. Caveat: a raw_event only gets linked
+  to its visit once that visit's review segment closes — a duplicate created moments before the
+  review closes can still slip through and get analyzed individually before grouping catches up; see
+  CLAUDE.md's "Per-object-type overrides" section for the full mechanics.
 
 Can be set globally via `profiles.yaml`'s `defaults:` section, or per object type — e.g. to run the
 stage for `car`/`person` only while `dog` sits out. Setting it `true` for at least one type is

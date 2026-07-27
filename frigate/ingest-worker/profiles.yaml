@@ -46,6 +46,14 @@
 #     `defaults`) is enough to start the stage's poll thread -- see
 #     profile_config.any_ai_events_stage_enabled, used by main.py's thread-startup check.
 #     Hardcoded fallback: false.
+#   ai_only_visit_representative -- true/false, whether this type dedupes AI analysis to one
+#     representative raw_event per (visit_id, objects) instead of analyzing every duplicate det_id
+#     a visit grouped -- see profiles.yaml.example's fuller comment for why this exists (repeated
+#     tracker re-detections of one stationary object flooding the queue) and its caveat (a
+#     raw_event only gets grouped once Frigate's review closes, so some duplicates in a
+#     fast-moving burst can still be analyzed individually just before grouping catches up).
+#     Hardcoded fallback: TRUE (dedup on) -- a deliberate default change from this project's prior
+#     always-analyze-everything behavior.
 #   ai_image_max_dimension -- the long side (px) of the downscaled copy actually sent to the VLM
 #     and stored in Postgres (raw_events.crop_image_base64) -- a downscale of Frigate's own
 #     best-detection-score snapshot (crop.fetch_frigate_snapshot_base64, see CLAUDE.md's

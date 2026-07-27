@@ -92,6 +92,17 @@ def ai_events_stage_enabled(profile: dict | None, object_label: str | None) -> b
     return _resolve(profile, object_label, "ai_events_stage_enabled", config.AI_EVENTS_STAGE_ENABLED)
 
 
+def ai_only_visit_representative(profile: dict | None, object_label: str | None) -> bool:
+    # Whether this type's AI analysis dedupes to one representative raw_event per (visit_id,
+    # objects) instead of analyzing every duplicate det_id a visit grouped -- see config.py's own
+    # comment on AI_ONLY_VISIT_REPRESENTATIVE for why this defaults to True and when a deployment
+    # would want it False for a specific flood-prone type (e.g. a camera/zone where a stationary
+    # car repeatedly loses/regains tracking).
+    return _resolve(
+        profile, object_label, "ai_only_visit_representative", config.AI_ONLY_VISIT_REPRESENTATIVE
+    )
+
+
 def ai_image_max_dimension(profile: dict | None, object_label: str | None) -> int:
     # The AI-facing (and DB-stored) image size -- a downscale of the same full-resolution crop
     # crop.crop_event always builds. Per-object-type resolvable since a plate-heavy vehicle prompt

@@ -845,6 +845,50 @@ Two families of overridable settings:
   along with `crop_and_scale`/`_build_vf_filter`/`compute_full_res_box`/
   `compute_frame_offset_seconds` themselves, once `crop_event` switched to using Frigate's own
   snapshot exclusively; see "Cropping" below.)
+- **`ai_only_visit_representative`** (`profile_config.ai_only_visit_representative`) -- whether
+  `ai_worker.py` dedupes this type's analysis to one representative raw_event per `(visit_id,
+  objects)` instead of analyzing every duplicate det_id a visit grouped (`db.claim_ai_batch`'s
+  `only_visit_representative` param -- the exact mechanism `POST /ai-queue/claim`'s `source=visits`
+  and `/reports/generate` already used, just not previously wired into `ai_worker.py`'s own claim
+  call). Built in response to a confirmed-live production pattern: Frigate's tracker has no real
+  re-identification, so any time something briefly occludes a stationary object -- a person walking
+  past a parked car, or motion/glare flicker on wet surfaces (the same tracker weakness this
+  project's `frigate.conf` comments already document, referencing
+  [frigate#9636](https://github.com/blakeblackshear/frigate/issues/9636)) -- the track breaks and
+  Frigate spawns a brand-new tracked-object ID the moment detection resumes, even though the
+  physical object never moved. Confirmed directly against production data: two separate bursts (546
+  car raw_events in one 2-hour window, 133 in another) each collapsed into only ~10-12 Frigate
+  visits, with average per-event durations of 3-6 seconds -- overwhelmingly the *same* stationary
+  car re-detected over and over, each instance previously getting its own full (and near-identical)
+  VLM call under the old always-`source=events` behavior. **Hardcoded fallback is `TRUE`** --
+  unlike every other setting in this section, this is a deliberate default *change* from this
+  project's prior behavior (analyze every raw_event, no exceptions): an upgrading deployment gets
+  deduped analysis with no config edit needed, and sets `ai_only_visit_representative: false`
+  (globally via `defaults:`, or per flood-prone type -- e.g. only `car` if that's the type actually
+  flooding while `person` should still be analyzed one-to-one) to restore the old behavior. A
+  raw_event Frigate's review never grouped into any visit at all (`visit_id IS NULL`) is always
+  still analyzed one-to-one regardless of this setting -- only same-visit duplicates are ever
+  skipped. **Per-type, not a single global bool**, unlike every other `claim_ai_batch` param this
+  stage passes -- `ai_worker.run_once` resolves this per mapped object type, splits them into a
+  "dedup" group and a "plain" group, and issues up to two separate `claim_ai_batch` calls (one per
+  group, `only_visit_representative=True`/`False` respectively) rather than one shared call with one
+  shared flag. This is still safe against `AI_STAGE_PARALLEL_LIMIT` despite being two calls:
+  `claim_ai_batch` re-queries in-progress count and marks its own claimed rows `'processing'`
+  immediately before returning, so the second call's own capacity check already reflects whatever
+  the first call just claimed -- the two calls can never together exceed the configured limit.
+  **Caveat, raised directly by the user while this was being designed**: a raw_event only gets its
+  `visit_id` once Frigate's review segment for it actually *closes* (`frigate/reviews`' own `"end"`
+  message -- see "Visit grouping" below) -- `mqtt_ingest.record_visit` links every matching raw_event
+  in one batch operation at that point, not incrementally as each det_id arrives. Until a review
+  closes, every raw_event it will eventually group is indistinguishable from a genuinely ungrouped
+  one (`visit_id IS NULL`), and is therefore still eligible under this setting's own "always analyze
+  ungrouped events" fallback clause. In a fast-moving burst, this means some of the earliest
+  duplicates can still be claimed and individually analyzed in the moments before the review closes
+  and links them -- this setting reliably stops *further* duplicates once a visit exists to compare
+  against, it does not retroactively undo analysis that already happened just before grouping caught
+  up. No additional grace-period/delay mechanism was added to close this gap (it would trade
+  analysis latency for a small amount of additional dedup accuracy) -- left as a possible future
+  enhancement if the residual duplicate rate through this gap turns out to matter in practice.
 - **`store_video` / `store_video_visits`** (the latter renamed from `store_video_alerts` -- "alerts"
   was a holdover name from the removed alert AI stage; this flag has always gated per-VISIT video
   storage) -- these gate a whole poll thread (`main.py`, via
