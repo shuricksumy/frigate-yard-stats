@@ -42,13 +42,17 @@ def process_claimed_event(row: dict, profile: dict | None = None) -> None:
                     "Failed to persist event image to disk for raw_event id=%s", event_id, exc_info=True,
                 )
 
-        # Photo-first Telegram notification -- runs regardless of STORE_VIDEO (photo-only is a
+        # Photo-first Telegram notification -- runs regardless of STORE_VIDEO_EVENTS (photo-only is a
         # valid steady state; video_worker sends a reply video later if video storage is on).
-        # Never allowed to fail the crop stage -- telegram.py itself doesn't raise, but wrap
-        # anyway (belt and suspenders, same spirit as the n8n workflow's onError branches).
+        # Sends full_res_image_base64 (Frigate's own unmodified snapshot), not the downscaled
+        # crop_image_base64 stored in Postgres -- both are already in memory from the same crop
+        # call above regardless of STORE_EVENT_IMAGES, so there's no extra cost to using the
+        # better one here. Never allowed to fail the crop stage -- telegram.py itself doesn't
+        # raise, but wrap anyway (belt and suspenders, same spirit as the n8n workflow's onError
+        # branches).
         try:
             mode = profile_config.telegram_events_mode(profile, object_label)
-            message_id = telegram.send_photo(result["crop_image_base64"], telegram.build_caption(row), mode=mode)
+            message_id = telegram.send_photo(result["full_res_image_base64"], telegram.build_caption(row), mode=mode)
             if message_id is not None:
                 db.set_telegram_photo_message_id(event_id, message_id)
         except Exception:

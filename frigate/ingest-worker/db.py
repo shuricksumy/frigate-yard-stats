@@ -502,14 +502,17 @@ def get_sightings_for_visit(visit_id: int) -> list[dict]:
 
 
 def insert_raw_event(event: dict, profile: dict | None = None) -> None:
-    # video_status starts 'skipped' (not 'new') when store_video resolves to off for this event's
-    # own object type -- a cheap flag set once at ingest, so the video queue's WHERE video_status
-    # IN ('new','retry') never even considers these rows, rather than special-casing a disabled
-    # feature inside the poll loop. Resolved via profile_config (type override -> profiles.yaml
-    # `defaults:` -> config.py hardcoded fallback), not a bare config.STORE_VIDEO read -- store_video
-    # has no env var backing it at all any more (see config.py), so reading the bare constant here
-    # would silently ignore a profiles.yaml override/default and always see the hardcoded False.
-    initial_video_status = "new" if profile_config.store_video_enabled(profile, event["objects"]) else "skipped"
+    # video_status starts 'skipped' (not 'new') unless there's some reason to ever process this
+    # event's own object type at all -- either storage is on (store_video_events) OR Telegram
+    # wants a video for it even without storing one (send-without-store, see profile_config.py's
+    # "send-to-Telegram-without-storing" section) -- a cheap flag set once at ingest, so the video
+    # queue's WHERE video_status IN ('new','retry') never even considers these rows, rather than
+    # special-casing a disabled feature inside the poll loop. Resolved via profile_config (type
+    # override -> profiles.yaml `defaults:` -> config.py hardcoded fallback), not a bare
+    # config.STORE_VIDEO_EVENTS read -- neither setting has an env var backing it at all any more
+    # (see config.py), so reading a bare constant here would silently ignore a profiles.yaml
+    # override/default.
+    initial_video_status = "new" if profile_config.video_events_needed(profile, event["objects"]) else "skipped"
     # crop_status starts 'skipped' (not 'new') when has_snapshot is false -- Frigate can emit a
     # full "end" MQTT lifecycle for a tracked object it never actually saved a snapshot for (seen
     # in production: such det_ids 404 against Frigate's own /api/events/<id>), so cropping can
@@ -540,7 +543,7 @@ def insert_raw_event(event: dict, profile: dict | None = None) -> None:
 
 def get_visit(visit_id: int) -> dict | None:
     # Mirrors get_raw_event -- used by GET /media/video/visit/{id} to serve a visit's own stored
-    # clip (STORE_VIDEO_VISITS), a completely separate video/storage location from any raw_event's.
+    # clip (STORE_VIDEO_ALERTS), a completely separate video/storage location from any raw_event's.
     rows = _execute(
         "SELECT *, (video_path IS NOT NULL) AS has_video FROM yard_stats.visits WHERE id = %s",
         (visit_id,), fetch=True,
@@ -577,17 +580,17 @@ def record_visit(review: dict, profile: dict | None = None) -> int | None:
     # top of this (same zone, overlapping time window, different camera) is a separate, not-yet-
     # built layer. Insert + link in one transaction, same pattern as complete_sighting.
     #
-    # store_video_visits is resolved against the visit's own representative object type (same
+    # store_video_alerts is resolved against the visit's own representative object type (same
     # single-type-per-visit convention claim_visit_video_batch already uses for a visit that can
     # span multiple distinct types) -- computed here via det_ids since the visit row (and its
     # raw_events.visit_id link, which get_representative_event_for_visit relies on) doesn't exist
     # yet at this point.
     representative_label = _get_representative_object_label_for_det_ids(review["det_ids"])
-    # video_status starts 'skipped' (not 'new') when store_video_visits resolves to off for this
-    # visit's representative type -- same reasoning as insert_raw_event's initial_video_status: a
-    # cheap flag set once at insert, so the visit video queue's WHERE clause never even considers
-    # these rows while the feature is disabled.
-    initial_video_status = "new" if profile_config.store_video_visits_enabled(profile, representative_label) else "skipped"
+    # video_status starts 'skipped' (not 'new') unless storage OR Telegram-video-without-storage
+    # wants this visit's representative type processed at all -- same reasoning as
+    # insert_raw_event's initial_video_status: a cheap flag set once at insert, so the visit video
+    # queue's WHERE clause never even considers these rows while neither is wanted.
+    initial_video_status = "new" if profile_config.video_alerts_needed(profile, representative_label) else "skipped"
     conn = get_conn()
     conn.autocommit = False
     try:
@@ -737,7 +740,10 @@ def claim_visit_video_batch(
     )
 
 
-def mark_visit_video_done(visit_id: int, video_path: str) -> None:
+def mark_visit_video_done(visit_id: int, video_path: str | None) -> None:
+    # video_path is None for a visit sent to Telegram without being stored (send-without-store,
+    # see profile_config.py) -- video_status still ends up 'done' (the work completed
+    # successfully), just with nothing left to serve back from our own system afterward.
     _execute(
         """
         UPDATE yard_stats.visits
@@ -1054,11 +1060,12 @@ def claim_video_batch(
     # that's very likely already rolled off Frigate's continuous-recording buffer.
     #
     # object_types/exclude_object_types -- an include-or-exclude pair (at most one set, see
-    # profile_config.store_video_claim_filter), not a plain include-list against every known label:
-    # STORE_VIDEO applies to any Frigate label by default, and OBJECT_TYPES is otherwise a cosmetic
-    # list (just the web UI's Type dropdown source) -- an include-only filter against it would
-    # silently stop storing video for any real label that isn't in that list. Both None (the
-    # default) means no per-type filtering at all, identical to this function's behavior before
+    # profile_config.video_events_claim_filter), not a plain include-list against every known
+    # label: STORE_VIDEO_EVENTS applies to any Frigate label by default, and OBJECT_TYPES is
+    # otherwise a cosmetic list (just the web UI's Type dropdown source) -- an include-only filter
+    # against it would silently stop storing video for any real label that isn't in that list.
+    # Both None (the default) means no per-type filtering at all, identical to this function's
+    # behavior before
     # per-type overrides existed.
     age_clause = ""
     type_clause = ""
@@ -1095,7 +1102,10 @@ def claim_video_batch(
     )
 
 
-def mark_video_done(event_id: int, video_path: str) -> None:
+def mark_video_done(event_id: int, video_path: str | None) -> None:
+    # video_path is None for an event sent to Telegram without being stored (send-without-store,
+    # see profile_config.py) -- video_status still ends up 'done' (the work completed
+    # successfully), just with nothing left to serve back from our own system afterward.
     _execute(
         """
         UPDATE yard_stats.raw_events
@@ -1691,7 +1701,7 @@ def _build_visits_query(
     # pass, not a "best crop" heuristic (that's a separate, later decision if this view leads to
     # actually deduping AI-queue/Telegram work). event_count via a window COUNT(*) OVER (PARTITION
     # BY v.id), same partition as the row_number, so both come from a single pass over `linked`.
-    # video_status/has_video describe the VISIT's own video (STORE_VIDEO_VISITS/
+    # video_status/has_video describe the VISIT's own video (STORE_VIDEO_ALERTS/
     # alert_video_worker.py), not the representative raw_event's -- those are two entirely
     # separate video flows/storage locations; get_event_video only ever serves a raw_event's
     # video_path, never a visit's, so the web UI needs a different endpoint for visit playback

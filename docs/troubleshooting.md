@@ -73,7 +73,7 @@ This stage is owned by n8n, not `ingest-worker` — see [`n8n.md`](n8n.md):
 
 ## Video never gets stored
 
-- Confirm `store_video` (per-event) or `store_video_visits` (per-visit) actually resolves to `true`
+- Confirm `store_video_events` (per-event) or `store_video_alerts` (per-visit) actually resolves to `true`
   for that object type in `profiles.yaml` (a type's own entry, or a profile-wide `defaults:`
   section) — these are configured entirely in `profiles.yaml`, not `.env` — and that you restarted
   the container after editing it (`docker compose restart ingest-worker`, not `up -d` — see
@@ -102,7 +102,7 @@ object type but `raw_events.image_path` stays null for that type's events:
   from the pipeline's own point of view; check `ingest-worker`'s logs for a "Failed to persist
   event image to disk" warning.
 - Confirm `store_event_images` actually resolves to `true` for that object type (a type's own
-  entry, or a profile-wide `defaults:` section) — same resolution mechanism as `store_video`.
+  entry, or a profile-wide `defaults:` section) — same resolution mechanism as `store_video_events`.
 
 ## Telegram messages never arrive
 

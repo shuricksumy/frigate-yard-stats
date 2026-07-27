@@ -85,49 +85,57 @@ def send_visit_summary(
         return None
 
 
-def _post_video(video_path: str, caption: str, reply_to_message_id: int | None) -> bool:
+def _post_video(content: bytes, filename: str, caption: str, reply_to_message_id: int | None) -> bool:
+    # Bytes-based rather than a filesystem path -- video_worker.py/alert_video_worker.py already
+    # have the clip's full content in memory (video.download_clip's own return value) whether or
+    # not they also persist it to disk, so sending straight from that same buffer works
+    # identically either way and is the only option at all when storage is disabled (see
+    # profile_config.py's "send-to-Telegram-without-storing" section) -- there's no video_path to
+    # read back from in that case.
     try:
         data = {"chat_id": config.TELEGRAM_CHAT_ID, "parse_mode": "HTML", "caption": caption}
         if reply_to_message_id is not None:
             data["reply_to_message_id"] = reply_to_message_id
-        with open(video_path, "rb") as f:
-            resp = requests.post(
-                f"{config.TELEGRAM_API_BASE_URL}/bot{config.TELEGRAM_BOT_TOKEN}/sendVideo",
-                data=data,
-                files={"video": (video_path.rsplit("/", 1)[-1], f, "video/mp4")},
-                timeout=120,
-            )
+        resp = requests.post(
+            f"{config.TELEGRAM_API_BASE_URL}/bot{config.TELEGRAM_BOT_TOKEN}/sendVideo",
+            data=data,
+            files={"video": (filename, content, "video/mp4")},
+            timeout=120,
+        )
         resp.raise_for_status()
         return True
     except Exception:
-        logger.warning("Telegram sendVideo failed for %s", video_path, exc_info=True)
+        logger.warning("Telegram sendVideo failed for %s", filename, exc_info=True)
         return False
 
 
-def send_video(video_path: str, caption: str, reply_to_message_id: int | None, mode: str | None = None) -> bool:
-    """POSTs the stored clip as a video, replying to reply_to_message_id if given (mirrors the
-    n8n workflow's 'Has Reply Target?' branch -- 'Send Video (Reply)' vs 'Send Video (No Reply)').
-    Never raises; logs a warning and returns False on failure so the caller can carry on.
+def send_video(
+    content: bytes, filename: str, caption: str, reply_to_message_id: int | None, mode: str | None = None,
+) -> bool:
+    """POSTs the clip as a video (from an in-memory buffer, whether or not it's also stored to
+    disk), replying to reply_to_message_id if given (mirrors the n8n workflow's 'Has Reply
+    Target?' branch -- 'Send Video (Reply)' vs 'Send Video (No Reply)'). Never raises; logs a
+    warning and returns False on failure so the caller can carry on.
 
     `mode` lets a caller pass an already-resolved per-object-type override (see
     profile_config.telegram_events_mode) instead of the global config.TELEGRAM_EVENTS_MODE."""
     effective_mode = mode if mode is not None else config.TELEGRAM_EVENTS_MODE
     if effective_mode not in ("video", "all"):
         return False
-    return _post_video(video_path, caption, reply_to_message_id)
+    return _post_video(content, filename, caption, reply_to_message_id)
 
 
 def send_visit_video(
-    video_path: str, caption: str, reply_to_message_id: int | None, mode: str | None = None,
+    content: bytes, filename: str, caption: str, reply_to_message_id: int | None, mode: str | None = None,
 ) -> bool:
     """Alerts-flow counterpart to send_video -- gated by TELEGRAM_ALERTS_MODE being "video" or
     "all" instead of TELEGRAM_EVENTS_MODE, otherwise identical (same reply-threading onto the
-    earlier visit-summary message, same never-raises failure handling). Called by
-    alert_video_worker once a visit's clip finishes downloading (STORE_VIDEO_VISITS).
+    earlier visit-summary message, same never-raises failure handling, same in-memory-buffer
+    source). Called by alert_video_worker once a visit's clip finishes downloading.
 
     `mode` lets a caller pass an already-resolved per-object-type override (see
     profile_config.telegram_alerts_mode) instead of the global config.TELEGRAM_ALERTS_MODE."""
     effective_mode = mode if mode is not None else config.TELEGRAM_ALERTS_MODE
     if effective_mode not in ("video", "all"):
         return False
-    return _post_video(video_path, caption, reply_to_message_id)
+    return _post_video(content, filename, caption, reply_to_message_id)

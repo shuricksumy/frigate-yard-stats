@@ -253,11 +253,11 @@ def test_get_visit_returns_none_for_unknown_id(conn_ok):
 
 def test_list_visits_has_video_reflects_the_visit_not_the_representative_event(conn_ok):
     # Regression test: has_video/video_status must describe the VISIT's own video
-    # (STORE_VIDEO_VISITS/alert_video_worker.py), not the representative raw_event's -- those are
+    # (STORE_VIDEO_ALERTS/alert_video_worker.py), not the representative raw_event's -- those are
     # two entirely separate video flows/storage locations. Confirmed live in production this was
     # backwards: every visit had video_status='done' (a real downloaded clip) but list_visits
     # reported has_video=false because it was reading the representative event's video_path
-    # (always NULL, since STORE_VIDEO was off) instead of the visit's own.
+    # (always NULL, since STORE_VIDEO_EVENTS was off) instead of the visit's own.
     det_id = f"pytest-{uuid.uuid4()}"
     raw_id = _insert_raw_event(det_id)
     # The representative raw_event has no video of its own (video_status default 'new', no path).

@@ -129,12 +129,14 @@ API_KEY = _env("API_KEY")
 
 # -------------------------------------------------
 # Video storage (third queue stage: video_status) -- see video.py / video_worker.py.
-# STORE_VIDEO/STORE_VIDEO_VISITS below are deliberately NOT env vars -- configure them via
+# STORE_VIDEO_EVENTS/STORE_VIDEO_ALERTS below are deliberately NOT env vars -- configure them via
 # profiles.yaml (a `defaults:` section for a global change, object_types.<label> for one type) --
 # see profile_config.py. The literals below are only the last-resort fallback when profiles.yaml
 # doesn't set a `defaults:` value for that key either -- matches this project's original defaults.
+# Renamed from STORE_VIDEO_EVENTS -- symmetry with STORE_VIDEO_ALERTS (events vs. alerts flow), same
+# reasoning as the earlier VIDEO_STORAGE_HOST_PATH -> VIDEO_STORAGE_EVENTS_PATH rename.
 # -------------------------------------------------
-STORE_VIDEO = False
+STORE_VIDEO_EVENTS = False
 # Mount point inside the container -- pair with a bind mount in docker-compose.yml
 # (VIDEO_STORAGE_EVENTS_PATH on the host side). Files are laid out as
 # {VIDEO_STORAGE_PATH}/{YYYY}/{MM}/{DD}/{object_type}-{event_id}-{start_ts_epoch}.mp4.
@@ -163,16 +165,16 @@ VIDEO_RETRY_WAIT_SECONDS = 5.0
 VIDEO_MAX_AGE_HOURS = None
 
 # Independent video-storage switch for the visits flow (frigate/reviews) -- separate from
-# STORE_VIDEO above, which only ever gates the events flow (frigate/events, per-raw_event clips).
+# STORE_VIDEO_EVENTS above, which only ever gates the events flow (frigate/events, per-raw_event clips).
 # Renamed from STORE_VIDEO_ALERTS -- "alerts" was a holdover name from the removed alert AI stage;
 # this flag has always gated per-VISIT video storage, not anything alert-specific, so the name was
-# genuinely confusing next to the events-flow STORE_VIDEO above. Both flows share the same
+# genuinely confusing next to the events-flow STORE_VIDEO_EVENTS above. Both flows share the same
 # VIDEO_PARALLEL_LIMIT/VIDEO_INITIAL_WAIT_SECONDS/VIDEO_MIN_VALID_BYTES/VIDEO_MAX_ATTEMPTS/
 # VIDEO_RETRY_WAIT_SECONDS/VIDEO_MAX_AGE_HOURS tuning above (mechanically identical
 # download/validation logic, just against visits instead of raw_events) -- only the on/off switch
 # is separate, so you can toggle each flow independently without doubling every tuning knob. See
 # alert_video_worker.py (module name unchanged -- not part of this rename).
-STORE_VIDEO_VISITS = False
+STORE_VIDEO_ALERTS = False
 # A genuinely separate storage location from VIDEO_STORAGE_PATH (own mount point, own bind mount
 # in docker-compose.yml via VIDEO_STORAGE_ALERTS_HOST_PATH -- env var/path names unchanged, not
 # part of this rename) rather than a subfolder of it -- lets the two flows' disk usage/retention be
@@ -186,7 +188,7 @@ VIDEO_STORAGE_PATH_ALERTS = _env("VIDEO_STORAGE_PATH_ALERTS", "/data/video-alert
 # Opt-in filesystem persistence of the full-resolution crop crop.crop_event already builds for
 # every event (the AI-facing copy in crop_image_base64 is always a downscale of this same crop) --
 # off by default, so the full-res copy is simply discarded unless this is turned on. Deliberately
-# NOT an env var, same reasoning as STORE_VIDEO -- resolved per-object-type via
+# NOT an env var, same reasoning as STORE_VIDEO_EVENTS -- resolved per-object-type via
 # profile_config.store_event_images (a plain per-row resolver, not a claim-filter/thread-gating
 # setting -- persisting is a synchronous side effect inside the existing crop_worker thread, not a
 # separate poll loop/queue stage). See event_images.py.
@@ -220,7 +222,7 @@ TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
 # (github.com/tdlib/telegram-bot-api, the optional telegram-bot-api Compose service/profile in
 # docker-compose.yml) instead, for lower latency (LAN/Docker-network hop instead of the public
 # internet) and a much higher upload cap (2000MB vs. the cloud API's 50MB, which this project's
-# 4K-record-stream video clips -- STORE_VIDEO/STORE_VIDEO_VISITS -- can realistically exceed).
+# 4K-record-stream video clips -- STORE_VIDEO_EVENTS/STORE_VIDEO_ALERTS -- can realistically exceed).
 # Same request shape either way (still POSTs to /bot<token>/<method>), so telegram.py needs no
 # other change. Trailing slash stripped so callers can always do f"{base}/bot...".
 TELEGRAM_API_BASE_URL = _env("TELEGRAM_API_BASE_URL", "https://api.telegram.org").rstrip("/")
@@ -242,7 +244,7 @@ OBJECT_TYPES = [t.strip() for t in _env("OBJECT_TYPES", "car,truck,person,dog").
 # -------------------------------------------------
 # Internal AI stage (ai_worker.py) -- an alternative to n8n/metadata-processor.json, not a
 # replacement for it: that workflow is left untouched in the repo and can be re-enabled in n8n at
-# any time. Off by default, same convention as STORE_VIDEO above.
+# any time. Off by default, same convention as STORE_VIDEO_EVENTS above.
 #
 #   AI_EVENTS_STAGE_ENABLED -- ai_worker.py, analyzes each raw_event's own single-frame crop with
 #     event_prompt. When on, this thread claims the exact same ai_status='new'/'retry' rows
@@ -324,7 +326,7 @@ EMBEDDING_DIMENSIONS = int(_env("EMBEDDING_DIMENSIONS", "1024"))
 
 # Maps this module's technical-tuning constants (see the block above PARALLEL_LIMIT) to their
 # profiles.yaml `defaults:` key -- used by apply_profile_defaults() below. Deliberately excludes
-# every per-object-type-resolvable setting (store_video, telegram_events_mode, ai_image_max_dimension,
+# every per-object-type-resolvable setting (store_video_events, telegram_events_mode, ai_image_max_dimension,
 # etc.) -- those are resolved fresh per-call by profile_config.py instead, since they can vary by
 # Frigate object type; the settings below apply once, globally, with no such per-type meaning.
 _PROFILE_DEFAULTS_MAP = {

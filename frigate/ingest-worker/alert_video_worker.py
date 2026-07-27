@@ -17,6 +17,21 @@ def process_claimed_visit(visit: dict, profile: dict | None = None) -> None:
     if visit.get("video_attempt_count", 0) == 0:
         time.sleep(config.VIDEO_INITIAL_WAIT_SECONDS)
 
+    # Resolved against the representative event's own single object label, same convention as
+    # mqtt_ingest.py/visit_thumb_worker.py -- needed up front for both the store-enabled check
+    # below and the Telegram mode check, not just the latter.
+    representative = db.get_representative_event_for_visit(visit_id)
+    object_label = representative.get("objects") if representative else None
+    # This visit was only claimed at all because EITHER storage is on OR Telegram wants a video
+    # for this type (profile_config.video_alerts_claim_filter) -- resolve both here once, up
+    # front, rather than re-deriving "why was I claimed" deeper in the function.
+    store = profile_config.store_video_alerts_enabled(profile, object_label)
+    mode = profile_config.telegram_alerts_mode(profile, object_label)
+    reply_to = visit.get("telegram_photo_message_id")
+    event_count = db.count_events_for_visit(visit_id)
+    caption = telegram.build_visit_caption(visit.get("cameras"), visit.get("objects"), event_count)
+    filename = f"visit-{object_label or 'event'}-{visit_id}.mp4"
+
     # video.download_clip/build_clip_url only read start_ts/end_ts/camera/det_id off the row --
     # visits store the camera under "cameras" (singular value, per-camera-only grouping), so a
     # small adapter dict lets both flows share the exact same download/validation logic.
@@ -26,28 +41,41 @@ def process_claimed_visit(visit: dict, profile: dict | None = None) -> None:
     }
     try:
         content = video.download_clip(clip_row)
-        path = video.store_visit_clip(visit, content)
-        db.mark_visit_video_done(visit_id, path)
-        logger.info("Stored visit video for visit id=%s camera=%s path=%s", visit_id, visit.get("cameras"), path)
 
-        try:
-            reply_to = visit.get("telegram_photo_message_id")
-            event_count = db.count_events_for_visit(visit_id)
-            caption = telegram.build_visit_caption(visit.get("cameras"), visit.get("objects"), event_count)
-            # Resolved against the representative event's own single object label, same
-            # convention as mqtt_ingest.py/visit_thumb_worker.py.
-            representative = db.get_representative_event_for_visit(visit_id)
-            object_label = representative.get("objects") if representative else None
-            mode = profile_config.telegram_alerts_mode(profile, object_label)
-            telegram.send_visit_video(path, caption, reply_to_message_id=reply_to, mode=mode)
-        except Exception:
-            # telegram.py itself shouldn't raise, but never let a Telegram hiccup take down the
-            # alert-video poll loop -- same belt-and-suspenders as video_worker's send_video call.
-            logger.warning("Telegram visit video send raised unexpectedly for visit id=%s", visit_id, exc_info=True)
+        if store:
+            path = video.store_visit_clip(visit, content)
+            db.mark_visit_video_done(visit_id, path)
+            logger.info(
+                "Stored visit video for visit id=%s camera=%s path=%s", visit_id, visit.get("cameras"), path,
+            )
+            try:
+                telegram.send_visit_video(content, filename, caption, reply_to_message_id=reply_to, mode=mode)
+            except Exception:
+                # telegram.py itself shouldn't raise, but never let a Telegram hiccup take down
+                # the alert-video poll loop -- storage already succeeded, so a notification
+                # failure is logged only, same as before send-without-store existed.
+                logger.warning(
+                    "Telegram visit video send raised unexpectedly for visit id=%s", visit_id, exc_info=True,
+                )
+        else:
+            # Storage is off for this type -- the only reason this visit was claimed at all is
+            # that Telegram wants a video for it, so the send's own success/failure IS the
+            # outcome here (unlike the storage branch above). A failed send with nothing stored
+            # is a genuine failure -- raise so the existing retry-or-fail-with-cap handling below
+            # applies, the same as a download failure would.
+            sent = telegram.send_visit_video(content, filename, caption, reply_to_message_id=reply_to, mode=mode)
+            if not sent:
+                raise RuntimeError(
+                    f"Telegram visit video send failed for visit id={visit_id} and storage is disabled"
+                )
+            db.mark_visit_video_done(visit_id, None)
+            logger.info(
+                "Sent visit video to Telegram (not stored) for visit id=%s camera=%s", visit_id, visit.get("cameras"),
+            )
 
     except Exception:
         logger.warning(
-            "Visit video download not ready / failed for visit id=%s (attempt %s/%s)",
+            "Visit video download/send not ready or failed for visit id=%s (attempt %s/%s)",
             visit_id, visit.get("video_attempt_count", 0) + 1, config.VIDEO_MAX_ATTEMPTS,
         )
         db.mark_visit_video_retry_or_failed(visit_id, config.VIDEO_MAX_ATTEMPTS)
@@ -62,7 +90,9 @@ def run_once(profile: dict | None = None) -> None:
     if available_capacity <= 0:
         return
 
-    object_types, exclude_object_types = profile_config.store_video_visits_claim_filter(profile)
+    # Eligible if EITHER storage is on OR Telegram wants a video for that type (send-without-
+    # store) -- see profile_config.py's "send-to-Telegram-without-storing" section.
+    object_types, exclude_object_types = profile_config.video_alerts_claim_filter(profile)
     if object_types == []:
         # Base disabled, nothing opted in per-type -- nothing for this stage to do at all.
         return

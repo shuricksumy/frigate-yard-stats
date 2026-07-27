@@ -59,6 +59,24 @@ def test_process_claimed_event_falls_back_to_global_config_with_no_profile(monke
     assert captured == {"ai_image_max_dimension": 999}
 
 
+# ---- crop_worker.process_claimed_event's Telegram photo uses the full-resolution snapshot, not
+# the downscaled AI-facing crop stored in Postgres -- both are already in memory from the same
+# crop_event call regardless of STORE_EVENT_IMAGES, so there's no extra cost to sending the
+# better one ----
+
+def test_process_claimed_event_sends_full_resolution_image_to_telegram(monkeypatch):
+    monkeypatch.setattr(crop_worker.crop, "crop_event", lambda row, **k: _crop_event_result())
+    monkeypatch.setattr(crop_worker.db, "mark_crop_done", lambda *a, **k: None)
+
+    sent = {}
+    monkeypatch.setattr(crop_worker.telegram, "send_photo", lambda image_base64, *a, **k: sent.update(image_base64=image_base64))
+
+    row = {"id": 1, "objects": "car", "crop_attempt_count": 1, "det_id": "d1"}
+    crop_worker.process_claimed_event(row, None)
+
+    assert sent["image_base64"] == "full-b64"
+
+
 # ---- crop_worker.process_claimed_event's opt-in store_event_images side effect ----
 
 def test_process_claimed_event_stores_image_when_enabled(monkeypatch):
@@ -123,7 +141,7 @@ def test_process_claimed_event_storage_failure_is_non_fatal(monkeypatch):
 # claiming entirely when nothing is enabled ----
 
 def test_video_worker_run_once_passes_resolved_object_types_to_claim(monkeypatch):
-    monkeypatch.setattr(config, "STORE_VIDEO", False)
+    monkeypatch.setattr(config, "STORE_VIDEO_EVENTS", False)
     monkeypatch.setattr(config, "VIDEO_PARALLEL_LIMIT", 5)
     monkeypatch.setattr(video_worker.db, "reap_stale_video_processing", lambda: None)
     monkeypatch.setattr(video_worker.db, "count_video_in_progress", lambda: 0)
@@ -135,14 +153,14 @@ def test_video_worker_run_once_passes_resolved_object_types_to_claim(monkeypatch
         return []
     monkeypatch.setattr(video_worker.db, "claim_video_batch", fake_claim)
 
-    profile = {"object_types": {"car": {"store_video": True}}}
+    profile = {"object_types": {"car": {"store_video_events": True}}}
     video_worker.run_once(profile)
 
     assert captured == {"object_types": ["car"], "exclude_object_types": None}
 
 
 def test_video_worker_run_once_skips_claim_entirely_when_nothing_enabled(monkeypatch):
-    monkeypatch.setattr(config, "STORE_VIDEO", False)
+    monkeypatch.setattr(config, "STORE_VIDEO_EVENTS", False)
     monkeypatch.setattr(config, "VIDEO_PARALLEL_LIMIT", 5)
     monkeypatch.setattr(video_worker.db, "reap_stale_video_processing", lambda: None)
     monkeypatch.setattr(video_worker.db, "count_video_in_progress", lambda: 0)
@@ -151,11 +169,11 @@ def test_video_worker_run_once_skips_claim_entirely_when_nothing_enabled(monkeyp
         raise AssertionError("claim_video_batch should not be called when nothing opts in")
     monkeypatch.setattr(video_worker.db, "claim_video_batch", fail_if_called)
 
-    video_worker.run_once(None)  # STORE_VIDEO false, no profile -- nothing enabled at all
+    video_worker.run_once(None)  # STORE_VIDEO_EVENTS false, no profile -- nothing enabled at all
 
 
 def test_alert_video_worker_run_once_passes_resolved_object_types_to_claim(monkeypatch):
-    monkeypatch.setattr(config, "STORE_VIDEO_VISITS", True)
+    monkeypatch.setattr(config, "STORE_VIDEO_ALERTS", True)
     monkeypatch.setattr(config, "VIDEO_PARALLEL_LIMIT", 5)
     monkeypatch.setattr(alert_video_worker.db, "reap_stale_visit_video_processing", lambda: None)
     monkeypatch.setattr(alert_video_worker.db, "count_visit_video_in_progress", lambda: 0)
@@ -167,14 +185,14 @@ def test_alert_video_worker_run_once_passes_resolved_object_types_to_claim(monke
         return []
     monkeypatch.setattr(alert_video_worker.db, "claim_visit_video_batch", fake_claim)
 
-    profile = {"object_types": {"person": {"store_video_visits": False}}}
+    profile = {"object_types": {"person": {"store_video_alerts": False}}}
     alert_video_worker.run_once(profile)
 
     assert captured == {"object_types": None, "exclude_object_types": ["person"]}
 
 
 def test_alert_video_worker_run_once_skips_claim_entirely_when_nothing_enabled(monkeypatch):
-    monkeypatch.setattr(config, "STORE_VIDEO_VISITS", False)
+    monkeypatch.setattr(config, "STORE_VIDEO_ALERTS", False)
     monkeypatch.setattr(config, "VIDEO_PARALLEL_LIMIT", 5)
     monkeypatch.setattr(alert_video_worker.db, "reap_stale_visit_video_processing", lambda: None)
     monkeypatch.setattr(alert_video_worker.db, "count_visit_video_in_progress", lambda: 0)
@@ -183,4 +201,4 @@ def test_alert_video_worker_run_once_skips_claim_entirely_when_nothing_enabled(m
         raise AssertionError("claim_visit_video_batch should not be called when nothing opts in")
     monkeypatch.setattr(alert_video_worker.db, "claim_visit_video_batch", fail_if_called)
 
-    alert_video_worker.run_once(None)  # STORE_VIDEO_VISITS false, no profile -- nothing enabled
+    alert_video_worker.run_once(None)  # STORE_VIDEO_ALERTS false, no profile -- nothing enabled

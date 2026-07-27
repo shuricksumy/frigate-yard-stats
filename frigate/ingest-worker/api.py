@@ -377,7 +377,7 @@ def get_event_video(event_id: int):
 @app.get("/media/video/visit/{visit_id}", tags=["events"], dependencies=[Depends(require_api_key_header_or_query)])
 def get_visit_video(visit_id: int):
     """Visits-flow counterpart to GET /media/video/{event_id} -- a visit's own clip
-    (STORE_VIDEO_VISITS/alert_video_worker.py) lives under VIDEO_STORAGE_PATH_ALERTS, a completely
+    (STORE_VIDEO_ALERTS/alert_video_worker.py) lives under VIDEO_STORAGE_PATH_ALERTS, a completely
     separate storage location from any raw_event's video_path, so it needs its own endpoint rather
     than overloading the event one with two different id spaces."""
     row = db.get_visit(visit_id)
@@ -565,9 +565,9 @@ def admin_overview():
             "ai_events_stage_enabled": profile_config.flag_summary(
                 _profile, "ai_events_stage_enabled", config.AI_EVENTS_STAGE_ENABLED,
             ),
-            "store_video": profile_config.flag_summary(_profile, "store_video", config.STORE_VIDEO),
-            "store_video_visits": profile_config.flag_summary(
-                _profile, "store_video_visits", config.STORE_VIDEO_VISITS,
+            "store_video_events": profile_config.flag_summary(_profile, "store_video_events", config.STORE_VIDEO_EVENTS),
+            "store_video_alerts": profile_config.flag_summary(
+                _profile, "store_video_alerts", config.STORE_VIDEO_ALERTS,
             ),
             "store_event_images": profile_config.flag_summary(
                 _profile, "store_event_images", config.STORE_EVENT_IMAGES,

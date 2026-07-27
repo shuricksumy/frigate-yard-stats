@@ -24,16 +24,17 @@ Two families of settings:
     entirely once crop_event switched to using Frigate's own snapshot exclusively, which has no
     region-crop math left to configure; see crop.py's own comment and CLAUDE.md's "Cropping"
     section.)
-  - store_video/store_video_visits (renamed from store_video_alerts -- "alerts" was a holdover
-    name from the removed alert AI stage; this has always gated per-VISIT video storage) -- these
-    gate whether their whole poll thread starts at all (main.py) *and* which rows their claim
-    function is even allowed to look at
-    (claim_video_batch/claim_visit_video_batch), since unlike the AI
-    stage these apply to any Frigate label by default, not just ones with a profiles.yaml prompt
-    entry. Their *_claim_filter functions return an include-or-exclude label list (never a plain
+  - store_video_events/store_video_alerts (events vs. alerts flow -- store_video_alerts has always
+    gated per-VISIT video storage, not anything alert-AI-specific) -- these gate whether their
+    whole poll thread starts at all (main.py) *and* which rows their claim function is even
+    allowed to look at (claim_video_batch/claim_visit_video_batch), since unlike the AI stage
+    these apply to any Frigate label by default, not just ones with a profiles.yaml prompt entry.
+    Their *_claim_filter functions return an include-or-exclude label list (never a plain
     include-list checked against every "known" label) specifically so a label that isn't mentioned
     anywhere -- not even in the cosmetic-only OBJECT_TYPES env var -- still inherits the plain
-    global default instead of being silently dropped.
+    global default instead of being silently dropped. video_events_needed/video_alerts_needed and
+    their own *_claim_filter siblings go one step further -- a row/type is eligible even with
+    storage off, as long as that type's Telegram mode wants a video (send-without-store).
 """
 import config
 
@@ -117,19 +118,19 @@ def store_event_images(profile: dict | None, object_label: str | None) -> bool:
     return _resolve(profile, object_label, "store_event_images", config.STORE_EVENT_IMAGES)
 
 
-def store_video_enabled(profile: dict | None, object_label: str | None) -> bool:
+def store_video_events_enabled(profile: dict | None, object_label: str | None) -> bool:
     # Plain per-label resolution (type override -> defaults -> hardcoded fallback), for callers
     # that already know the one row/type they're deciding for (e.g. insert_raw_event, choosing a
-    # freshly-ingested row's *initial* video_status) -- as opposed to store_video_claim_filter
+    # freshly-ingested row's *initial* video_status) -- as opposed to store_video_events_claim_filter
     # below, which builds an include/exclude filter for a claim query spanning many rows/types at
     # once.
-    return _resolve(profile, object_label, "store_video", config.STORE_VIDEO)
+    return _resolve(profile, object_label, "store_video_events", config.STORE_VIDEO_EVENTS)
 
 
-def store_video_visits_enabled(profile: dict | None, object_label: str | None) -> bool:
-    # Renamed from store_video_alerts_enabled/store_video_alerts -- "alerts" was a holdover name
-    # from the removed alert AI stage; this has always gated per-VISIT video storage.
-    return _resolve(profile, object_label, "store_video_visits", config.STORE_VIDEO_VISITS)
+def store_video_alerts_enabled(profile: dict | None, object_label: str | None) -> bool:
+    # This has always gated per-VISIT video storage (frigate/reviews), independent of
+    # store_video_events_enabled above (per-raw_event clips, frigate/events).
+    return _resolve(profile, object_label, "store_video_alerts", config.STORE_VIDEO_ALERTS)
 
 
 def any_ai_events_stage_enabled(profile: dict | None) -> bool:
@@ -172,12 +173,12 @@ def _claim_filter(profile: dict | None, key: str, global_default: bool) -> tuple
     return (true_labels, None)
 
 
-def store_video_claim_filter(profile: dict | None) -> tuple[list[str] | None, list[str] | None]:
-    return _claim_filter(profile, "store_video", config.STORE_VIDEO)
+def store_video_events_claim_filter(profile: dict | None) -> tuple[list[str] | None, list[str] | None]:
+    return _claim_filter(profile, "store_video_events", config.STORE_VIDEO_EVENTS)
 
 
-def store_video_visits_claim_filter(profile: dict | None) -> tuple[list[str] | None, list[str] | None]:
-    return _claim_filter(profile, "store_video_visits", config.STORE_VIDEO_VISITS)
+def store_video_alerts_claim_filter(profile: dict | None) -> tuple[list[str] | None, list[str] | None]:
+    return _claim_filter(profile, "store_video_alerts", config.STORE_VIDEO_ALERTS)
 
 
 def _any_enabled(object_types: list[str] | None) -> bool:
@@ -187,11 +188,83 @@ def _any_enabled(object_types: list[str] | None) -> bool:
     return object_types is None or len(object_types) > 0
 
 
-def any_store_video_enabled(profile: dict | None) -> bool:
-    object_types, _ = store_video_claim_filter(profile)
+def any_store_video_events_enabled(profile: dict | None) -> bool:
+    object_types, _ = store_video_events_claim_filter(profile)
     return _any_enabled(object_types)
 
 
-def any_store_video_visits_enabled(profile: dict | None) -> bool:
-    object_types, _ = store_video_visits_claim_filter(profile)
+def any_store_video_alerts_enabled(profile: dict | None) -> bool:
+    object_types, _ = store_video_alerts_claim_filter(profile)
+    return _any_enabled(object_types)
+
+
+# ---- send-to-Telegram-without-storing -----------------------------------------------------
+#
+# A raw_event/visit can be claimed by the video stage purely to be sent to Telegram, with no
+# persistent storage at all, as long as that type's Telegram mode wants a video -- storage and
+# Telegram delivery are independent axes (see video_worker.py/alert_video_worker.py). The plain
+# store_video_events_enabled/store_video_alerts_enabled resolvers above answer "should THIS
+# claimed row also be persisted to disk"; the functions below answer the broader "is there any
+# reason to claim/process this row/type at all" (storage OR Telegram video), used for the initial
+# video_status at ingest time (db.insert_raw_event/record_visit), the claim query's own eligibility
+# filter, and whether the poll thread should start at all (main.py).
+
+def video_events_needed(profile: dict | None, object_label: str | None) -> bool:
+    return (
+        store_video_events_enabled(profile, object_label)
+        or telegram_events_mode(profile, object_label) in ("video", "all")
+    )
+
+
+def video_alerts_needed(profile: dict | None, object_label: str | None) -> bool:
+    return (
+        store_video_alerts_enabled(profile, object_label)
+        or telegram_alerts_mode(profile, object_label) in ("video", "all")
+    )
+
+
+def _union_claim_filter(
+    profile: dict | None, store_key: str, store_default: bool, mode_key: str, mode_default: str,
+) -> tuple[list[str] | None, list[str] | None]:
+    # Same (object_types, exclude_object_types) shape _claim_filter returns, but for a claim query
+    # that needs "store_key resolves true OR mode_key resolves to video/all" per type -- a union of
+    # two independently-resolved settings can't reuse _claim_filter directly (that only ever
+    # combines ONE key's own two-tier resolution), so each explicitly-configured label's own
+    # combined value is computed and compared against the combined global base instead.
+    store_base = _resolve(profile, None, store_key, store_default)
+    mode_base = _resolve(profile, None, mode_key, mode_default) in ("video", "all")
+    base = store_base or mode_base
+    true_labels, false_labels = [], []
+    for label in (profile or {}).get("object_types", {}):
+        store_val = _resolve(profile, label, store_key, store_default)
+        mode_val = _resolve(profile, label, mode_key, mode_default) in ("video", "all")
+        combined = store_val or mode_val
+        if combined != base:
+            (true_labels if combined else false_labels).append(label)
+    if base:
+        return (None, false_labels) if false_labels else (None, None)
+    return (true_labels, None)
+
+
+def video_events_claim_filter(profile: dict | None) -> tuple[list[str] | None, list[str] | None]:
+    return _union_claim_filter(
+        profile, "store_video_events", config.STORE_VIDEO_EVENTS,
+        "telegram_events_mode", config.TELEGRAM_EVENTS_MODE,
+    )
+
+
+def video_alerts_claim_filter(profile: dict | None) -> tuple[list[str] | None, list[str] | None]:
+    return _union_claim_filter(
+        profile, "store_video_alerts", config.STORE_VIDEO_ALERTS,
+        "telegram_alerts_mode", config.TELEGRAM_ALERTS_MODE,
+    )
+
+
+def any_video_events_worker_needed(profile: dict | None) -> bool:
+    object_types, _ = video_events_claim_filter(profile)
+    return _any_enabled(object_types)
+
+
+def any_video_alerts_worker_needed(profile: dict | None) -> bool:
+    object_types, _ = video_alerts_claim_filter(profile)
     return _any_enabled(object_types)

@@ -67,7 +67,7 @@ services:
       # Crop tuning, queue tuning, retention, video storage, Telegram, and the internal AI stage
       # are ALL configured in profiles.yaml now, not here -- see that file's own comments and
       # CLAUDE.md's "Per-object-type overrides" section. Two categories moved there:
-      # per-object-type settings (ai_image_max_dimension, store_video/store_video_visits/
+      # per-object-type settings (ai_image_max_dimension, store_video_events/store_video_alerts/
       # store_event_images, telegram_events_mode/telegram_alerts_mode/ai_events_stage_enabled,
       # provider/model/chat_path), each resolved fresh per row/type; and plain
       # technical tuning knobs with no per-type meaning at all (parallel_limit/stale_minutes/
@@ -118,10 +118,11 @@ services:
       # testing, for n8n to call, and for the browser-based report.
       - "${INGEST_WORKER_API_PORT:-8080}:${INGEST_WORKER_API_PORT:-8080}"
     volumes:
-      # Bind mount for stored clips -- only used when STORE_VIDEO=true, but always mounted so
-      # toggling the flag doesn't require a compose file change, just a restart.
+      # Bind mount for stored clips -- only used when store_video_events resolves true
+      # (profiles.yaml, not an env var), but always mounted so toggling it doesn't require a
+      # compose file change, just a restart.
       - ${VIDEO_STORAGE_EVENTS_PATH:-./video-storage-events}:/data/video
-      # Separate bind mount for the visits flow (STORE_VIDEO_VISITS) -- its own directory,
+      # Separate bind mount for the alerts flow (STORE_VIDEO_ALERTS) -- its own directory,
       # not a subfolder of the one above, so the two flows' storage is genuinely independent.
       - ${VIDEO_STORAGE_ALERTS_HOST_PATH:-./video-storage-alerts}:/data/video-alerts
       # Bind mount for the events stage's own full-resolution crop (STORE_EVENT_IMAGES) -- only
@@ -164,7 +165,7 @@ services:
   # mosquitto above. Worth turning on once TELEGRAM_EVENTS_MODE/TELEGRAM_ALERTS_MODE actually
   # sends real traffic: it drops the public-internet round trip (ingest-worker reaches it over
   # the Docker network instead of api.telegram.org) and raises Telegram's own upload cap from
-  # 50MB to 2000MB -- this project's STORE_VIDEO/STORE_VIDEO_VISITS clips, recorded at 4K, can
+  # 50MB to 2000MB -- this project's STORE_VIDEO_EVENTS/STORE_VIDEO_ALERTS clips, recorded at 4K, can
   # realistically exceed the cloud API's 50MB limit and silently fail to send. Requires your own
   # api_id/api_hash from https://my.telegram.org (Telegram account, not the bot token -- a
   # separate credential the Local Bot API server needs to talk to Telegram's MTProto backend

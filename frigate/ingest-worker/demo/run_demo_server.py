@@ -10,8 +10,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import config
 
 config.AI_EVENTS_STAGE_ENABLED = True
-config.STORE_VIDEO = True
-config.STORE_VIDEO_VISITS = True
+config.STORE_VIDEO_EVENTS = True
+config.STORE_VIDEO_ALERTS = True
 config.TELEGRAM_EVENTS_MODE = "all"
 config.TELEGRAM_ALERTS_MODE = "all"
 

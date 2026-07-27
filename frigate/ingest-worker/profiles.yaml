@@ -57,20 +57,22 @@
 #     frame from the record-stream clip, so there's no region-crop/offset setting left to
 #     configure per type. Per-type since a plate-heavy vehicle prompt may want more resolution
 #     than a person/dog prompt. Hardcoded fallback: 1280.
-#   store_video / store_video_visits / store_event_images -- true/false. Unlike the AI-stage flag
-#     above, these apply to *any* Frigate label by default (not just ones with a profiles.yaml
-#     prompt entry), so a type can get its own entry here purely to carry one of these keys, with
-#     no chat_path/prompt at all. store_event_images persists Frigate's own snapshot (the same
-#     bytes crop.crop_event already fetched) to disk under EVENT_IMAGES_STORAGE_PATH -- off by
-#     default. e.g. a `person` entry could set store_video: false to skip storing clips for people
-#     while cars still get them. store_video_visits was renamed from store_video_alerts ("alerts"
-#     was a holdover name from the removed alert AI stage). Hardcoded fallback: false (all three).
+#   store_video_events / store_video_alerts / store_event_images -- true/false. Unlike the
+#     AI-stage flag above, these apply to *any* Frigate label by default (not just ones with a
+#     profiles.yaml prompt entry), so a type can get its own entry here purely to carry one of
+#     these keys, with no chat_path/prompt at all. store_event_images persists Frigate's own
+#     snapshot (the same bytes crop.crop_event already fetched) to disk under
+#     EVENT_IMAGES_STORAGE_PATH -- off by default. e.g. a `person` entry could set
+#     store_video_events: false to skip storing clips for people while cars still get them.
+#     Hardcoded fallback: false (all three). Storage and Telegram delivery are independent axes --
+#     if telegram_events_mode/telegram_alerts_mode wants a video for a type with storage off, the
+#     clip is still downloaded and sent straight from memory, just never written to disk.
 #
 # defaults: (optional) -- common values applied to every object type that doesn't set its own for
 # that same key. Leave it out entirely (or omit individual keys) to fall straight through to the
 # hardcoded fallback, exactly as if this section didn't exist.
 # defaults:
-#   store_video: false
+#   store_video_events: false
 object_types:
   car: &vehicle_profile
     chat_path: /REPLACE_WITH_VEHICLE_SLOT/v1/chat/completions
@@ -83,8 +85,8 @@ object_types:
     # telegram_alerts_mode: all
     # ai_events_stage_enabled: true
     # ai_image_max_dimension: 1280
-    # store_video: true
-    # store_video_visits: true
+    # store_video_events: true
+    # store_video_alerts: true
     # store_event_images: true
     event_prompt: >-
       This image shows a single moment from one vehicle sighting. In one or two short sentences,

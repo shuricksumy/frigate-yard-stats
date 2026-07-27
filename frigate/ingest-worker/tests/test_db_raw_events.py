@@ -105,14 +105,14 @@ def test_insert_raw_event_ai_skipped_rows_excluded_from_claim_where_clause(conn_
 
 
 def test_insert_raw_event_resolves_store_video_from_profile_defaults(conn_ok, monkeypatch):
-    # Regression test: store_video has no env var backing at all (see config.py) -- a deployment
+    # Regression test: store_video_events has no env var backing at all (see config.py) -- a deployment
     # can only enable it via profiles.yaml. insert_raw_event must resolve it through
-    # profile_config, not a bare config.STORE_VIDEO read (which is always the hardcoded False and
+    # profile_config, not a bare config.STORE_VIDEO_EVENTS read (which is always the hardcoded False and
     # can never see this profile-only override) -- confirmed live in production: a deployment with
-    # store_video_visits: true in profiles.yaml's defaults: still got video_status='skipped' on
+    # store_video_alerts: true in profiles.yaml's defaults: still got video_status='skipped' on
     # every new visit until this was fixed.
-    monkeypatch.setattr(config, "STORE_VIDEO", False)
-    profile = {"defaults": {"store_video": True}}
+    monkeypatch.setattr(config, "STORE_VIDEO_EVENTS", False)
+    profile = {"defaults": {"store_video_events": True}}
     event = _event(has_snapshot=True)
     db.insert_raw_event(event, profile)
     try:
@@ -123,8 +123,8 @@ def test_insert_raw_event_resolves_store_video_from_profile_defaults(conn_ok, mo
 
 
 def test_insert_raw_event_resolves_store_video_per_type_override(conn_ok, monkeypatch):
-    monkeypatch.setattr(config, "STORE_VIDEO", True)
-    profile = {"object_types": {"car": {"store_video": False}}}
+    monkeypatch.setattr(config, "STORE_VIDEO_EVENTS", True)
+    profile = {"object_types": {"car": {"store_video_events": False}}}
     event = _event(has_snapshot=True)  # objects="car"
     db.insert_raw_event(event, profile)
     try:
@@ -135,7 +135,7 @@ def test_insert_raw_event_resolves_store_video_per_type_override(conn_ok, monkey
 
 
 def test_insert_raw_event_falls_back_to_hardcoded_default_with_no_profile(conn_ok, monkeypatch):
-    monkeypatch.setattr(config, "STORE_VIDEO", True)
+    monkeypatch.setattr(config, "STORE_VIDEO_EVENTS", True)
     event = _event(has_snapshot=True)
     db.insert_raw_event(event, None)
     try:

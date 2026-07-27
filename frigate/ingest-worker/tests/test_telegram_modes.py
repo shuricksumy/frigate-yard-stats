@@ -39,11 +39,11 @@ def test_send_photo_gated_by_events_mode(monkeypatch, fake_post, mode, expect_se
 
 
 @pytest.mark.parametrize("mode,expect_sent", [("none", False), ("image", False), ("video", True), ("all", True)])
-def test_send_video_gated_by_events_mode(monkeypatch, mode, expect_sent, tmp_path):
+def test_send_video_gated_by_events_mode(monkeypatch, mode, expect_sent):
     monkeypatch.setattr(config, "TELEGRAM_EVENTS_MODE", mode)
     calls = []
     monkeypatch.setattr(telegram, "_post_video", lambda *a, **k: calls.append((a, k)) or True)
-    result = telegram.send_video(str(tmp_path / "clip.mp4"), "caption", reply_to_message_id=None)
+    result = telegram.send_video(b"fake-clip-bytes", "clip.mp4", "caption", reply_to_message_id=None)
     assert result == expect_sent
     assert (len(calls) == 1) == expect_sent
 
@@ -57,11 +57,11 @@ def test_send_visit_summary_gated_by_alerts_mode(monkeypatch, fake_post, mode, e
 
 
 @pytest.mark.parametrize("mode,expect_sent", [("none", False), ("image", False), ("video", True), ("all", True)])
-def test_send_visit_video_gated_by_alerts_mode(monkeypatch, mode, expect_sent, tmp_path):
+def test_send_visit_video_gated_by_alerts_mode(monkeypatch, mode, expect_sent):
     monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", mode)
     calls = []
     monkeypatch.setattr(telegram, "_post_video", lambda *a, **k: calls.append((a, k)) or True)
-    result = telegram.send_visit_video(str(tmp_path / "clip.mp4"), "caption", reply_to_message_id=None)
+    result = telegram.send_visit_video(b"fake-clip-bytes", "visit.mp4", "caption", reply_to_message_id=None)
     assert result == expect_sent
     assert (len(calls) == 1) == expect_sent
 
@@ -82,11 +82,11 @@ def test_send_photo_mode_override_can_suppress_despite_global_config(monkeypatch
     assert len(fake_post) == 0
 
 
-def test_send_video_mode_none_falls_back_to_global_config(monkeypatch, tmp_path):
+def test_send_video_mode_none_falls_back_to_global_config(monkeypatch):
     monkeypatch.setattr(config, "TELEGRAM_EVENTS_MODE", "video")
     calls = []
     monkeypatch.setattr(telegram, "_post_video", lambda *a, **k: calls.append((a, k)) or True)
-    result = telegram.send_video(str(tmp_path / "clip.mp4"), "caption", reply_to_message_id=None, mode=None)
+    result = telegram.send_video(b"fake-clip-bytes", "clip.mp4", "caption", reply_to_message_id=None, mode=None)
     assert result is True
     assert len(calls) == 1
 
@@ -98,11 +98,11 @@ def test_send_visit_summary_mode_override_wins_over_global_config(monkeypatch, f
     assert len(fake_post) == 1
 
 
-def test_send_visit_video_mode_override_wins_over_global_config(monkeypatch, tmp_path):
+def test_send_visit_video_mode_override_wins_over_global_config(monkeypatch):
     monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "none")
     calls = []
     monkeypatch.setattr(telegram, "_post_video", lambda *a, **k: calls.append((a, k)) or True)
-    result = telegram.send_visit_video(str(tmp_path / "clip.mp4"), "caption", reply_to_message_id=None, mode="video")
+    result = telegram.send_visit_video(b"fake-clip-bytes", "visit.mp4", "caption", reply_to_message_id=None, mode="video")
     assert result is True
     assert len(calls) == 1
 
@@ -138,3 +138,35 @@ def test_send_photo_uses_configured_api_base_url(monkeypatch, fake_post):
     assert len(fake_post) == 1
     url = fake_post[0][0][0]
     assert url == "http://telegram-bot-api:8081/bottest-token/sendPhoto"
+
+
+# ---- _post_video sends straight from an in-memory buffer, no filesystem involved (needed for
+# send-without-store, where there's no stored video_path to read back from at all) ----
+
+def test_post_video_sends_raw_bytes_with_no_filesystem_access(monkeypatch, fake_post):
+    monkeypatch.setattr(config, "TELEGRAM_EVENTS_MODE", "video")
+    result = telegram.send_video(b"fake-clip-bytes", "event-42.mp4", "caption", reply_to_message_id=None)
+    assert result is True
+    assert len(fake_post) == 1
+    _, kwargs = fake_post[0]
+    filename, content, content_type = kwargs["files"]["video"]
+    assert filename == "event-42.mp4"
+    assert content == b"fake-clip-bytes"
+    assert content_type == "video/mp4"
+
+
+def test_post_video_threads_reply_to_message_id(monkeypatch, fake_post):
+    monkeypatch.setattr(config, "TELEGRAM_ALERTS_MODE", "video")
+    telegram.send_visit_video(b"fake-clip-bytes", "visit-7.mp4", "caption", reply_to_message_id=555)
+    assert fake_post[0][1]["data"]["reply_to_message_id"] == 555
+
+
+def test_post_video_returns_false_on_request_failure(monkeypatch):
+    monkeypatch.setattr(config, "TELEGRAM_EVENTS_MODE", "video")
+
+    def _raise(*a, **k):
+        raise ConnectionError("boom")
+
+    monkeypatch.setattr(telegram.requests, "post", _raise)
+    result = telegram.send_video(b"fake-clip-bytes", "event-1.mp4", "caption", reply_to_message_id=None)
+    assert result is False

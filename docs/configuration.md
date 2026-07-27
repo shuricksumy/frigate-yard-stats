@@ -15,9 +15,9 @@ once — bring it up in stages so if something looks wrong, you know which piece
 1. **Just the core pipeline first.** Fill in the required settings below, leave everything else at
    its default (off), start `ingest-worker`, and confirm real events show up cropped at
    `http://<host>:8080/ui` or via `/events` in Swagger.
-2. **Turn on video storage** (`store_video` in `profiles.yaml`) once step 1 looks right, if you
+2. **Turn on video storage** (`store_video_events` in `profiles.yaml`) once step 1 looks right, if you
    want stored clips alongside the crops.
-3. **Turn on the visits flow** (`store_video_visits` in `profiles.yaml`) once you're comfortable
+3. **Turn on the visits flow** (`store_video_alerts` in `profiles.yaml`) once you're comfortable
    with the events flow — this groups multiple detections into one real-world "visit" (its own
    stored video) and is a separate, independently-toggleable layer on top.
 4. **Turn on Telegram** whenever you want notifications — independent of everything else.
@@ -102,9 +102,9 @@ Two **independent** switches, both configured in `profiles.yaml` (not `.env` —
 overrides" below), each defaulting to `false` (off) unless set in `profiles.yaml`'s `defaults:`
 section or per type:
 
-- `store_video` — downloads and keeps the clip for every individual event, alongside its crop.
+- `store_video_events` — downloads and keeps the clip for every individual event, alongside its crop.
   Stored under `VIDEO_STORAGE_EVENTS_PATH` (default `./video-storage-events` on the host).
-- `store_video_visits` — same idea, but one clip per *visit* (a whole grouped real-world activity)
+- `store_video_alerts` — same idea, but one clip per *visit* (a whole grouped real-world activity)
   instead of per raw event. Stored completely separately, under `VIDEO_STORAGE_ALERTS_HOST_PATH`
   (default `./video-storage-alerts`), so you can measure/manage the two flows' disk usage
   independently.
@@ -116,10 +116,21 @@ the defaults account for Frigate needing a few seconds to finish writing a clip 
 downloadable, and skip a clip that's very likely already rolled off Frigate's recording buffer
 rather than retrying forever.
 
-`store_video`/`store_video_visits` can each be set globally via `defaults:`, or per object type —
+`store_video_events`/`store_video_alerts` can each be set globally via `defaults:`, or per object type —
 e.g. skip storing clips for `person` while `car` still gets them. Setting either `true` for at
 least one type is enough to start that stage's poll thread even if nothing else enables it (same
 precedent the AI stages below use).
+
+### Sending a video to Telegram without storing it
+
+Storage and Telegram delivery (`telegram_events_mode`/`telegram_alerts_mode` — see "Telegram
+notifications" below) are independent settings, not a ladder — you don't need
+`store_video_events`/`store_video_alerts` on just to get a video notification. If a type's
+Telegram mode is `video`/`all` but its storage flag is off, the clip is still downloaded and sent
+straight to Telegram from memory; it's simply never written to disk (`video_path` stays `NULL`,
+so there's nothing to play back from the web UI afterward — only whatever Telegram delivered).
+This starts the same poll thread and claims the same rows either way, so turning on a Telegram
+video mode for a type is enough by itself, even with storage off for every type.
 
 ### Video storage layout
 
@@ -144,14 +155,17 @@ attributed to a real camera name there; it'll show up bucketed under that year i
 ## Event-analysis image storage
 
 `store_event_images` (default `false`, in `profiles.yaml` — same per-object-type override
-mechanism as `store_video`/`store_video_visits` above, see "Per-object-type overrides" below)
+mechanism as `store_video_events`/`store_video_alerts` above, see "Per-object-type overrides" below)
 persists the events stage's own full-resolution crop (a downscaled copy of the same crop,
 `ai_image_max_dimension`-capped, is always kept in Postgres regardless — see "Crop tuning" above)
 to disk under `EVENT_IMAGES_STORAGE_HOST_PATH` (default `./event-images` on the host) — same "only
 the path lives in Postgres" shape video storage already uses. Off by default: the full-resolution
-copy is discarded after producing the AI-facing downscale unless you opt in. Unlike `store_video`/
-`store_video_visits`, turning this on doesn't start a separate poll thread — it's a synchronous
+copy is discarded after producing the AI-facing downscale unless you opt in. Unlike `store_video_events`/
+`store_video_alerts`, turning this on doesn't start a separate poll thread — it's a synchronous
 step inside the existing crop-stage thread, so there's no extra queue/capacity tuning to configure.
+Independent of this flag either way: the per-event Telegram photo notification already sends this
+same full-resolution snapshot (not the smaller Postgres-stored copy) regardless of whether
+`store_event_images` persists it to disk.
 
 Files land under `{EVENT_IMAGES_STORAGE_PATH}/{camera}/{YYYY}/{MM}/{DD}/{object_type}-{event_id}-
 {start_ts_epoch}-{start_ts_iso}.jpg` — the same camera-first layout video clips use, so the admin
@@ -173,11 +187,11 @@ Two more **independent** settings, each a *mode* (`none` / `image` / `video` / `
 overrides" below):
 
 - `telegram_events_mode` — per-event notifications. `image` sends a photo right after cropping;
-  `video` sends the clip once it's stored (`store_video`), standalone rather than threaded onto a
+  `video` sends the clip once it's stored (`store_video_events`), standalone rather than threaded onto a
   photo that was never sent; `all` sends both (the video as a reply to the earlier photo).
 - `telegram_alerts_mode` — per-*visit* notifications instead. `image` sends one summary message
   per visit immediately (the representative event's own crop as a photo, or text-only if that
-  crop isn't ready yet); `video` sends the visit's own clip (`store_video_visits`) as a reply to
+  crop isn't ready yet); `video` sends the visit's own clip (`store_video_alerts`) as a reply to
   that summary; `all` sends both.
 
 `image` and `video` are independent halves within each mode, not a ladder — setting `video` alone
@@ -252,7 +266,7 @@ currently being processed:
   `0` (no filtering); set per type/camera only for whichever one is actually flickering, since a
   genuinely short real event (a fast drive-by) is possible too.
 - `ai_image_max_dimension`
-- `store_video` / `store_video_visits` / `store_event_images`
+- `store_video_events` / `store_video_alerts` / `store_event_images`
 - `provider` / `model` / `chat_path` (VLM routing — see "Hosted VLM providers" below)
 
 Two tiers, checked in this order:
@@ -284,11 +298,11 @@ not a half-finished one.
 
 ```yaml
 defaults:
-  store_video: false        # off for everything...
+  store_video_events: false        # off for everything...
   parallel_limit: 4         # a plain technical knob, defaults: is the only place it can go
 object_types:
   car:
-    store_video: true        # ...except cars
+    store_video_events: true        # ...except cars
     ai_image_max_dimension: 1600
   person:
     telegram_events_mode: none
@@ -299,7 +313,7 @@ key's hardcoded fallback value); `profile_config.py` (per-object-type settings) 
 `config.apply_profile_defaults` (the technical tuning knobs) are the actual resolver code if you
 want the exact tie-break logic.
 
-**Upgrading from an older version**: these settings used to be plain `.env` vars (`STORE_VIDEO`,
+**Upgrading from an older version**: these settings used to be plain `.env` vars (`STORE_VIDEO_EVENTS`,
 `TELEGRAM_EVENTS_MODE`, `AI_EVENTS_STAGE_ENABLED`, `PARALLEL_LIMIT`, `RETENTION_MONTHS`,
 `AI_STAGE_MAX_ATTEMPTS`, etc.) — some grew a per-type-override capability in `profiles.yaml` on top
 first, all of them ended up here eventually. That env-var tier is gone now — if your `.env`

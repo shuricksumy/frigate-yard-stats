@@ -96,8 +96,9 @@ CREATE INDEX IF NOT EXISTS idx_visits_summary_status ON yard_stats.visits (summa
 -- ai_status owned by n8n via ingest-worker's /ai-queue/* API -- see CLAUDE.md's "Architecture"
 -- section for the full write-up of who owns which and why. All three share the same shape:
 -- new -> processing -> retry/failed -> done, plus 'skipped' for a state a row can start in but
--- never needs to leave (crop_status: has_snapshot=false at ingest time; video_status:
--- STORE_VIDEO=false; ai_status: also has_snapshot=false at ingest time -- a row that can never get
+-- never needs to leave (crop_status: has_snapshot=false at ingest time; video_status: neither
+-- storage nor Telegram wants a video for this type at ingest time; ai_status: also
+-- has_snapshot=false at ingest time -- a row that can never get
 -- a crop can never satisfy claim_ai_batch's crop_status='done' requirement either, so it would
 -- otherwise sit at ai_status='new' forever, indistinguishable from a row genuinely waiting on
 -- capacity).

@@ -234,8 +234,8 @@ function adminApp() {
       });
       return [
         boolFlag("AI events stage", f.ai_events_stage_enabled),
-        boolFlag("Store video", f.store_video),
-        boolFlag("Store video (visits)", f.store_video_visits),
+        boolFlag("Store video (events)", f.store_video_events),
+        boolFlag("Store video (alerts)", f.store_video_alerts),
         boolFlag("Store event images", f.store_event_images),
         modeFlag("Telegram (events)", f.telegram_events_mode),
         modeFlag("Telegram (alerts)", f.telegram_alerts_mode),

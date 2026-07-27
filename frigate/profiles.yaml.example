@@ -160,7 +160,7 @@
 #     specifically needs it) -- it can only ever shrink Frigate's snapshot, never upscale it or
 #     change its aspect ratio, since the snapshot's actual resolution is fixed by the camera's own
 #     detect-stream width/height in frigate.conf.
-#   store_video / store_video_visits / store_event_images -- true/false. Unlike the AI-stage flag
+#   store_video_events / store_video_alerts / store_event_images -- true/false. Unlike the AI-stage flag
 #     above, these apply to *any* Frigate label by default (not just ones with a profiles.yaml
 #     prompt entry), so a type can get its own entry here purely to carry one of these keys, with
 #     no chat_path/prompt at all. store_event_images persists Frigate's own snapshot (the same
@@ -168,12 +168,21 @@
 #     EVENT_IMAGES_STORAGE_PATH -- off by default (discarded after producing the AI-facing
 #     downscale), so the database/disk stay minimal unless you opt in; a plain per-row resolver
 #     (profile_config.store_event_images), not a poll-thread gate, since persisting is a
-#     synchronous side effect inside the existing crop stage. store_video (per-event clips) and
-#     store_video_visits (per-visit clips -- renamed from store_video_alerts, a holdover name from
-#     the removed alert AI stage) DO gate a poll thread each -- setting either true for at least
-#     one type (or in `defaults`) is enough to start it, see
-#     profile_config.any_store_video_enabled/any_store_video_visits_enabled. Hardcoded fallback:
-#     false (all three).
+#     synchronous side effect inside the existing crop stage. store_video_events (per-event clips,
+#     frigate/events) and store_video_alerts (per-visit clips, frigate/reviews) DO gate a poll
+#     thread each -- setting either true for at least one type (or in `defaults`) is enough to
+#     start it, see profile_config.any_store_video_events_enabled/any_store_video_alerts_enabled.
+#     Hardcoded fallback: false (all three).
+#
+#     Storage and Telegram delivery are independent axes, not "Telegram requires storage": if
+#     `telegram_events_mode`/`telegram_alerts_mode` wants a video ("video"/"all") for a type that
+#     has store_video_events/store_video_alerts off, the clip is still downloaded and sent
+#     straight from memory -- it's just never written to disk (video_status still ends up 'done',
+#     with video_path left NULL since there's nothing stored to point at). This starts the same
+#     poll thread and claims rows the same way even with storage fully off for every type, as long
+#     as at least one type's Telegram mode wants a video -- see
+#     profile_config.video_events_needed/video_alerts_needed and their own *_claim_filter/
+#     any_video_*_worker_needed siblings.
 #
 # `defaults:` ALSO holds a second, unrelated category: plain technical tuning knobs with no
 # per-object-type meaning at all -- queue parallel limits, retry counts, timeouts, poll intervals,
@@ -193,8 +202,8 @@
 #     before an automatic sweep deletes it, and how often that sweep runs.
 #   video_parallel_limit (1) / video_initial_wait_seconds (10) / video_min_valid_bytes (1000) /
 #     video_max_attempts (5) / video_retry_wait_seconds (5) / video_max_age_hours (null, no limit)
-#     -- video-download queue tuning, shared by both the events (store_video) and visits
-#     (store_video_visits) flows.
+#     -- video-download queue tuning, shared by both the events (store_video_events) and visits
+#     (store_video_alerts) flows.
 #   ai_stage_parallel_limit (2) / ai_stage_stale_minutes (5) / ai_stage_max_attempts (3) /
 #     ai_stage_max_age_hours (null, no limit) / ai_stage_poll_interval_seconds (5) -- internal
 #     AI-stage queue tuning.
@@ -218,8 +227,8 @@
 #   ai_events_stage_enabled: false
 #   min_event_duration_seconds: 0
 #   ai_image_max_dimension: 1280
-#   store_video: false
-#   store_video_visits: false
+#   store_video_events: false
+#   store_video_alerts: false
 #   store_event_images: false
 #   # Plain technical tuning knobs -- defaults: ONLY, never per-type (see the block above).
 #   parallel_limit: 2
@@ -260,8 +269,8 @@ object_types:
     # ai_events_stage_enabled: true
     # min_event_duration_seconds: 3   # e.g. if `car` is the type actually flickering
     # ai_image_max_dimension: 1280
-    # store_video: true
-    # store_video_visits: true
+    # store_video_events: true
+    # store_video_alerts: true
     # store_event_images: true
     event_prompt: >-
       This image shows a single moment from one vehicle sighting -- the vehicle being tracked is
