@@ -362,11 +362,11 @@ button:disabled { opacity: 0.4; cursor: default; }
 .lightbox-controls {
   position: absolute;
   top: 8px;
-  right: 5%;
+  right: 2%;
   z-index: 1;
   display: flex;
   align-items: center;
-  gap: 20px;
+  gap: 50px;
 }
 
 .lightbox-toggle {

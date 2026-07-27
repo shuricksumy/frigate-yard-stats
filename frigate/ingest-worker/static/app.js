@@ -185,6 +185,10 @@ function eventsApp() {
 
     autoRefreshTick() {
       if (document.hidden) return; // tab not visible -- nothing to update on screen right now
+      // The lightbox is shared across Events/Visits/Search -- refreshing out from under it would
+      // re-render the grid behind an open popup and (on the next page load) potentially shift or
+      // drop the very row being viewed. One check here covers all three tabs' popups.
+      if (this.lightboxEvent) return;
       // Only the first/most-recent page -- refetching a later page could silently shift which
       // rows are shown as newer items arrive ahead of it.
       if (this.offset !== 0) return;
