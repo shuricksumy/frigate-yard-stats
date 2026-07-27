@@ -150,6 +150,43 @@ called with one directly, e.g. by a test fixture) -- the skip-status machinery a
 and still matters for the rows already in the database from before this change, and for any other
 caller that constructs a `raw_events` insert directly.
 
+**A second, distinct ingest-time filter: `min_event_duration_seconds`.** Investigating a
+"too many events" report (a Frigate visit with 109 connected raw_events, most of them `car`)
+surfaced a different root cause from the noise above: Frigate's tracker has no true
+re-identification, so anything that briefly occludes a stationary object -- a person walking past
+a parked car, motion/glare flicker -- makes it lose and re-acquire the track, spawning a brand-new
+det_id the moment detection resumes, even though the physical object never moved. Confirmed
+directly against a real Frigate review dump (pasted from Frigate's own web UI): dozens of `car`
+entries each lasting only 1-10 seconds, several literally back-to-back (`detected`/`left` within
+the same second), versus a handful of genuinely long `person` tracks (multiple minutes, with real
+`stationary`/`active` cycling) in the same review. `min_event_duration_seconds` (per-object-type
+resolvable via `profile_config.min_event_duration_seconds`, same two-tier shape as every other
+per-type setting) filters a tracked-object lifecycle shorter than this threshold at the exact same
+point and for the exact same reason as the `has_snapshot=false` filter above -- `end_time -
+start_time`, both already present on the same MQTT `"end"` payload, so no extra Frigate API call is
+needed to compute it. Hardcoded fallback is `0` (no filtering) -- unlike the reverted
+`ai_only_visit_representative` attempt at this same problem (see below), this default does **not**
+change behavior for an upgrading deployment; it's opt-in per type/camera. Deliberately per-type,
+not global -- a real fast drive-by car could legitimately be brief too, so this is meant to be set
+only for whichever type/camera is actually flickering (confirmed live: 1-3 seconds was the
+observed flicker duration on the affected camera) rather than as a blanket threshold that risks
+dropping a real short event elsewhere.
+
+**Superseded design, reverted entirely**: an earlier attempt at this same problem
+(`ai_only_visit_representative`, `db.claim_ai_batch`'s `only_visit_representative` param wired into
+`ai_worker.py`) tried to solve it at the *AI-analysis* layer instead of ingest -- dedup to one
+representative raw_event per `(visit_id, objects)`, skipping the AI call for every other same-type
+event in a visit. This was reverted entirely (code, tests, docs, and the production config) once
+review found the mechanism too blunt: it collapsed **every** same-type event in a whole visit down
+to one analysis, not just genuine flicker duplicates. A Frigate visit can legitimately span several
+minutes and contain multiple truly distinct objects of the same type (e.g. car A arrives and
+leaves, car B arrives later) if there's no gap long enough to end the review in between -- the
+reverted mechanism would have silently skipped analyzing the second, genuinely different car,
+purely because it shared a visit and a label with the first. `min_event_duration_seconds` avoids
+this failure mode by judging each event on its own actual duration rather than its position within
+a visit's same-type list, and by filtering at ingest (before any DB row, crop, video, or
+notification cost is spent) rather than only at the AI-analysis step.
+
 `FOR UPDATE SKIP LOCKED` is what makes claiming
 race-safe against overlapping runs (multiple n8n executions, or this service's own poll loops) --
 but only when paired with a CTE, not a plain `WHERE id IN (SELECT ... LIMIT %s FOR UPDATE SKIP
@@ -838,57 +875,15 @@ Two families of overridable settings:
 
 - **Plain per-row settings**, resolved fresh for whatever row is currently being processed:
   `telegram_events_mode`, `telegram_alerts_mode`, `ai_events_stage_enabled`, `ai_image_max_dimension`,
-  and `store_event_images`. None of these have any claim-time/thread implications --
+  `store_event_images`, and `min_event_duration_seconds` (resolved in `mqtt_ingest.py` before a
+  row exists at all -- see "Cropping"/ingest-time-filtering above for the full mechanics). None of
+  these have any claim-time/thread implications --
   `crop_worker.py` already processes every object type regardless, so resolving per-row is enough.
   (`crop_disabled`/`crop_frame_offset_pct`/`crop_padding_pct` used to live in this same family too,
   accepted as optional overrides on `crop.py`'s `crop_event`/`crop_and_scale` -- removed entirely,
   along with `crop_and_scale`/`_build_vf_filter`/`compute_full_res_box`/
   `compute_frame_offset_seconds` themselves, once `crop_event` switched to using Frigate's own
   snapshot exclusively; see "Cropping" below.)
-- **`ai_only_visit_representative`** (`profile_config.ai_only_visit_representative`) -- whether
-  `ai_worker.py` dedupes this type's analysis to one representative raw_event per `(visit_id,
-  objects)` instead of analyzing every duplicate det_id a visit grouped (`db.claim_ai_batch`'s
-  `only_visit_representative` param -- the exact mechanism `POST /ai-queue/claim`'s `source=visits`
-  and `/reports/generate` already used, just not previously wired into `ai_worker.py`'s own claim
-  call). Built in response to a confirmed-live production pattern: Frigate's tracker has no real
-  re-identification, so any time something briefly occludes a stationary object -- a person walking
-  past a parked car, or motion/glare flicker on wet surfaces (the same tracker weakness this
-  project's `frigate.conf` comments already document, referencing
-  [frigate#9636](https://github.com/blakeblackshear/frigate/issues/9636)) -- the track breaks and
-  Frigate spawns a brand-new tracked-object ID the moment detection resumes, even though the
-  physical object never moved. Confirmed directly against production data: two separate bursts (546
-  car raw_events in one 2-hour window, 133 in another) each collapsed into only ~10-12 Frigate
-  visits, with average per-event durations of 3-6 seconds -- overwhelmingly the *same* stationary
-  car re-detected over and over, each instance previously getting its own full (and near-identical)
-  VLM call under the old always-`source=events` behavior. **Hardcoded fallback is `TRUE`** --
-  unlike every other setting in this section, this is a deliberate default *change* from this
-  project's prior behavior (analyze every raw_event, no exceptions): an upgrading deployment gets
-  deduped analysis with no config edit needed, and sets `ai_only_visit_representative: false`
-  (globally via `defaults:`, or per flood-prone type -- e.g. only `car` if that's the type actually
-  flooding while `person` should still be analyzed one-to-one) to restore the old behavior. A
-  raw_event Frigate's review never grouped into any visit at all (`visit_id IS NULL`) is always
-  still analyzed one-to-one regardless of this setting -- only same-visit duplicates are ever
-  skipped. **Per-type, not a single global bool**, unlike every other `claim_ai_batch` param this
-  stage passes -- `ai_worker.run_once` resolves this per mapped object type, splits them into a
-  "dedup" group and a "plain" group, and issues up to two separate `claim_ai_batch` calls (one per
-  group, `only_visit_representative=True`/`False` respectively) rather than one shared call with one
-  shared flag. This is still safe against `AI_STAGE_PARALLEL_LIMIT` despite being two calls:
-  `claim_ai_batch` re-queries in-progress count and marks its own claimed rows `'processing'`
-  immediately before returning, so the second call's own capacity check already reflects whatever
-  the first call just claimed -- the two calls can never together exceed the configured limit.
-  **Caveat, raised directly by the user while this was being designed**: a raw_event only gets its
-  `visit_id` once Frigate's review segment for it actually *closes* (`frigate/reviews`' own `"end"`
-  message -- see "Visit grouping" below) -- `mqtt_ingest.record_visit` links every matching raw_event
-  in one batch operation at that point, not incrementally as each det_id arrives. Until a review
-  closes, every raw_event it will eventually group is indistinguishable from a genuinely ungrouped
-  one (`visit_id IS NULL`), and is therefore still eligible under this setting's own "always analyze
-  ungrouped events" fallback clause. In a fast-moving burst, this means some of the earliest
-  duplicates can still be claimed and individually analyzed in the moments before the review closes
-  and links them -- this setting reliably stops *further* duplicates once a visit exists to compare
-  against, it does not retroactively undo analysis that already happened just before grouping caught
-  up. No additional grace-period/delay mechanism was added to close this gap (it would trade
-  analysis latency for a small amount of additional dedup accuracy) -- left as a possible future
-  enhancement if the residual duplicate rate through this gap turns out to matter in practice.
 - **`store_video` / `store_video_visits`** (the latter renamed from `store_video_alerts` -- "alerts"
   was a holdover name from the removed alert AI stage; this flag has always gated per-VISIT video
   storage) -- these gate a whole poll thread (`main.py`, via

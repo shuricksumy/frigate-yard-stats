@@ -94,6 +94,20 @@ MAX_CROP_DIMENSION = 1280
 # it). VLM calls still use crop_image_base64 at full size; only reporting uses this one.
 THUMBNAIL_MAX_DIMENSION = 240
 POLL_INTERVAL_SECONDS = 5.0
+# Per-object-type resolvable (profile_config.min_event_duration_seconds), NOT in
+# _PROFILE_DEFAULTS_MAP below -- same reasoning as MAX_CROP_DIMENSION above. A tracked-object
+# lifecycle this short (end_time - start_time, both already on the MQTT "end" payload -- no extra
+# Frigate API call needed) is filtered at ingest time in mqtt_ingest.py, the same place and same
+# reasoning as the has_snapshot=false filter just above it: confirmed live that Frigate's tracker
+# can repeatedly lose and re-acquire a stationary object (occlusion from foot traffic passing near
+# a parked car, or motion/glare flicker) as a brand-new tracked object every few seconds, each one
+# an independent 1-3 second "car" lifecycle for what's really the same physical, unmoving vehicle.
+# Filtering here means such a det_id is never written to Postgres at all -- no raw_events row, so
+# no crop/video/AI/Telegram/disk cost for it either, all for free by simply never inserting it (the
+# same "nothing here has any analytical value, don't bother recording it" reasoning already
+# established for has_snapshot=false). 0 (the fallback) means no filtering at all -- every event is
+# inserted regardless of duration, this project's original behavior.
+MIN_EVENT_DURATION_SECONDS = 0
 
 # How long to keep data before retention-cleanup deletes it (matches the default that used to
 # live only in n8n's retention-cleanup.json -- that workflow is now superseded by this service).
@@ -247,23 +261,6 @@ OBJECT_TYPES = [t.strip() for t in _env("OBJECT_TYPES", "car,truck,person,dog").
 # project's original default) for a deployment that never sets it in profiles.yaml at all.
 # -------------------------------------------------
 AI_EVENTS_STAGE_ENABLED = False
-# Per-object-type resolvable (profile_config.ai_only_visit_representative), same defaults-then-
-# hardcoded-fallback shape as AI_EVENTS_STAGE_ENABLED above -- whether ai_worker only analyzes one
-# representative raw_event per (visit_id, objects) instead of every duplicate det_id a visit
-# grouped (db.claim_ai_batch's only_visit_representative param, already used by POST
-# /ai-queue/claim's own source=visits and /reports/generate, just not previously wired into this
-# stage's own claim call). Confirmed live: a burst of repeated tracker re-detections of the same
-# stationary parked car (occlusion from foot traffic passing near it, or motion/glare flicker --
-# see CLAUDE.md's "Cropping"/frigate.conf's own tracker-flicker comments) can generate dozens of
-# raw_events collapsing into a single visit, each getting its own full (and identical) VLM call
-# under the old always-source=events behavior. Defaults to True (dedup ON) -- a deliberate default
-# CHANGE from this project's prior behavior (every raw_event analyzed individually, no exceptions)
-# -- an existing deployment upgrading across this change gets deduped analysis with no config edit
-# needed; set `ai_only_visit_representative: false` (globally in defaults:, or per flood-prone
-# object type) to restore the old per-event behavior. A raw_event Frigate's review never grouped
-# into any visit (visit_id IS NULL) is always still analyzed one-to-one regardless of this setting
-# -- only same-visit duplicates are affected.
-AI_ONLY_VISIT_REPRESENTATIVE = True
 # Same idea as SCHEMA_SQL_PATH -- baked into the image by default, bind-mount a different file and
 # point this at it to customize prompts/models without a rebuild.
 AI_STAGE_PROFILE_PATH = _env("AI_STAGE_PROFILE_PATH", "/app/profiles.yaml")

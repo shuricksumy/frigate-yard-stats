@@ -92,14 +92,13 @@ def ai_events_stage_enabled(profile: dict | None, object_label: str | None) -> b
     return _resolve(profile, object_label, "ai_events_stage_enabled", config.AI_EVENTS_STAGE_ENABLED)
 
 
-def ai_only_visit_representative(profile: dict | None, object_label: str | None) -> bool:
-    # Whether this type's AI analysis dedupes to one representative raw_event per (visit_id,
-    # objects) instead of analyzing every duplicate det_id a visit grouped -- see config.py's own
-    # comment on AI_ONLY_VISIT_REPRESENTATIVE for why this defaults to True and when a deployment
-    # would want it False for a specific flood-prone type (e.g. a camera/zone where a stationary
-    # car repeatedly loses/regains tracking).
+def min_event_duration_seconds(profile: dict | None, object_label: str | None) -> float:
+    # Ingest-time filter (mqtt_ingest._handle_event_message) -- a tracked-object lifecycle shorter
+    # than this is never inserted into raw_events at all. See config.py's own comment on
+    # MIN_EVENT_DURATION_SECONDS for why (repeated tracker re-detections of one stationary object,
+    # confirmed live). 0 (the hardcoded fallback) means no filtering.
     return _resolve(
-        profile, object_label, "ai_only_visit_representative", config.AI_ONLY_VISIT_REPRESENTATIVE
+        profile, object_label, "min_event_duration_seconds", config.MIN_EVENT_DURATION_SECONDS
     )
 
 

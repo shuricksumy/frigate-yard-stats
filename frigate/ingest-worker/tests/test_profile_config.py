@@ -66,37 +66,25 @@ def test_ai_events_stage_enabled_falls_back_to_global_when_no_override(monkeypat
     assert profile_config.ai_events_stage_enabled(PROFILE, "person") is False
 
 
-def test_ai_only_visit_representative_defaults_true_with_no_override(monkeypatch):
-    # Hardcoded fallback is True (a deliberate default change from this project's prior
-    # always-analyze-everything behavior) -- a type/profile that never mentions this key at all
-    # gets dedup on, not off.
-    monkeypatch.setattr(config, "AI_ONLY_VISIT_REPRESENTATIVE", True)
-    assert profile_config.ai_only_visit_representative(PROFILE, "person") is True
-    assert profile_config.ai_only_visit_representative(None, "anything") is True
-    assert profile_config.ai_only_visit_representative({}, "anything") is True
+def test_min_event_duration_seconds_falls_back_to_global_default(monkeypatch):
+    monkeypatch.setattr(config, "MIN_EVENT_DURATION_SECONDS", 0)
+    assert profile_config.min_event_duration_seconds(PROFILE, "person") == 0
+    assert profile_config.min_event_duration_seconds(None, "anything") == 0
+    assert profile_config.min_event_duration_seconds({}, "anything") == 0
 
 
-def test_ai_only_visit_representative_type_override_can_disable(monkeypatch):
-    monkeypatch.setattr(config, "AI_ONLY_VISIT_REPRESENTATIVE", True)
-    profile = {"object_types": {"car": {"ai_only_visit_representative": False}}}
-    assert profile_config.ai_only_visit_representative(profile, "car") is False
+def test_min_event_duration_seconds_type_override(monkeypatch):
+    monkeypatch.setattr(config, "MIN_EVENT_DURATION_SECONDS", 0)
+    profile = {"object_types": {"car": {"min_event_duration_seconds": 3}}}
+    assert profile_config.min_event_duration_seconds(profile, "car") == 3
+    assert profile_config.min_event_duration_seconds(profile, "person") == 0
 
 
-def test_ai_only_visit_representative_defaults_section_can_disable_globally(monkeypatch):
-    monkeypatch.setattr(config, "AI_ONLY_VISIT_REPRESENTATIVE", True)
-    profile = {"defaults": {"ai_only_visit_representative": False}}
-    assert profile_config.ai_only_visit_representative(profile, "car") is False
-    assert profile_config.ai_only_visit_representative(profile, "person") is False
-
-
-def test_ai_only_visit_representative_type_override_wins_over_defaults(monkeypatch):
-    monkeypatch.setattr(config, "AI_ONLY_VISIT_REPRESENTATIVE", True)
-    profile = {
-        "defaults": {"ai_only_visit_representative": False},
-        "object_types": {"car": {"ai_only_visit_representative": True}},
-    }
-    assert profile_config.ai_only_visit_representative(profile, "car") is True
-    assert profile_config.ai_only_visit_representative(profile, "person") is False
+def test_min_event_duration_seconds_defaults_section(monkeypatch):
+    monkeypatch.setattr(config, "MIN_EVENT_DURATION_SECONDS", 0)
+    profile = {"defaults": {"min_event_duration_seconds": 3}}
+    assert profile_config.min_event_duration_seconds(profile, "car") == 3
+    assert profile_config.min_event_duration_seconds(profile, "person") == 3
 
 
 def test_any_ai_events_stage_enabled_true_when_global_on(monkeypatch):

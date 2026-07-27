@@ -307,30 +307,10 @@ def run_once(profile: dict) -> None:
         label for label in profile.get("object_types", {})
         if profile_config.ai_events_stage_enabled(profile, label)
     ]
-    # claim_ai_batch's only_visit_representative is one bool for the whole call, but this setting
-    # is per-object-type resolvable (a flood-prone type like car might want dedup on while person
-    # stays off, or vice versa) -- so types are split into two groups and claimed in two separate
-    # calls rather than one shared call with one shared flag. This is safe against
-    # AI_STAGE_PARALLEL_LIMIT despite being two calls: claim_ai_batch re-queries in-progress count
-    # (and marks its own claimed rows 'processing' immediately) before returning, so by the time
-    # the second call runs its own capacity check already reflects whatever the first call just
-    # claimed -- the two calls can't together exceed the configured limit.
-    dedup_types = [
-        label for label in object_types
-        if profile_config.ai_only_visit_representative(profile, label)
-    ]
-    plain_types = [label for label in object_types if label not in dedup_types]
-    events = []
-    if dedup_types:
-        events += db.claim_ai_batch(
-            dedup_types, config.AI_STAGE_PARALLEL_LIMIT, config.AI_STAGE_STALE_MINUTES,
-            max_age_hours=config.AI_STAGE_MAX_AGE_HOURS, only_visit_representative=True,
-        )
-    if plain_types:
-        events += db.claim_ai_batch(
-            plain_types, config.AI_STAGE_PARALLEL_LIMIT, config.AI_STAGE_STALE_MINUTES,
-            max_age_hours=config.AI_STAGE_MAX_AGE_HOURS,
-        )
+    events = db.claim_ai_batch(
+        object_types, config.AI_STAGE_PARALLEL_LIMIT, config.AI_STAGE_STALE_MINUTES,
+        max_age_hours=config.AI_STAGE_MAX_AGE_HOURS,
+    )
     for row in events:
         process_claimed_event(row, profile)
 

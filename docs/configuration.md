@@ -243,6 +243,14 @@ currently being processed:
 
 - `telegram_events_mode` / `telegram_alerts_mode`
 - `ai_events_stage_enabled`
+- `min_event_duration_seconds` — a tracked-object lifecycle shorter than this is filtered at
+  ingest time (`mqtt_ingest.py`), never written to `raw_events` at all — no crop/video/AI/
+  Telegram/disk cost either, since there's no row for any later stage to claim. Built after
+  confirming Frigate's tracker can repeatedly lose/re-acquire a stationary object (foot traffic
+  occluding a parked car, motion/glare flicker) as a brand-new det_id every few seconds — each an
+  independent 1-3 second lifecycle for what's really the same physical, unmoving object. Default
+  `0` (no filtering); set per type/camera only for whichever one is actually flickering, since a
+  genuinely short real event (a fast drive-by) is possible too.
 - `ai_image_max_dimension`
 - `store_video` / `store_video_visits` / `store_event_images`
 - `provider` / `model` / `chat_path` (VLM routing — see "Hosted VLM providers" below)
@@ -349,18 +357,6 @@ by this one stage, cover the same ground; see the web UI's Visit lightbox in
   `event_prompt`. If you ever build your own n8n workflow against the same `/ai-queue/claim`
   endpoint, don't run it alongside this at once against the same queue (safe either way — `FOR
   UPDATE SKIP LOCKED` prevents a double-claim — just wasteful/confusing).
-- **`ai_only_visit_representative`** (default `true`) — analyzes only one representative event per
-  distinct object type within a Frigate visit, instead of every duplicate det_id the visit grouped.
-  Guards against a real, confirmed pattern: Frigate's tracker has no true re-identification, so
-  anything that briefly occludes a stationary object (a person walking past a parked car, motion/
-  glare flicker) can make it repeatedly re-detect the *same* physical object as a brand-new tracked
-  one — dozens of near-identical raw_events, each previously getting its own full VLM call. Set
-  `false` (globally in `defaults:`, or for just the one type that's actually flooding, e.g. `car`)
-  to go back to analyzing every single event. A raw_event Frigate's review never grouped into any
-  visit at all is always still analyzed one-to-one either way. Caveat: a raw_event only gets linked
-  to its visit once that visit's review segment closes — a duplicate created moments before the
-  review closes can still slip through and get analyzed individually before grouping catches up; see
-  CLAUDE.md's "Per-object-type overrides" section for the full mechanics.
 
 Can be set globally via `profiles.yaml`'s `defaults:` section, or per object type — e.g. to run the
 stage for `car`/`person` only while `dog` sits out. Setting it `true` for at least one type is

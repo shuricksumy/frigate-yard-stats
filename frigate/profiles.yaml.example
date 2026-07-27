@@ -134,28 +134,20 @@
 #     least one type (or in `defaults`) is enough to start the stage's poll thread -- see
 #     profile_config.any_ai_events_stage_enabled, used by main.py's thread-startup check.
 #     Hardcoded fallback: false.
-#   ai_only_visit_representative -- true/false, whether this type's AI analysis dedupes to one
-#     representative raw_event per (visit_id, objects) instead of analyzing every duplicate det_id
-#     a visit grouped (db.claim_ai_batch's only_visit_representative, the same mechanism
-#     POST /ai-queue/claim's source=visits and /reports/generate already use elsewhere). A
-#     stationary object can be repeatedly lost/reacquired by Frigate's tracker -- occlusion from
-#     foot traffic passing near a parked car, or motion/glare flicker (see CLAUDE.md's "Cropping"
-#     section and frigate.conf's own tracker-flicker comments) -- generating dozens of raw_events
-#     for what's really one physical object, each an identical VLM call under the old always-
-#     analyze-everything behavior. Hardcoded fallback: TRUE (dedup on) -- unlike every other
-#     hardcoded fallback in this file, this is a deliberate default CHANGE from this project's
-#     prior behavior; set this false (globally in `defaults:`, or per flood-prone type, e.g. only
-#     `car` if that's the type actually flooding) to restore analyzing every single raw_event.
-#     A raw_event Frigate's review never grouped into any visit at all (visit_id IS NULL) is
-#     always still analyzed one-to-one regardless of this setting -- only same-visit duplicates
-#     are affected. Caveat: a raw_event only gets its visit_id at all once Frigate's review segment
-#     for it actually closes (frigate/reviews' own "end" message, see CLAUDE.md's "Visit grouping"
-#     section) -- until then it's indistinguishable from a genuinely ungrouped event and can still
-#     be claimed individually under the "visit_id IS NULL" fallback. In a fast-moving burst, some
-#     of the earliest duplicates in an about-to-be-grouped visit may still get analyzed individually
-#     before the review closes and links them -- this setting reliably stops *new* duplicates once
-#     a visit exists, it doesn't retroactively undo analysis that already happened moments before
-#     grouping caught up.
+#   min_event_duration_seconds -- a tracked-object lifecycle shorter than this (end_time -
+#     start_time, both already on the MQTT "end" payload -- no extra Frigate API call needed) is
+#     filtered at ingest time (mqtt_ingest.py), the same place and same reasoning as the
+#     has_snapshot=false filter -- never written to raw_events at all, so no crop/video/AI/
+#     Telegram/disk cost either, all for free by simply never inserting the row. Built after
+#     confirming live that Frigate's tracker can repeatedly lose/re-acquire a stationary object
+#     (foot traffic occluding a parked car, motion/glare flicker -- see CLAUDE.md's "Cropping"
+#     section and frigate.conf's own tracker-flicker comments) as a brand-new det_id every few
+#     seconds -- each one an independent 1-3 second lifecycle for what's really the same physical,
+#     unmoving object. Hardcoded fallback: 0 (no filtering at all -- every event inserted
+#     regardless of duration, this project's original behavior). Per-type since a real fast
+#     drive-by car might legitimately be short too -- set this only for whichever type/camera is
+#     actually flooding rather than globally, if a shorter real event elsewhere would otherwise get
+#     caught by the same threshold.
 #   ai_image_max_dimension -- the long side (px) of the downscaled copy actually sent to the VLM
 #     and stored in Postgres (raw_events.crop_image_base64) -- a downscale of Frigate's own
 #     best-detection-score snapshot (crop.fetch_frigate_snapshot_base64; see CLAUDE.md's
@@ -224,7 +216,7 @@
 #   telegram_events_mode: none
 #   telegram_alerts_mode: none
 #   ai_events_stage_enabled: false
-#   ai_only_visit_representative: true
+#   min_event_duration_seconds: 0
 #   ai_image_max_dimension: 1280
 #   store_video: false
 #   store_video_visits: false
@@ -266,7 +258,7 @@ object_types:
     # telegram_events_mode: image
     # telegram_alerts_mode: all
     # ai_events_stage_enabled: true
-    # ai_only_visit_representative: false   # e.g. if `car` is the type actually flooding
+    # min_event_duration_seconds: 3   # e.g. if `car` is the type actually flickering
     # ai_image_max_dimension: 1280
     # store_video: true
     # store_video_visits: true

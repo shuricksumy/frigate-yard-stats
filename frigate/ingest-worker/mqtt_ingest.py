@@ -173,6 +173,28 @@ def _handle_event_message(msg):
         )
         return
 
+    # A tracked-object lifecycle shorter than this is filtered here, the same way and for the same
+    # reason as has_snapshot=false just above -- confirmed live that Frigate's tracker can
+    # repeatedly lose/re-acquire a stationary object (occlusion from foot traffic passing near a
+    # parked car, motion/glare flicker) as a brand-new det_id every few seconds, each one an
+    # independent 1-3 second lifecycle for what's really the same physical, unmoving object.
+    # start_time/end_time are already on this same "end" MQTT payload -- no extra Frigate API call
+    # needed to compute this. Both must be present to apply the filter at all -- an "end" message
+    # missing either field is treated as unfiltered rather than risking a false skip from bad data.
+    min_duration = profile_config.min_event_duration_seconds(_profile, event["objects"])
+    if (
+        min_duration > 0
+        and event["start_time"] is not None
+        and event["end_time"] is not None
+        and (event["end_time"] - event["start_time"]) < min_duration
+    ):
+        logger.debug(
+            "Skipping short-lived raw_event (%.1fs < %.1fs) camera=%s objects=%s det_id=%s",
+            event["end_time"] - event["start_time"], min_duration,
+            event["camera"], event["objects"], event["det_id"],
+        )
+        return
+
     try:
         db.insert_raw_event(event, _profile)
         logger.info(
