@@ -107,7 +107,11 @@ applies to a visit as a whole.
 On the Visits tab specifically, below that a "Connected events" strip shows every individual
 det_id Frigate's own tracker grouped into that visit (not just the deduped sighting(s) above) —
 small thumbnails in chronological order, each clickable to jump straight into that specific
-event's own lightbox.
+event's own lightbox. The strip stays visible and clickable even after you've drilled into one of
+those events, so you can jump directly between siblings without bouncing back through the visit
+each time — whichever one is currently open gets a highlighted border. A "← Back to alert" link
+returns you to the visit's own representative view (its stored video, visit summary, and every
+linked sighting) whenever you want it.
 
 A download button next to the close button grabs whichever of video/image is currently on screen.
 
