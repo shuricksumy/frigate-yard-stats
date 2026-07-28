@@ -623,6 +623,40 @@ the single global Postgres connection (`db.get_conn()`) every thread already use
 only touches it briefly, for the claim and the final insert, never while waiting on the VLM/
 embedding response.
 
+#### Bug found and fixed in production: the shared connection had no locking around its own multi-statement transactions
+
+"Only touches it briefly" (above) turned out not to be short enough. `record_visit`,
+`complete_sighting`, and `complete_visit_summary` each temporarily flip the single shared
+`db.get_conn()` connection's `autocommit` off to wrap two-or-three statements in one transaction,
+then flip it back on -- but nothing serialized this against another thread doing the identical
+thing to the *same* connection at the same time. Confirmed live in production, right after
+`visit_summary_worker` (a third concurrent writer alongside `mqtt_ingest`'s `record_visit` and
+`ai_worker`'s `complete_sighting`) started running: `ai_worker` repeatedly failed with
+`psycopg2.ProgrammingError: set_session cannot be used inside a transaction`, and `mqtt_ingest`
+failed the same way inside `record_visit` moments later. Root cause: thread A sets
+`conn.autocommit = False` and runs its first statement (leaving the connection genuinely
+mid-transaction, not yet committed); thread B, running a *different* one of these three functions
+concurrently, tries to set `conn.autocommit = False` on that same connection -- psycopg2 requires
+the connection to be idle before changing this, and raises instead. This wasn't just a noisy
+error, either: had a plain single-statement `_execute()` call from some other thread landed in that
+same window instead of another autocommit-flip, it would have silently become part of thread A's
+own uncommitted transaction (same connection, same transaction state) -- committed or rolled back
+together with unrelated work, not independently. This bug predates today's `STORE_VIDEO_EVENTS`
+rename entirely (none of these three functions' transaction logic was touched by it) and had
+likely always been theoretically possible; it only started actually colliding once
+`visit_summary_worker` added a third concurrent caller of this shape.
+
+Fixed with a module-level `threading.Lock` (`db._conn_lock`) that now wraps every point of contact
+with the shared connection: `get_conn()`'s own lazy-connect, `_execute()`'s single-statement path,
+and the full body of `record_visit`/`complete_sighting`/`complete_visit_summary` (from the
+`autocommit = False` flip through `commit()`/`rollback()` and the `autocommit = True` restore).
+This fully serializes all access to the one shared connection -- no two of these operations, from
+any thread, can ever run concurrently again, closing both the loud error and the silent
+cross-transaction-corruption risk it implied. Verified with a dedicated regression test
+(`tests/test_db_connection_lock.py`, no real Postgres needed -- a fake connection object with a
+deliberately unprotected check-sleep-set-sleep-clear pattern reliably catches a real overlap)
+confirmed to fail against the pre-fix code and pass against the fix.
+
 ### Alert AI stage (removed) -- history of a feature that was built, fixed twice, then dropped
 
 This project used to have a second internal AI stage, `alert_ai_worker.py` (`AI_ALERTS_ENABLED`),

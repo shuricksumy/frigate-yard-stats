@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import threading
 from datetime import datetime
 
 import psycopg2
@@ -12,6 +13,16 @@ import profile_config
 logger = logging.getLogger(__name__)
 
 _conn = None
+# Every worker thread (mqtt_ingest, crop/video/ai/visit_summary workers, API request threads)
+# shares this one global connection -- there's no pool. A plain single-statement _execute() is
+# safe to interleave (autocommit=True auto-commits and returns to idle immediately), but
+# record_visit/complete_sighting/complete_visit_summary each temporarily flip autocommit off to
+# wrap two statements in one transaction; without serializing access, a second thread's own
+# autocommit flip (or even a plain _execute) can land while the connection is still mid-transaction
+# from a different thread, which either raises "set_session cannot be used inside a transaction" or,
+# worse, silently folds an unrelated query into the wrong transaction. This lock makes every use of
+# the shared connection mutually exclusive.
+_conn_lock = threading.Lock()
 
 
 def _vector_literal(embedding: list[float] | None) -> str | None:
@@ -31,24 +42,26 @@ def _vector_literal(embedding: list[float] | None) -> str | None:
 
 def get_conn():
     global _conn
-    if _conn is None or _conn.closed:
-        _conn = psycopg2.connect(
-            host=config.POSTGRES_HOST,
-            port=config.POSTGRES_PORT,
-            dbname=config.POSTGRES_DB,
-            user=config.POSTGRES_USER,
-            password=config.POSTGRES_PASSWORD,
-        )
-        _conn.autocommit = True
+    with _conn_lock:
+        if _conn is None or _conn.closed:
+            _conn = psycopg2.connect(
+                host=config.POSTGRES_HOST,
+                port=config.POSTGRES_PORT,
+                dbname=config.POSTGRES_DB,
+                user=config.POSTGRES_USER,
+                password=config.POSTGRES_PASSWORD,
+            )
+            _conn.autocommit = True
     return _conn
 
 
 def _execute(query, params=None, fetch=False):
     conn = get_conn()
-    with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-        cur.execute(query, params)
-        if fetch:
-            return cur.fetchall()
+    with _conn_lock:
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute(query, params)
+            if fetch:
+                return cur.fetchall()
     return []
 
 
@@ -592,36 +605,37 @@ def record_visit(review: dict, profile: dict | None = None) -> int | None:
     # queue's WHERE clause never even considers these rows while neither is wanted.
     initial_video_status = "new" if profile_config.video_alerts_needed(profile, representative_label) else "skipped"
     conn = get_conn()
-    conn.autocommit = False
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                INSERT INTO yard_stats.visits
-                    (zone, objects, start_ts, end_ts, cameras, camera_count, video_status, thumb_time)
-                VALUES (%s, %s, to_timestamp(%s), to_timestamp(%s), %s, 1, %s, %s)
-                RETURNING id
-                """,
-                (review["zone"], review["objects"], review["start_time"], review["end_time"],
-                 review["camera"], initial_video_status, review.get("thumb_time")),
-            )
-            visit_id = cur.fetchone()["id"]
-            if review["det_ids"]:
+    with _conn_lock:
+        conn.autocommit = False
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
                     """
-                    UPDATE yard_stats.raw_events
-                    SET visit_id = %s, reconciled = true
-                    WHERE det_id = ANY(%s)
+                    INSERT INTO yard_stats.visits
+                        (zone, objects, start_ts, end_ts, cameras, camera_count, video_status, thumb_time)
+                    VALUES (%s, %s, to_timestamp(%s), to_timestamp(%s), %s, 1, %s, %s)
+                    RETURNING id
                     """,
-                    (visit_id, review["det_ids"]),
+                    (review["zone"], review["objects"], review["start_time"], review["end_time"],
+                     review["camera"], initial_video_status, review.get("thumb_time")),
                 )
-        conn.commit()
-        return visit_id
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.autocommit = True
+                visit_id = cur.fetchone()["id"]
+                if review["det_ids"]:
+                    cur.execute(
+                        """
+                        UPDATE yard_stats.raw_events
+                        SET visit_id = %s, reconciled = true
+                        WHERE det_id = ANY(%s)
+                        """,
+                        (visit_id, review["det_ids"]),
+                    )
+            conn.commit()
+            return visit_id
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.autocommit = True
 
 
 def get_representative_event_for_visit(visit_id: int) -> dict | None:
@@ -867,29 +881,30 @@ def complete_visit_summary(visit_id: int, summary: str | None, embedding: list[f
     # Same insert-plus-mark-done-in-one-transaction shape as complete_sighting, just against
     # visit_summaries/visits.summary_status instead of sightings/raw_events.ai_status.
     conn = get_conn()
-    conn.autocommit = False
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                INSERT INTO yard_stats.visit_summaries (visit_id, summary, embedding)
-                VALUES (%s, %s, %s::vector)
-                RETURNING id
-                """,
-                (visit_id, summary, _vector_literal(embedding)),
-            )
-            summary_id = cur.fetchone()["id"]
-            cur.execute(
-                "UPDATE yard_stats.visits SET summary_status = 'done', summary_status_changed_at = now() WHERE id = %s",
-                (visit_id,),
-            )
-        conn.commit()
-        return summary_id
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.autocommit = True
+    with _conn_lock:
+        conn.autocommit = False
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO yard_stats.visit_summaries (visit_id, summary, embedding)
+                    VALUES (%s, %s, %s::vector)
+                    RETURNING id
+                    """,
+                    (visit_id, summary, _vector_literal(embedding)),
+                )
+                summary_id = cur.fetchone()["id"]
+                cur.execute(
+                    "UPDATE yard_stats.visits SET summary_status = 'done', summary_status_changed_at = now() WHERE id = %s",
+                    (visit_id,),
+                )
+            conn.commit()
+            return summary_id
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.autocommit = True
 
 
 def get_visit_summary(visit_id: int) -> dict | None:
@@ -2033,48 +2048,49 @@ def complete_sighting(
     # object_label is just data on the row (whatever raw_events.objects said), not a branch;
     # there's no vehicle-vs-person split anywhere in this function or the table it writes to.
     conn = get_conn()
-    conn.autocommit = False
-    try:
-        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
-            cur.execute(
-                """
-                INSERT INTO yard_stats.sightings (raw_event_id, object_label, description, embedding)
-                VALUES (%s, %s, %s, %s::vector)
-                RETURNING id
-                """,
-                (raw_event_id, object_label, description, _vector_literal(embedding)),
-            )
-            sighting_id = cur.fetchone()["id"]
-            cur.execute(
-                "UPDATE yard_stats.raw_events SET ai_status = 'done', ai_status_changed_at = now() WHERE id = %s",
-                (raw_event_id,),
-            )
-            # If this event belongs to a visit whose summary already ran (or was skipped/failed)
-            # using an incomplete set of sightings -- e.g. this event previously failed, then got
-            # requeued (see /admin/queue/requeue-failed) and only now succeeded -- reset that
-            # visit's summary_status back to 'new' so visit_summary_worker recomputes it from the
-            # now-fuller set of sightings, overriding the stale result. complete_visit_summary's
-            # plain INSERT (not upsert) means the previous summary row still exists as history --
-            # get_visit_summary's ORDER BY id DESC LIMIT 1 always surfaces the newest one. Only
-            # resets a visit whose summary is itself in a terminal state (done/failed/skipped) --
-            # never interrupts one that's still new/retry/processing, which is already going to
-            # (re)compute against whatever's linked once it's next claimed.
-            cur.execute(
-                """
-                UPDATE yard_stats.visits
-                SET summary_status = 'new', summary_status_changed_at = now(), summary_attempt_count = 0
-                WHERE id = (SELECT visit_id FROM yard_stats.raw_events WHERE id = %s)
-                  AND summary_status IN ('done', 'failed', 'skipped')
-                """,
-                (raw_event_id,),
-            )
-        conn.commit()
-        return sighting_id
-    except Exception:
-        conn.rollback()
-        raise
-    finally:
-        conn.autocommit = True
+    with _conn_lock:
+        conn.autocommit = False
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                cur.execute(
+                    """
+                    INSERT INTO yard_stats.sightings (raw_event_id, object_label, description, embedding)
+                    VALUES (%s, %s, %s, %s::vector)
+                    RETURNING id
+                    """,
+                    (raw_event_id, object_label, description, _vector_literal(embedding)),
+                )
+                sighting_id = cur.fetchone()["id"]
+                cur.execute(
+                    "UPDATE yard_stats.raw_events SET ai_status = 'done', ai_status_changed_at = now() WHERE id = %s",
+                    (raw_event_id,),
+                )
+                # If this event belongs to a visit whose summary already ran (or was skipped/failed)
+                # using an incomplete set of sightings -- e.g. this event previously failed, then got
+                # requeued (see /admin/queue/requeue-failed) and only now succeeded -- reset that
+                # visit's summary_status back to 'new' so visit_summary_worker recomputes it from the
+                # now-fuller set of sightings, overriding the stale result. complete_visit_summary's
+                # plain INSERT (not upsert) means the previous summary row still exists as history --
+                # get_visit_summary's ORDER BY id DESC LIMIT 1 always surfaces the newest one. Only
+                # resets a visit whose summary is itself in a terminal state (done/failed/skipped) --
+                # never interrupts one that's still new/retry/processing, which is already going to
+                # (re)compute against whatever's linked once it's next claimed.
+                cur.execute(
+                    """
+                    UPDATE yard_stats.visits
+                    SET summary_status = 'new', summary_status_changed_at = now(), summary_attempt_count = 0
+                    WHERE id = (SELECT visit_id FROM yard_stats.raw_events WHERE id = %s)
+                      AND summary_status IN ('done', 'failed', 'skipped')
+                    """,
+                    (raw_event_id,),
+                )
+            conn.commit()
+            return sighting_id
+        except Exception:
+            conn.rollback()
+            raise
+        finally:
+            conn.autocommit = True
 
 
 def semantic_search_sightings(
