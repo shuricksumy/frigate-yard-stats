@@ -774,5 +774,33 @@ function eventsApp() {
         return iso;
       }
     },
+
+    // How long the tracked-object lifecycle (event) or the whole grouped review segment (visit)
+    // actually lasted -- end_ts - start_ts, both already on EventSummary/VisitSummary. Omits
+    // hours/minutes that are zero (e.g. "3s", "3m21s", "1h5m30s") rather than always padding to a
+    // fixed width.
+    formatDuration(startIso, endIso) {
+      try {
+        const ms = new Date(endIso) - new Date(startIso);
+        if (!Number.isFinite(ms) || ms < 0) return "";
+        const totalSeconds = Math.round(ms / 1000);
+        const h = Math.floor(totalSeconds / 3600);
+        const m = Math.floor((totalSeconds % 3600) / 60);
+        const s = totalSeconds % 60;
+        let out = "";
+        if (h > 0) out += h + "h";
+        if (h > 0 || m > 0) out += m + "m";
+        out += s + "s";
+        return out;
+      } catch {
+        return "";
+      }
+    },
+
+    formatTsWithDuration(startIso, endIso) {
+      const ts = this.formatTs(startIso);
+      const duration = this.formatDuration(startIso, endIso);
+      return duration ? `${ts} (${duration})` : ts;
+    },
   };
 }

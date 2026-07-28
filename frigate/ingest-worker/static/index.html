@@ -154,7 +154,7 @@
             </div>
             <div class="meta">
               <div><strong x-text="event.objects || 'event'"></strong> — <span x-text="event.camera"></span></div>
-              <div class="ts" x-text="formatTs(event.start_ts)"></div>
+              <div class="ts" x-text="formatTsWithDuration(event.start_ts, event.end_ts)"></div>
               <div class="badges">
                 <span class="badge" :class="'ai-' + event.ai_status" x-text="'ai: ' + event.ai_status"></span>
                 <span class="badge" x-show="event.has_video">video</span>
@@ -176,7 +176,7 @@
             </div>
             <div class="meta">
               <div><strong x-text="visit.objects || 'visit'"></strong> — <span x-text="visit.cameras"></span></div>
-              <div class="ts" x-text="formatTs(visit.start_ts)"></div>
+              <div class="ts" x-text="formatTsWithDuration(visit.start_ts, visit.end_ts)"></div>
               <div class="badges">
                 <span class="badge" :class="'ai-' + visit.ai_status" x-text="'ai: ' + visit.ai_status"></span>
                 <span class="badge" x-show="visit.has_video">video</span>
@@ -292,7 +292,7 @@
           <template x-for="ev in lightboxConnectedEvents" :key="ev.id">
             <div class="connected-event-card" :class="{ active: lightboxEvent && ev.id === lightboxEvent.id }" @click="openConnectedEvent(ev)">
               <img :src="thumbnailUrl(ev.id)" :alt="ev.objects" loading="lazy">
-              <span class="connected-event-ts" x-text="formatTs(ev.start_ts)"></span>
+              <span class="connected-event-ts" x-text="formatTsWithDuration(ev.start_ts, ev.end_ts)"></span>
               <span class="badge" :class="'ai-' + ev.ai_status" x-text="ev.ai_status"></span>
             </div>
           </template>
