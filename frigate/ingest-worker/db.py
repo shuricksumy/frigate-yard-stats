@@ -2275,9 +2275,13 @@ def semantic_search_combined(
     # max_distance filters on the computed `distance` column, which isn't addressable in a WHERE
     # clause within the same SELECT it's computed in (no correlated CTE per branch) -- wrapping the
     # union in a subquery is the simplest way to filter post-computation without duplicating the
-    # `<=>` expression (and its params) into every branch's own WHERE clause. The ORDER BY keyword
-    # priority doesn't need this wrap -- `description`/`distance` are already output columns of the
-    # UNION ALL itself, addressable directly in its own ORDER BY.
+    # `<=>` expression (and its params) into every branch's own WHERE clause. The keyword-priority
+    # ORDER BY needs this same subquery wrap for a different reason: Postgres only allows a plain
+    # UNION/UNION ALL's own ORDER BY to reference bare result column names, not an expression like
+    # `description ~* pattern` (confirmed live: `psycopg2.errors.FeatureNotSupported: invalid
+    # UNION/INTERSECT/EXCEPT ORDER BY clause` when this was first tried directly on the bare
+    # `combined` UNION ALL) -- wrapping in `SELECT * FROM (...) AS combined` turns it into an
+    # ordinary single SELECT, where an arbitrary ORDER BY expression is fine.
     order_clause = "ORDER BY (description ~* %s) DESC, distance ASC" if keyword_pattern else "ORDER BY distance ASC"
 
     if max_distance is not None:
@@ -2294,7 +2298,7 @@ def semantic_search_combined(
             params.append(max_distance)
     else:
         if keyword_pattern:
-            sql = f"{combined} {order_clause} LIMIT %s"
+            sql = f"SELECT * FROM ({combined}) AS combined {order_clause} LIMIT %s"
             params.append(keyword_pattern)
         else:
             sql = f"{combined} {order_clause} LIMIT %s"
