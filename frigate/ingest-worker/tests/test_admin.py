@@ -126,6 +126,53 @@ def test_get_db_size_by_object_type_reports_positive_bytes_for_a_type_with_rows(
         _cleanup_event(event_id)
 
 
+def test_get_db_size_by_object_type_covers_every_type_not_just_common_ones(conn_ok):
+    # These sizes are estimated from a sample rather than measured exactly (a full measurement
+    # detoasts the whole table -- see db._estimated_size_by_label). The bug that shape has to avoid:
+    # sampling GLOBALLY leaves a rare type unsampled and reports it as 0 bytes, which reads as
+    # "this type uses no space" rather than "not sampled". Confirmed on production, where a global
+    # 100-row sample reported truck as 0 despite it genuinely holding ~18 MB. Sampling per type
+    # fixes it, so a type with far fewer rows than the others must still report > 0.
+    camera = f"pytest-admin-rare-{uuid.uuid4()}"
+    # Order matters: the rare type goes in FIRST, then enough newer rows of the common type to
+    # push it outside any newest-N global sample window. Inserting it last would leave it among
+    # the newest rows, where even the buggy global-sample version would happen to find it.
+    rare_id = _insert_event(camera=camera, objects="truck")
+    common_ids = [_insert_event(camera=camera, objects="car") for _ in range(db._DB_SIZE_SAMPLE_ROWS + 5)]
+    try:
+        raw_events_bytes = {
+            r["object_type"]: r["bytes"] for r in db.get_db_size_by_object_type()["raw_events"]
+        }
+        assert raw_events_bytes.get("car", 0) > 0
+        assert raw_events_bytes.get("truck", 0) > 0, (
+            "a type with fewer rows than the sample size must still be measured, not reported as 0"
+        )
+    finally:
+        for event_id in common_ids:
+            _cleanup_event(event_id)
+        _cleanup_event(rare_id)
+
+
+def test_get_db_size_by_object_type_scales_with_row_count(conn_ok):
+    # bytes = row_count x sampled average, so a type with more rows of the same shape must report
+    # proportionally more -- the property the dashboard's "which type uses the most space" ranking
+    # actually depends on.
+    camera = f"pytest-admin-scale-{uuid.uuid4()}"
+    many = [_insert_event(camera=camera, objects="car") for _ in range(10)]
+    few = [_insert_event(camera=camera, objects="dog") for _ in range(2)]
+    try:
+        rows = {r["object_type"]: r for r in db.get_db_size_by_object_type()["raw_events"]}
+        assert rows["car"]["bytes"] > rows["dog"]["bytes"]
+        assert rows["car"]["row_count"] >= 10
+        assert rows["dog"]["row_count"] >= 2
+        # Every reported type must have actually been sampled.
+        assert rows["car"]["sampled_rows"] > 0
+        assert rows["dog"]["sampled_rows"] > 0
+    finally:
+        for event_id in many + few:
+            _cleanup_event(event_id)
+
+
 def test_get_row_counts_by_camera_reflects_inserted_rows(conn_ok):
     camera_a = f"pytest-admin-bycam-a-{uuid.uuid4()}"
     camera_b = f"pytest-admin-bycam-b-{uuid.uuid4()}"

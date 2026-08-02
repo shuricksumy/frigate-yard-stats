@@ -1941,14 +1941,35 @@ whatever actually happened regardless, which is its own independent source of tr
 separate lists, one `GROUP BY` each, rather than one joined table -- a type can have `raw_events`
 with no sighting yet, so summing across tables would either double- or under-count depending on
 how it's done). `db_size` similarly gains `db_size_by_object_type`
-(`db.get_db_size_by_object_type`) -- an *approximate* per-type Postgres footprint via
-`sum(pg_column_size(t.*))` grouped by that table's own label column. This is a real byte count of
-each row's stored data, but still an approximation of the type's true on-disk footprint: it
-excludes per-row tuple overhead, TOAST storage for the crop column's actual out-of-line
-chunks, and index space entirely -- `get_db_size_info()`'s `pg_total_relation_size` figures remain
-the authoritative whole-table sizes; this is for relative "which type is using the most space"
+(`db.get_db_size_by_object_type`) -- an *estimated* per-type Postgres footprint, computed as
+(that type's row count) x (average row size measured over a small sample of that type's own newest
+rows, `db._estimated_size_by_label`). Still an approximation of true on-disk footprint (no tuple
+overhead, no index space) -- `get_db_size_info()`'s `pg_total_relation_size` figures remain the
+authoritative whole-table sizes; this is for relative "which type is using the most space"
 comparison, not a precise accounting. The dashboard's "By object type" section combines this with
 disk usage below into one row per type.
+
+**Sampled rather than measured exactly, because the exact version was the admin dashboard's whole
+load time.** The original implementation was the obvious `sum(pg_column_size(t.*)) GROUP BY label`,
+which looks cheap and is a trap on this schema: building the whole-row composite forces Postgres to
+**detoast every row**, and `raw_events` is ~99.9% TOAST (measured live: 1305 MB total, of which
+1304 MB is out-of-line `crop_image_base64`, against a 1.6 MB heap). So every single admin page load
+read and decompressed the entire 1.3 GB table -- 192k buffers touched, 165k of them read from disk,
+**~3.0 s** -- purely to produce a number only ever used for relative comparison. `EXPLAIN` gives no
+warning either: it costed that sequential scan at 277, because the detoast happens during
+projection where the planner can't see it. Found by timing each of `/admin/overview`'s queries
+individually against production: this one was **2073 ms of a 1620 ms** request (the rest of the
+endpoint totals ~100 ms), i.e. ~95% of the page's load time.
+
+Sampling **per type**, not globally, is the part that matters: a global newest-N sample missed
+`truck` entirely on production and reported it as **0 bytes**, which reads as "this type uses no
+space" rather than "not sampled" -- worse than an approximation. A `CROSS JOIN LATERAL` gives every
+type that has any rows at all its own bounded sample. Accuracy against the exact figures on real
+production data: car -4.9%, person -4.0%, truck -0.2%, dog -0.00006%, ranking preserved -- at
+**46 ms and zero disk reads** instead of 3.0 s and 1.3 GB. `tests/test_admin.py` covers the
+rare-type case specifically, inserting the rare type *first* so it falls outside any newest-N
+window (inserting it last leaves it among the newest rows, where even the buggy global-sample
+version happens to find it -- confirmed by reproducing both shapes against a real database).
 
 `row_counts` also includes `row_counts_by_camera` (`db.get_row_counts_by_camera`) -- same shape as
 `row_counts_by_object_type`, grouped by camera instead. `raw_events` has its own `camera` column

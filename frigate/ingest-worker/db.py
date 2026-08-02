@@ -303,31 +303,78 @@ def get_row_counts_by_camera() -> dict:
     }
 
 
+# How many rows per object type are actually measured when estimating that type's stored size.
+# 25 was enough to land every type within 5% of the true figure on real production data (see
+# _estimated_size_by_label), while keeping the whole call in the tens of milliseconds.
+_DB_SIZE_SAMPLE_ROWS = 25
+
+
+def _estimated_size_by_label(table: str, label_column: str, id_column: str = "id") -> list[dict]:
+    # Estimates per-type stored bytes as (rows of that type) x (average row size, measured over a
+    # small sample of that type's own newest rows).
+    #
+    # The obvious query -- sum(pg_column_size(t.*)) GROUP BY label -- is a trap on this schema.
+    # Building the whole-row composite forces Postgres to DETOAST every row, and raw_events is
+    # ~99.9% TOAST (measured in production: 1305 MB total, of which 1304 MB is out-of-line
+    # crop_image_base64, against a 1.6 MB heap). So that query read and decompressed the entire
+    # 1.3 GB table on every admin dashboard load -- 192k buffers touched, 165k of them read from
+    # disk, ~3.0 s -- to produce a number this function's own callers only ever use for relative
+    # "which type is using the most space" comparison. The planner gives no warning either: it
+    # costed that scan at 277, because the detoast happens during projection where it can't see it.
+    #
+    # Sampling per type (not globally) matters: a global LIMIT sample missed `truck` entirely on
+    # production and reported it as 0 bytes, which reads as "this type uses no space" rather than
+    # "not sampled" -- worse than an approximation. The LATERAL join guarantees every type that has
+    # any rows at all gets its own sample.
+    #
+    # Measured against the exact figures on production: car -4.9%, person -4.0%, truck -0.2%,
+    # dog -0.00006%, ranking preserved -- at 46 ms and zero disk reads instead of 3.0 s and 1.3 GB.
+    #
+    # Still an approximation of true on-disk footprint for the same reasons as before (no tuple
+    # header/alignment padding, no index space) -- get_db_size_info()'s pg_total_relation_size
+    # figures remain the authoritative whole-table sizes.
+    #
+    # table/label_column/id_column are module-level literals at every call site below, never
+    # caller-supplied, so interpolating them is not an injection surface (unlike requeue_failed's
+    # caller-chosen table/stage, which is whitelist-validated via _REQUEUE_TARGETS).
+    return _execute(
+        f"""
+        WITH per_type AS (
+            SELECT {label_column} AS object_type, count(*)::bigint AS row_count
+            FROM yard_stats.{table}
+            GROUP BY {label_column}
+        )
+        SELECT p.object_type,
+               (p.row_count * COALESCE(s.avg_bytes, 0))::bigint AS bytes,
+               p.row_count,
+               s.sampled_rows,
+               true AS estimated
+        FROM per_type p
+        CROSS JOIN LATERAL (
+            SELECT avg(pg_column_size(sample.*))::bigint AS avg_bytes,
+                   count(*)::int AS sampled_rows
+            FROM (
+                SELECT * FROM yard_stats.{table} t
+                -- IS NOT DISTINCT FROM, not = : a NULL label is a real group in per_type above
+                -- (an unlabelled row still occupies space), and = would never match it.
+                WHERE t.{label_column} IS NOT DISTINCT FROM p.object_type
+                ORDER BY t.{id_column} DESC
+                LIMIT {int(_DB_SIZE_SAMPLE_ROWS)}
+            ) sample
+        ) s
+        ORDER BY bytes DESC
+        """,
+        fetch=True,
+    )
+
+
 def get_db_size_by_object_type() -> dict:
-    # Approximate per-type Postgres footprint -- sum(pg_column_size(t.*)) over each table's own
-    # rows, grouped by that table's label column. This is a real byte count of each row's stored
-    # data (not a rough estimate), but it's still an approximation of the table's true on-disk
-    # footprint: it doesn't include per-row overhead (tuple header, alignment padding), TOAST
-    # storage for the crop_image_base64 column's actual out-of-line chunks, or
-    # index space at all -- get_db_size_info()'s pg_total_relation_size figures remain the
-    # authoritative whole-table sizes; this is for relative "which type is using the most space"
-    # comparison, not a precise accounting.
+    # Per-type Postgres footprint, ESTIMATED from a per-type sample -- see _estimated_size_by_label
+    # for why measuring it exactly is prohibitively expensive on this schema.
     return {
-        "raw_events": _execute(
-            "SELECT objects AS object_type, sum(pg_column_size(raw_events.*))::bigint AS bytes "
-            "FROM yard_stats.raw_events GROUP BY objects ORDER BY bytes DESC",
-            fetch=True,
-        ),
-        "sightings": _execute(
-            "SELECT object_label AS object_type, sum(pg_column_size(sightings.*))::bigint AS bytes "
-            "FROM yard_stats.sightings GROUP BY object_label ORDER BY bytes DESC",
-            fetch=True,
-        ),
-        "visit_sightings": _execute(
-            "SELECT object_label AS object_type, sum(pg_column_size(visit_sightings.*))::bigint AS bytes "
-            "FROM yard_stats.visit_sightings GROUP BY object_label ORDER BY bytes DESC",
-            fetch=True,
-        ),
+        "raw_events": _estimated_size_by_label("raw_events", "objects"),
+        "sightings": _estimated_size_by_label("sightings", "object_label"),
+        "visit_sightings": _estimated_size_by_label("visit_sightings", "object_label"),
     }
 
 
