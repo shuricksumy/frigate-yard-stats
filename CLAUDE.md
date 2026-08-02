@@ -1740,7 +1740,7 @@ has_image, ai_status}` shape `openVisitLightbox` already constructs for a plain
 
 ### Search relevance -- default time window, a `max_distance` cutoff, and a whole-word keyword fallback
 
-Three related bugs, found by directly comparing what the Search tab showed against a raw
+Four related bugs, found by directly comparing what the Search tab showed against a raw
 production `POST /search` call over SSH, not by inspection alone.
 
 **Bug 1 -- Search tab silently inherited the Events/Visits tabs' 1-hour default.** `static/app.js`'s
@@ -1789,6 +1789,25 @@ switching the fallback to Postgres's `~*` case-insensitive regex with `\y` word-
 passed through `re.escape()` before being embedded in the pattern -- still a bound parameter, never
 concatenated into the SQL string, so this is about correct regex semantics, not injection safety.
 Re-tested "cat" after the fix: 0 results, correctly.
+
+**Bug 4 -- the keyword fallback let a literal match into the qualifying set, but a plain
+`ORDER BY distance ASC LIMIT` still cut it off before it was ever reached.** Confirmed live: "police
+car" was a literal substring in two real sightings (both with valid, already-stored embeddings),
+but neither surfaced anywhere in the Search tab's results, at any precision setting, over the full
+time range. The OR clause described above (Bug 3's fix) correctly widens the *candidate* set to
+include a literal keyword match past the distance cutoff -- but the final ranking was still a flat
+`ORDER BY distance ASC LIMIT %s` over that whole candidate set, so a keyword match with a genuinely
+poor embedding distance (this deployment's small/general embedding model doesn't weight "police"
+strongly relative to the hundreds of other car descriptions in the corpus) still lost out to dozens
+of unrelated-but-closer-by-distance rows and never survived the LIMIT. Confirmed by directly
+widening `limit` to 5000 against production: the two sightings ranked 82nd and 1048th purely by
+cosine distance -- nowhere near any realistic page size. Fixed by sorting a keyword match ahead of
+every pure-distance row (`ORDER BY (description ~* pattern) DESC, distance ASC`) in
+`db.semantic_search_combined`, so a literal word match is guaranteed to survive the LIMIT
+regardless of how the embedding model itself scores it. This priority now also applies when
+`max_distance` isn't set at all (the "Show everything" precision preset) -- that path previously
+had no keyword-fallback protection whatsoever, since the OR-clause widening only ever existed
+inside the `max_distance is not None` branch.
 
 ### Prompt-echo in `person`/`dog` sightings -- a missing anti-narration instruction
 

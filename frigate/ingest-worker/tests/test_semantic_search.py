@@ -373,6 +373,46 @@ def test_semantic_search_combined_max_distance_keyword_fallback_is_whole_word_on
         _cleanup_event(far_event_id)
 
 
+def test_semantic_search_combined_keyword_match_survives_limit_truncation(conn_ok):
+    # Confirmed live in production: "police car" was a literal substring in two real sightings
+    # (both with valid embeddings), but neither surfaced in the web UI's Search tab -- the OR
+    # clause let them into the qualifying set (see the test above), but a plain
+    # `ORDER BY distance ASC LIMIT` still cut them off before they were ever reached, since dozens
+    # of other, unrelated-but-closer-by-distance car descriptions outranked them on pure cosine
+    # distance. A keyword match must be prioritized ahead of pure-distance rows so it survives the
+    # LIMIT regardless of how poorly the embedding model itself scores it.
+    camera = f"pytest-combo-{uuid.uuid4()}"
+    close_ids = [_insert_event(camera=camera) for _ in range(5)]
+    far_id = _insert_event(camera=camera)
+    try:
+        for i, event_id in enumerate(close_ids):
+            db.complete_sighting(event_id, "car", f"a plain car description {i}", embedding=_vec(1.0))
+        db.complete_sighting(
+            far_id, "car", "a police car with flashing lights in the background",
+            embedding=_orthogonal_vec(1.0),
+        )
+        # limit=3 is smaller than the 5 zero-distance rows alone -- a plain distance-only ranking
+        # would never reach the keyword match at distance 1.0.
+        results = db.semantic_search_combined(
+            _vec(1.0), object_types=["car"], camera=camera, limit=3,
+            max_distance=1.5, query_text="police car",
+        )
+        assert far_id in {r["id"] for r in results}
+        assert len(results) == 3
+
+        # The same guarantee applies with no cutoff at all (max_distance=None, the web UI's "Show
+        # everything" precision preset) -- previously had no keyword-fallback protection whatsoever.
+        results = db.semantic_search_combined(
+            _vec(1.0), object_types=["car"], camera=camera, limit=3, query_text="police car",
+        )
+        assert far_id in {r["id"] for r in results}
+        assert len(results) == 3
+    finally:
+        for event_id in close_ids:
+            _cleanup_event(event_id)
+        _cleanup_event(far_id)
+
+
 def test_get_retention_info_returns_configured_months_and_oldest_ts(conn_ok):
     info = db.get_retention_info()
     assert info["retention_months"] == db.config.RETENTION_MONTHS

@@ -2241,38 +2241,63 @@ def semantic_search_combined(
     for query, branch_params in branches:
         params.extend(branch_params)
     combined = " UNION ALL ".join(q for q, _ in branches)
+
+    keyword_pattern = None
+    if query_text and query_text.strip():
+        # WHOLE-WORD (Postgres's `~*` case-insensitive regex with `\y` word-boundary anchors), not
+        # a plain ILIKE substring: confirmed live that a plain `ILIKE '%cat%'` fallback (the
+        # original implementation) matched "indi-CAT-ion"/"lo-CAT-ion" for query "cat", returning
+        # 24 completely unrelated results with nothing actually about a cat anywhere in the
+        # dataset. re.escape keeps the caller's free text safe to embed inside the regex pattern
+        # (it's still passed as a bound param, never concatenated into the SQL string, so this is
+        # about correct regex semantics, not injection).
+        keyword_pattern = r"\y" + re.escape(query_text.strip()) + r"\y"
+
+    # A pure distance cutoff/ranking can bury a sighting whose description literally contains the
+    # query word, in two different ways: (1) its own distance can land just past a cutoff (a
+    # general-purpose embedding model weights a sentence's dominant subject more than a short
+    # trailing clause -- confirmed: "...an adult wearing a grey t-shirt... with a small dog
+    # nearby" for query "dog" landed at distance 0.457, just outside a 0.45 cutoff, despite the
+    # literal word being present), or (2) even once let into the candidate pool via the OR below,
+    # a plain `ORDER BY distance ASC LIMIT` can still truncate it away if enough other,
+    # unrelated-but-closer-by-distance rows exist ahead of it -- confirmed live in production:
+    # "police car" was a literal substring in two real sightings (both with valid, already-stored
+    # embeddings), but neither ranked in the top 20, or even the top 1000, of a plain
+    # distance-ranked search against this deployment's small/general embedding model, which
+    # doesn't weight "police" strongly relative to the hundreds of other car descriptions in the
+    # corpus. The keyword OR-clause let them into the qualifying set, but the LIMIT still cut them
+    # off before they were ever reached. Fixed by sorting a keyword match ahead of every
+    # pure-distance row (`ORDER BY keyword-match DESC, distance ASC`) so a literal match is
+    # guaranteed to survive the LIMIT regardless of how the embedding model itself scores it --
+    # this applies even when max_distance isn't set at all (the "Show everything" precision
+    # preset), which previously had no keyword-fallback protection whatsoever.
+    #
     # max_distance filters on the computed `distance` column, which isn't addressable in a WHERE
     # clause within the same SELECT it's computed in (no correlated CTE per branch) -- wrapping the
     # union in a subquery is the simplest way to filter post-computation without duplicating the
-    # `<=>` expression (and its params) into every branch's own WHERE clause.
+    # `<=>` expression (and its params) into every branch's own WHERE clause. The ORDER BY keyword
+    # priority doesn't need this wrap -- `description`/`distance` are already output columns of the
+    # UNION ALL itself, addressable directly in its own ORDER BY.
+    order_clause = "ORDER BY (description ~* %s) DESC, distance ASC" if keyword_pattern else "ORDER BY distance ASC"
+
     if max_distance is not None:
-        # A pure distance cutoff can exclude a sighting whose description literally contains the
-        # query word, just because the rest of that sentence is about something else (confirmed in
-        # practice: "...an adult wearing a grey t-shirt... with a small dog nearby" for query "dog"
-        # landed at distance 0.457, just outside a 0.45 cutoff, despite the literal word being
-        # present) -- a general-purpose embedding model weights a sentence's dominant subject more
-        # than a short trailing clause, so "the word is literally there" and "distance is below an
-        # arbitrary threshold" will never fully agree. This fallback guarantees a literal word match
-        # is never hidden by the cutoff, regardless of embedding geometry -- WHOLE-WORD (Postgres's
-        # `~*` case-insensitive regex with `\y` word-boundary anchors), not a plain ILIKE substring:
-        # confirmed live that a plain `ILIKE '%cat%'` fallback (the original implementation) matched
-        # "indi-CAT-ion"/"lo-CAT-ion" for query "cat", returning 24 completely unrelated results
-        # (every one of them already past the distance cutoff on its own merits) with nothing
-        # actually about a cat anywhere in the dataset. re.escape keeps the caller's free text safe
-        # to embed inside the regex pattern (it's still passed as a bound param, never concatenated
-        # into the SQL string, so this is about correct regex semantics, not injection).
-        if query_text and query_text.strip():
+        if keyword_pattern:
             sql = (
                 f"SELECT * FROM ({combined}) AS combined "
-                f"WHERE distance <= %s OR description ~* %s ORDER BY distance ASC LIMIT %s"
+                f"WHERE distance <= %s OR description ~* %s {order_clause} LIMIT %s"
             )
             params.append(max_distance)
-            params.append(r"\y" + re.escape(query_text.strip()) + r"\y")
+            params.append(keyword_pattern)
+            params.append(keyword_pattern)
         else:
-            sql = f"SELECT * FROM ({combined}) AS combined WHERE distance <= %s ORDER BY distance ASC LIMIT %s"
+            sql = f"SELECT * FROM ({combined}) AS combined WHERE distance <= %s {order_clause} LIMIT %s"
             params.append(max_distance)
     else:
-        sql = f"{combined} ORDER BY distance ASC LIMIT %s"
+        if keyword_pattern:
+            sql = f"{combined} {order_clause} LIMIT %s"
+            params.append(keyword_pattern)
+        else:
+            sql = f"{combined} {order_clause} LIMIT %s"
     params.append(limit)
     return _execute(
         sql,
