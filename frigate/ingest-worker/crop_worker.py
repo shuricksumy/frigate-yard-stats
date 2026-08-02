@@ -5,6 +5,7 @@ import config
 import crop
 import db
 import event_images
+import poll_loop
 import profile_config
 import retention
 import telegram
@@ -77,15 +78,17 @@ def run_once(profile: dict | None = None) -> None:
 
 
 def run_forever(profile: dict | None = None) -> None:
-    logger.info(
-        "crop_worker starting: parallel_limit=%s stale_minutes=%s max_attempts=%s initial_wait=%ss "
-        "poll_interval=%ss retention_months=%s retention_check_interval=%ss",
-        config.PARALLEL_LIMIT, config.STALE_MINUTES, config.MAX_ATTEMPTS, config.CROP_INITIAL_WAIT_SECONDS,
-        config.POLL_INTERVAL_SECONDS, config.RETENTION_MONTHS, config.RETENTION_CHECK_INTERVAL_SECONDS,
+    poll_loop.run_forever(
+        "crop_worker",
+        lambda: run_once(profile),
+        config.POLL_INTERVAL_SECONDS,
+        {
+            "parallel_limit": config.PARALLEL_LIMIT,
+            "stale_minutes": config.STALE_MINUTES,
+            "max_attempts": config.MAX_ATTEMPTS,
+            "initial_wait": f"{config.CROP_INITIAL_WAIT_SECONDS}s",
+            "poll_interval": f"{config.POLL_INTERVAL_SECONDS}s",
+            "retention_months": config.RETENTION_MONTHS,
+            "retention_check_interval": f"{config.RETENTION_CHECK_INTERVAL_SECONDS}s",
+        },
     )
-    while True:
-        try:
-            run_once(profile)
-        except Exception:
-            logger.exception("crop_worker poll iteration failed")
-        time.sleep(config.POLL_INTERVAL_SECONDS)

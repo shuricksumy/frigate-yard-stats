@@ -59,7 +59,11 @@ def main():
     # Not a per-object-type setting (a visit isn't tied to one type), so this is a plain profile
     # lookup rather than a profile_config.py resolver -- see profiles.yaml's own visit_summary:
     # section.
-    if profile.get("visit_summary", {}).get("enabled"):
+    # `or {}` rather than a dict.get default -- a bare `visit_summary:` line (no keys under it)
+    # parses to None, and .get(key, {}) only falls back when the key is absent, not when its value
+    # is None. Without this, that YAML crashes the whole container at startup. Same form
+    # visit_summary_worker.run_once already uses.
+    if (profile.get("visit_summary") or {}).get("enabled"):
         threading.Thread(
             target=visit_summary_worker.run_forever, args=(profile,), name="visit_summary_worker", daemon=True,
         ).start()

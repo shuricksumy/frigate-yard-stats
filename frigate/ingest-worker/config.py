@@ -52,6 +52,21 @@ POSTGRES_PORT = int(_env("POSTGRES_PORT", "5432"))
 POSTGRES_DB = _env("POSTGRES_DB", "home_automation")
 POSTGRES_USER = _env("POSTGRES_USER", "n8n_projects")
 POSTGRES_PASSWORD = _env("POSTGRES_PASSWORD")
+# Connection-pool bounds (db.py). Every worker thread (mqtt ingest + the crop/video/alert-video/
+# ai/visit-summary poll loops) and every API request thread checks out its own connection, so this
+# caps how many of them can be talking to Postgres at once -- past the cap, a caller waits briefly
+# rather than failing (see db._checkout_connection). Stays a plain env var rather than moving into
+# profiles.yaml's `defaults:` like the other tuning knobs: the pool is created during
+# db.ensure_schema(), which main.py runs BEFORE config.apply_profile_defaults(), so a profiles.yaml
+# value would be read too late to take effect -- the same ordering reason EMBEDDING_DIMENSIONS
+# stays an env var. Default max (20) comfortably covers this project's ~6 worker threads plus a
+# normal web-UI burst (a grid page requests ~24 thumbnails at once) while staying well under
+# Postgres's own default max_connections of 100.
+POSTGRES_POOL_MIN = int(_env("POSTGRES_POOL_MIN", "1"))
+POSTGRES_POOL_MAX = int(_env("POSTGRES_POOL_MAX", "20"))
+# How long a caller waits for a free pooled connection before giving up. Only reached when all
+# POSTGRES_POOL_MAX connections are genuinely busy at once.
+POSTGRES_POOL_WAIT_SECONDS = float(_env("POSTGRES_POOL_WAIT_SECONDS", "10"))
 
 FRIGATE_API_BASE = _env("FRIGATE_API_BASE")  # e.g. http://<frigate-host-ip>:5000
 

@@ -39,10 +39,26 @@ Two families of settings:
 import config
 
 
-def _type_config(profile: dict | None, object_label: str | None) -> dict:
+def object_types_config(profile: dict | None) -> dict:
+    """The profile's `object_types:` mapping, always a real dict.
+
+    The ONLY safe way to reach that section -- never `profile.get("object_types", {})` directly.
+    dict.get(key, default) only falls back when the key is ABSENT; a key that's present but None
+    comes back as None, and a bare `object_types:` line in profiles.yaml (nothing indented under
+    it) parses to exactly that. Every caller then crashed with AttributeError on .get/.items/
+    iteration. Public (no underscore) so ai_worker.py and anything else outside this module routes
+    through it too, rather than each re-deriving the same unsafe access. Named *_config rather than
+    a bare `object_types` deliberately -- several functions in this module already bind a LOCAL
+    `object_types` (the include-list half of a _claim_filter tuple), which would shadow this one
+    and turn any later call inside them into a "list is not callable" TypeError.
+    """
     if not profile:
         return {}
-    return profile.get("object_types", {}).get(object_label) or {}
+    return profile.get("object_types") or {}
+
+
+def _type_config(profile: dict | None, object_label: str | None) -> dict:
+    return object_types_config(profile).get(object_label) or {}
 
 
 def _defaults_config(profile: dict | None) -> dict:
@@ -75,7 +91,7 @@ def flag_summary(profile: dict | None, key: str, global_default) -> dict:
     value = _resolve(profile, None, key, global_default)
     source = "defaults" if key in _defaults_config(profile) else "hardcoded"
     overridden_for = sorted(
-        label for label, type_cfg in (profile or {}).get("object_types", {}).items()
+        label for label, type_cfg in object_types_config(profile).items()
         if key in (type_cfg or {}) and type_cfg[key] != value
     )
     return {"value": value, "source": source, "overridden_for": overridden_for}
@@ -141,7 +157,7 @@ def any_ai_events_stage_enabled(profile: dict | None) -> bool:
         return True
     if not profile:
         return False
-    return any(t.get("ai_events_stage_enabled") for t in profile.get("object_types", {}).values())
+    return any((t or {}).get("ai_events_stage_enabled") for t in object_types_config(profile).values())
 
 
 def _bool_override_labels(profile: dict | None, key: str) -> tuple[list[str], list[str]]:
@@ -152,7 +168,8 @@ def _bool_override_labels(profile: dict | None, key: str) -> tuple[list[str], li
     if not profile:
         return [], []
     true_labels, false_labels = [], []
-    for label, type_cfg in profile.get("object_types", {}).items():
+    for label, type_cfg in object_types_config(profile).items():
+        type_cfg = type_cfg or {}
         if key in type_cfg:
             (true_labels if type_cfg[key] else false_labels).append(label)
     return true_labels, false_labels
@@ -235,7 +252,7 @@ def _union_claim_filter(
     mode_base = _resolve(profile, None, mode_key, mode_default) in ("video", "all")
     base = store_base or mode_base
     true_labels, false_labels = [], []
-    for label in (profile or {}).get("object_types", {}):
+    for label in object_types_config(profile):
         store_val = _resolve(profile, label, store_key, store_default)
         mode_val = _resolve(profile, label, mode_key, mode_default) in ("video", "all")
         combined = store_val or mode_val

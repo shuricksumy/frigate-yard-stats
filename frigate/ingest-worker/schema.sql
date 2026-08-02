@@ -156,6 +156,27 @@ CREATE INDEX IF NOT EXISTS idx_raw_events_ai_status ON yard_stats.raw_events (ai
 CREATE INDEX IF NOT EXISTS idx_raw_events_video_status ON yard_stats.raw_events (video_status);
 CREATE INDEX IF NOT EXISTS idx_raw_events_visit_id ON yard_stats.raw_events (visit_id);
 
+-- Indexes matching the queries this table actually gets hit with, added after the ones above.
+--
+-- The pre-existing idx_raw_events_zone_ts leads on `zone`, which no read path filters by -- so it
+-- can't serve the browsing query at all. GET /events (db._build_events_query, the web UI's main
+-- view and the busiest read here) filters `start_ts` as a range plus an optional camera, and
+-- always ORDER BY start_ts DESC.
+CREATE INDEX IF NOT EXISTS idx_raw_events_start_ts ON yard_stats.raw_events (start_ts DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_events_camera_start_ts ON yard_stats.raw_events (camera, start_ts DESC);
+-- The three claim functions each filter on their own status column and then take the NEWEST rows
+-- (ORDER BY created_at DESC -- see claim_next_batch's comment for why newest-first). The
+-- single-column status indexes above narrow the rows but leave the ordering to a sort; these
+-- composites let the claim read straight down the index instead. Matters most for crop, which is
+-- the first stage and so carries the deepest backlog when anything falls behind (confirmed in
+-- production: the crop backlog reached five digits).
+CREATE INDEX IF NOT EXISTS idx_raw_events_crop_status_created
+  ON yard_stats.raw_events (crop_status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_events_ai_status_created
+  ON yard_stats.raw_events (ai_status, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_raw_events_video_status_created
+  ON yard_stats.raw_events (video_status, created_at DESC);
+
 -- Optional filesystem path to the full-resolution version of the same event's crop
 -- (STORE_EVENT_IMAGES/store_event_images, see event_images.py) -- only the path lives here, the
 -- JPEG bytes live under EVENT_IMAGES_STORAGE_PATH on disk, never in Postgres. NULL until the crop

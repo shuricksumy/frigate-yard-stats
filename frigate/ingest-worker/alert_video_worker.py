@@ -3,9 +3,11 @@ import time
 
 import config
 import db
+import poll_loop
 import profile_config
 import telegram
 import video
+import video_worker
 
 logger = logging.getLogger(__name__)
 
@@ -93,8 +95,10 @@ def run_once(profile: dict | None = None) -> None:
     # Eligible if EITHER storage is on OR Telegram wants a video for that type (send-without-
     # store) -- see profile_config.py's "send-to-Telegram-without-storing" section.
     object_types, exclude_object_types = profile_config.video_alerts_claim_filter(profile)
-    if object_types == []:
-        # Base disabled, nothing opted in per-type -- nothing for this stage to do at all.
+    # An EMPTY list means "base disabled and nothing opted in per-type" -- nothing for this stage
+    # to do at all. None means "no filter", i.e. every type is eligible, so the two must not be
+    # conflated (a plain `if not object_types` would wrongly skip the unfiltered case).
+    if object_types is not None and not object_types:
         return
     for visit in db.claim_visit_video_batch(
         available_capacity, config.VIDEO_MAX_AGE_HOURS,
@@ -104,16 +108,11 @@ def run_once(profile: dict | None = None) -> None:
 
 
 def run_forever(profile: dict | None = None) -> None:
-    logger.info(
-        "alert_video_worker starting: parallel_limit=%s initial_wait=%ss min_valid_bytes=%s "
-        "max_attempts=%s retry_wait=%ss max_age_hours=%s poll_interval=%ss",
-        config.VIDEO_PARALLEL_LIMIT, config.VIDEO_INITIAL_WAIT_SECONDS, config.VIDEO_MIN_VALID_BYTES,
-        config.VIDEO_MAX_ATTEMPTS, config.VIDEO_RETRY_WAIT_SECONDS, config.VIDEO_MAX_AGE_HOURS,
+    poll_loop.run_forever(
+        "alert_video_worker",
+        lambda: run_once(profile),
         config.POLL_INTERVAL_SECONDS,
+        # Same tuning knobs as the events-flow video worker -- the two flows deliberately share
+        # every VIDEO_* setting, only their on/off switch, storage location and thread are separate.
+        video_worker._startup_settings(),
     )
-    while True:
-        try:
-            run_once(profile)
-        except Exception:
-            logger.exception("alert_video_worker poll iteration failed")
-        time.sleep(config.POLL_INTERVAL_SECONDS)

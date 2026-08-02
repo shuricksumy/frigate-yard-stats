@@ -1,11 +1,11 @@
 import logging
-import time
 
-import requests
 import yaml
 
 import config
 import db
+import llm
+import poll_loop
 import profile_config
 
 logger = logging.getLogger(__name__)
@@ -16,139 +16,6 @@ def load_profile(path: str) -> dict:
         return yaml.safe_load(f)
 
 
-_warned_llama_proxy_multi_image = False
-
-
-def _llama_proxy_chat_request(type_config: dict, prompt: str, images: list[str], timeout: float) -> dict:
-    # The original, still-default shape: llama_slot_proxy speaks an OpenAI-compatible
-    # chat-completions API with no "model" field at all -- the slot is selected entirely by
-    # chat_path (one URL path segment per model), not a body field. Multi-image reasoning quality
-    # on a self-hosted llama.cpp+mmproj backend is unverified (see ai_worker.py's own multi-image
-    # docstring note / CLAUDE.md), so only the first image is ever sent here regardless of how many
-    # were gathered -- a warning is logged once (module-global, not per-call) rather than silently
-    # dropping the rest with no visibility at all. images=[] (the visit-summary stage's text-only
-    # call, see visit_summary_worker.py) sends no image block at all -- a plain text message, same
-    # as the other two providers already handle via their own empty list-comprehension spread.
-    global _warned_llama_proxy_multi_image
-    if len(images) > 1 and not _warned_llama_proxy_multi_image:
-        logger.warning(
-            "%d images were gathered for this call but llama_proxy only ever sends the first one "
-            "-- set provider to 'openai' or 'anthropic' for multi-image analysis",
-            len(images),
-        )
-        _warned_llama_proxy_multi_image = True
-    headers = {}
-    if config.LLAMA_PROXY_TOKEN:
-        headers["Authorization"] = f"Bearer {config.LLAMA_PROXY_TOKEN}"
-    content = [{"type": "text", "text": prompt}]
-    if images:
-        content.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{images[0]}"}})
-    resp = requests.post(
-        f"{config.LLAMA_PROXY_BASE_URL}{type_config['chat_path']}",
-        json={
-            "messages": [{"role": "user", "content": content}],
-            "temperature": 0,
-        },
-        headers=headers,
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _openai_chat_request(type_config: dict, prompt: str, images: list[str], timeout: float) -> dict:
-    # Same request/response shape llama_slot_proxy already speaks (it's deliberately
-    # OpenAI-compatible) -- the two real differences are the base URL/auth and that OpenAI needs a
-    # "model" field in the body instead of selecting the model via the URL path. OpenAI's vision
-    # API natively supports several image_url blocks in one message's content array, so every
-    # gathered image is sent, not just the first.
-    headers = {"Authorization": f"Bearer {config.OPENAI_API_KEY}"}
-    resp = requests.post(
-        f"{config.OPENAI_BASE_URL}/v1/chat/completions",
-        json={
-            "model": type_config["model"],
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        *[
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{img}"}}
-                            for img in images
-                        ],
-                    ],
-                }
-            ],
-            "temperature": 0,
-        },
-        headers=headers,
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _anthropic_chat_request(type_config: dict, prompt: str, images: list[str], timeout: float) -> dict:
-    # Claude's Messages API -- a genuinely different shape from the other two providers: auth is
-    # x-api-key + anthropic-version headers (not Authorization: Bearer), images are a "source"
-    # block instead of a data-URI image_url, and max_tokens is required (there's no server-side
-    # default the way OpenAI/llama_slot_proxy have one). Claude's Messages API natively supports
-    # several image blocks in one message's content array, so every gathered image is sent.
-    headers = {
-        "x-api-key": config.ANTHROPIC_API_KEY,
-        "anthropic-version": config.ANTHROPIC_VERSION,
-    }
-    resp = requests.post(
-        f"{config.ANTHROPIC_BASE_URL}/v1/messages",
-        json={
-            "model": type_config["model"],
-            "max_tokens": type_config.get("max_tokens", config.AI_STAGE_DEFAULT_MAX_TOKENS),
-            "messages": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": prompt},
-                        *[
-                            {
-                                "type": "image",
-                                "source": {"type": "base64", "media_type": "image/jpeg", "data": img},
-                            }
-                            for img in images
-                        ],
-                    ],
-                }
-            ],
-        },
-        headers=headers,
-        timeout=timeout,
-    )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _chat_request(type_config: dict, prompt: str, images: list[str], timeout: float) -> dict:
-    # Dispatches on this type's own `provider` (profiles.yaml, per object type -- see
-    # profiles.yaml.example) -- "llama_proxy" (the default, unchanged behavior) if the key is
-    # omitted entirely, so an existing deployment's profiles.yaml needs no edit to keep working.
-    # `images` is always a list -- the events stage passes a one-element list (unchanged
-    # single-image behavior); the alert stage passes however many high-res crops it gathered.
-    provider = type_config.get("provider", "llama_proxy")
-    if provider == "openai":
-        return _openai_chat_request(type_config, prompt, images, timeout)
-    if provider == "anthropic":
-        return _anthropic_chat_request(type_config, prompt, images, timeout)
-    return _llama_proxy_chat_request(type_config, prompt, images, timeout)
-
-
-def _extract_response_text(response: dict, type_config: dict | None) -> str:
-    # Claude's response shape (content[0].text) differs from the OpenAI-compatible shape
-    # llama_slot_proxy and OpenAI itself both use (choices[0].message.content) -- type_config is
-    # optional so existing callers/tests that only ever dealt with the OpenAI-compatible shape
-    # keep working unchanged.
-    if (type_config or {}).get("provider") == "anthropic":
-        return response["content"][0]["text"]
-    return response["choices"][0]["message"]["content"]
-
 
 def parse_sighting_response(response: dict, row: dict, type_config: dict | None = None) -> dict:
     # No JSON parsing, no per-type branching -- the whole chat response is the sighting's
@@ -158,74 +25,8 @@ def parse_sighting_response(response: dict, row: dict, type_config: dict | None 
     return {
         "raw_event_id": row["id"],
         "object_label": row.get("objects"),
-        "description": _extract_response_text(response, type_config),
+        "description": llm.extract_response_text(response, type_config),
     }
-
-
-def _embed_request(text: str, timeout: float) -> dict:
-    # config.EMBEDDING_PROVIDER is independent of whichever provider(s) profiles.yaml routes chat
-    # calls to -- Claude has no embeddings endpoint at all, so a deployment using
-    # `provider: anthropic` for chat still needs this set to "llama_proxy" (default) or "openai"
-    # for semantic search/backfill to work.
-    if config.EMBEDDING_PROVIDER == "openai":
-        headers = {"Authorization": f"Bearer {config.OPENAI_API_KEY}"}
-        resp = requests.post(
-            f"{config.OPENAI_BASE_URL}/v1/embeddings",
-            json={"model": config.OPENAI_EMBED_MODEL, "input": text},
-            headers=headers,
-            timeout=timeout,
-        )
-    else:
-        headers = {}
-        if config.LLAMA_PROXY_TOKEN:
-            headers["Authorization"] = f"Bearer {config.LLAMA_PROXY_TOKEN}"
-        resp = requests.post(
-            f"{config.LLAMA_PROXY_BASE_URL}{config.LLAMA_PROXY_EMBED_PATH}",
-            json={"input": text},
-            headers=headers,
-            timeout=timeout,
-        )
-    resp.raise_for_status()
-    return resp.json()
-
-
-def _embed_text(text: str | None) -> list[float] | None:
-    # An embedding failure shouldn't lose an already-computed sighting -- same decision made for
-    # n8n's Call Embedding Model nodes (continueErrorOutput, falls back to null). Never raises;
-    # the sighting still gets inserted, just not semantically searchable.
-    if not text:
-        return None
-    try:
-        embedding = _embed_request(text, config.AI_STAGE_EMBED_TIMEOUT_SECONDS)["data"][0]["embedding"]
-        if len(embedding) != config.EMBEDDING_DIMENSIONS:
-            logger.warning(
-                "Embedding call returned %d dims, expected %d (wrong model loaded at "
-                "LLAMA_PROXY_EMBED_PATH?), storing sighting without one",
-                len(embedding),
-                config.EMBEDDING_DIMENSIONS,
-            )
-            return None
-        return embedding
-    except Exception:
-        logger.warning("Embedding call failed, storing sighting without one", exc_info=True)
-        return None
-
-
-def embed_query_text(text: str) -> list[float]:
-    """Embeds arbitrary free-text (the web UI Search tab's own query, not a stored sighting) via
-    the same embedding backend _embed_text uses. Raises on any failure -- unlike _embed_text's
-    "fine, store the sighting without one" fallback, a search request has nothing useful to do
-    with a missing vector, so the caller (api.py's POST /search) turns this into a real error
-    response instead of silently returning empty results."""
-    if not text or not text.strip():
-        raise ValueError("query text must not be empty")
-    embedding = _embed_request(text, config.AI_STAGE_EMBED_TIMEOUT_SECONDS)["data"][0]["embedding"]
-    if len(embedding) != config.EMBEDDING_DIMENSIONS:
-        raise ValueError(
-            f"embedding backend returned {len(embedding)} dims, expected {config.EMBEDDING_DIMENSIONS} "
-            "(wrong model loaded at LLAMA_PROXY_EMBED_PATH?)"
-        )
-    return embedding
 
 
 def run_embedding_backfill(limit: int) -> dict:
@@ -249,7 +50,7 @@ def run_embedding_backfill(limit: int) -> dict:
 
     for row in db.get_sightings_missing_embedding(limit):
         result["sightings_processed"] += 1
-        embedding = _embed_text(row["description"])
+        embedding = llm.embed_text(row["description"])
         if embedding is not None:
             db.update_sighting_embedding(row["id"], embedding)
             result["sightings_updated"] += 1
@@ -259,14 +60,14 @@ def run_embedding_backfill(limit: int) -> dict:
     # schema.sql itself takes for that table).
     for row in db.get_visit_sightings_missing_embedding(limit):
         result["visit_sightings_processed"] += 1
-        embedding = _embed_text(row["description"])
+        embedding = llm.embed_text(row["description"])
         if embedding is not None:
             db.update_visit_sighting_embedding(row["id"], embedding)
             result["visit_sightings_updated"] += 1
 
     for row in db.get_visit_summaries_missing_embedding(limit):
         result["visit_summaries_processed"] += 1
-        embedding = _embed_text(row["summary"])
+        embedding = llm.embed_text(row["summary"])
         if embedding is not None:
             db.update_visit_summary_embedding(row["id"], embedding)
             result["visit_summaries_updated"] += 1
@@ -276,7 +77,9 @@ def run_embedding_backfill(limit: int) -> dict:
 
 def process_claimed_event(row: dict, profile: dict) -> None:
     event_id = row["id"]
-    type_config = profile.get("object_types", {}).get(row.get("objects"))
+    # profile_config.object_types is the one safe accessor for this section -- see its docstring
+    # (a bare `object_types:` line in profiles.yaml parses to None, not {}).
+    type_config = profile_config.object_types_config(profile).get(row.get("objects"))
     if type_config is None:
         # Shouldn't happen -- run_once only ever asks claim_ai_batch for mapped types -- but guard
         # rather than crash the poll loop on an unexpected row.
@@ -285,9 +88,9 @@ def process_claimed_event(row: dict, profile: dict) -> None:
     timeout = type_config.get("timeout_seconds", config.AI_STAGE_DEFAULT_TIMEOUT_SECONDS)
 
     try:
-        response = _chat_request(type_config, type_config["event_prompt"], [row["crop_image_base64"]], timeout)
+        response = llm.chat_request(type_config, type_config["event_prompt"], [row["crop_image_base64"]], timeout)
         fields = parse_sighting_response(response, row, type_config)
-        embedding = _embed_text(fields["description"])
+        embedding = llm.embed_text(fields["description"])
         db.complete_sighting(fields["raw_event_id"], fields["object_label"], fields["description"], embedding)
         logger.info("AI analysis done for raw_event id=%s object_label=%s", event_id, fields["object_label"])
 
@@ -304,7 +107,7 @@ def run_once(profile: dict) -> None:
     # the global AI_EVENTS_STAGE_ENABLED) -- a type can opt out of this stage (or opt in despite
     # the global default being off) without affecting any other type's participation.
     object_types = [
-        label for label in profile.get("object_types", {})
+        label for label in profile_config.object_types_config(profile)
         if profile_config.ai_events_stage_enabled(profile, label)
     ]
     events = db.claim_ai_batch(
@@ -318,16 +121,16 @@ def run_once(profile: dict) -> None:
 def run_forever(profile: dict | None = None) -> None:
     if profile is None:
         profile = load_profile(config.AI_STAGE_PROFILE_PATH)
-    logger.info(
-        "ai_worker starting: object_types=%s parallel_limit=%s stale_minutes=%s max_attempts=%s "
-        "poll_interval=%ss llama_proxy_base_url=%s",
-        list(profile.get("object_types", {}).keys()), config.AI_STAGE_PARALLEL_LIMIT,
-        config.AI_STAGE_STALE_MINUTES, config.AI_STAGE_MAX_ATTEMPTS,
-        config.AI_STAGE_POLL_INTERVAL_SECONDS, config.LLAMA_PROXY_BASE_URL,
+    poll_loop.run_forever(
+        "ai_worker",
+        lambda: run_once(profile),
+        config.AI_STAGE_POLL_INTERVAL_SECONDS,
+        {
+            "object_types": list(profile_config.object_types_config(profile).keys()),
+            "parallel_limit": config.AI_STAGE_PARALLEL_LIMIT,
+            "stale_minutes": config.AI_STAGE_STALE_MINUTES,
+            "max_attempts": config.AI_STAGE_MAX_ATTEMPTS,
+            "poll_interval": f"{config.AI_STAGE_POLL_INTERVAL_SECONDS}s",
+            "llama_proxy_base_url": config.LLAMA_PROXY_BASE_URL,
+        },
     )
-    while True:
-        try:
-            run_once(profile)
-        except Exception:
-            logger.exception("ai_worker poll iteration failed")
-        time.sleep(config.AI_STAGE_POLL_INTERVAL_SECONDS)

@@ -93,7 +93,7 @@ def dir_size_by_camera(path: str) -> dict:
 def check_embedding_backend(timeout_seconds: float = 8.0) -> dict:
     # Live smoke test against LLAMA_PROXY_BASE_URL/LLAMA_PROXY_EMBED_PATH -- confirms both that
     # something answers at all and that it returns the dimension this deployment is configured
-    # for (config.EMBEDDING_DIMENSIONS), the same check ai_worker._embed_text applies on every
+    # for (config.EMBEDDING_DIMENSIONS), the same check llm.embed_text applies on every
     # real call. Deliberately a separate, on-demand admin action rather than folded into the
     # overview endpoint -- it's a real network call, not a cheap SQL query.
     if not config.LLAMA_PROXY_BASE_URL:

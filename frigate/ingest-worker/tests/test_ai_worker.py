@@ -13,7 +13,8 @@ os.environ.setdefault("API_KEY", "test-key")
 
 import pytest  # noqa: E402
 
-import ai_worker  # noqa: E402
+import ai_worker  # noqa: F401
+import llm  # noqa: E402
 import config  # noqa: E402
 import db  # noqa: E402
 
@@ -92,9 +93,9 @@ def test_chat_request_openai_provider_sends_model_and_bearer_auth(monkeypatch):
         captured.update(url=url, json=json, headers=headers)
         return _Resp(_chat_response("blue suv"))
 
-    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
     type_config = {"provider": "openai", "model": "gpt-4o"}
-    response = ai_worker._chat_request(type_config, "describe it", ["aGVsbG8="], 30)
+    response = llm.chat_request(type_config, "describe it", ["aGVsbG8="], 30)
 
     assert captured["url"] == "https://api.openai.com/v1/chat/completions"
     assert captured["json"]["model"] == "gpt-4o"
@@ -113,9 +114,9 @@ def test_chat_request_anthropic_provider_uses_messages_api_shape(monkeypatch):
         captured.update(url=url, json=json, headers=headers)
         return _Resp({"content": [{"type": "text", "text": "silver hatchback"}]})
 
-    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
     type_config = {"provider": "anthropic", "model": "claude-opus-4-8"}
-    ai_worker._chat_request(type_config, "describe it", ["aGVsbG8="], 30)
+    llm.chat_request(type_config, "describe it", ["aGVsbG8="], 30)
 
     assert captured["url"] == "https://api.anthropic.com/v1/messages"
     assert captured["json"]["model"] == "claude-opus-4-8"
@@ -133,11 +134,11 @@ def test_chat_request_anthropic_provider_uses_per_type_max_tokens(monkeypatch):
     monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "sk-ant-test")
     captured = {}
     monkeypatch.setattr(
-        ai_worker.requests, "post",
+        llm.requests, "post",
         lambda url, json=None, **k: captured.update(json=json) or _Resp({"content": [{"text": "x"}]}),
     )
     type_config = {"provider": "anthropic", "model": "claude-opus-4-8", "max_tokens": 256}
-    ai_worker._chat_request(type_config, "describe it", ["aGVsbG8="], 30)
+    llm.chat_request(type_config, "describe it", ["aGVsbG8="], 30)
     assert captured["json"]["max_tokens"] == 256
 
 
@@ -145,11 +146,11 @@ def test_chat_request_defaults_to_llama_proxy_when_provider_omitted(monkeypatch)
     monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
     calls = []
     monkeypatch.setattr(
-        ai_worker.requests, "post",
+        llm.requests, "post",
         lambda url, **k: calls.append(url) or _Resp(_chat_response("x")),
     )
     type_config = {"chat_path": "/vehicle-slot/v1/chat/completions"}
-    ai_worker._chat_request(type_config, "describe it", ["aGVsbG8="], 30)
+    llm.chat_request(type_config, "describe it", ["aGVsbG8="], 30)
     assert calls == ["http://llama.test/vehicle-slot/v1/chat/completions"]
 
 
@@ -159,11 +160,11 @@ def test_chat_request_openai_sends_one_content_block_per_image(monkeypatch):
     monkeypatch.setattr(config, "OPENAI_API_KEY", "sk-test")
     captured = {}
     monkeypatch.setattr(
-        ai_worker.requests, "post",
+        llm.requests, "post",
         lambda url, json=None, **k: captured.update(json=json) or _Resp(_chat_response("x")),
     )
     type_config = {"provider": "openai", "model": "gpt-4o"}
-    ai_worker._chat_request(type_config, "describe it", ["img1", "img2", "img3"], 30)
+    llm.chat_request(type_config, "describe it", ["img1", "img2", "img3"], 30)
 
     content = captured["json"]["messages"][0]["content"]
     assert content[0] == {"type": "text", "text": "describe it"}
@@ -176,11 +177,11 @@ def test_chat_request_anthropic_sends_one_content_block_per_image(monkeypatch):
     monkeypatch.setattr(config, "ANTHROPIC_API_KEY", "sk-ant-test")
     captured = {}
     monkeypatch.setattr(
-        ai_worker.requests, "post",
+        llm.requests, "post",
         lambda url, json=None, **k: captured.update(json=json) or _Resp({"content": [{"text": "x"}]}),
     )
     type_config = {"provider": "anthropic", "model": "claude-opus-4-8"}
-    ai_worker._chat_request(type_config, "describe it", ["img1", "img2"], 30)
+    llm.chat_request(type_config, "describe it", ["img1", "img2"], 30)
 
     content = captured["json"]["messages"][0]["content"]
     assert content[0] == {"type": "text", "text": "describe it"}
@@ -189,32 +190,32 @@ def test_chat_request_anthropic_sends_one_content_block_per_image(monkeypatch):
 
 def test_chat_request_llama_proxy_sends_only_first_image_and_warns_once(monkeypatch):
     monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
-    monkeypatch.setattr(ai_worker, "_warned_llama_proxy_multi_image", False)
+    monkeypatch.setattr(llm, "_warned_llama_proxy_multi_image", False)
     captured = {}
     monkeypatch.setattr(
-        ai_worker.requests, "post",
+        llm.requests, "post",
         lambda url, json=None, **k: captured.update(json=json) or _Resp(_chat_response("x")),
     )
     type_config = {"chat_path": "/vehicle-slot/v1/chat/completions"}
 
-    ai_worker._chat_request(type_config, "describe it", ["img1", "img2"], 30)
+    llm.chat_request(type_config, "describe it", ["img1", "img2"], 30)
 
     content = captured["json"]["messages"][0]["content"]
     assert len(content) == 2  # text + exactly one image block
     assert content[1]["image_url"]["url"] == "data:image/jpeg;base64,img1"
-    assert ai_worker._warned_llama_proxy_multi_image is True
+    assert llm._warned_llama_proxy_multi_image is True
 
 
 def test_chat_request_llama_proxy_single_image_never_warns(monkeypatch):
     monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
-    monkeypatch.setattr(ai_worker, "_warned_llama_proxy_multi_image", False)
+    monkeypatch.setattr(llm, "_warned_llama_proxy_multi_image", False)
     monkeypatch.setattr(
-        ai_worker.requests, "post",
+        llm.requests, "post",
         lambda url, **k: _Resp(_chat_response("x")),
     )
     type_config = {"chat_path": "/vehicle-slot/v1/chat/completions"}
-    ai_worker._chat_request(type_config, "describe it", ["img1"], 30)
-    assert ai_worker._warned_llama_proxy_multi_image is False
+    llm.chat_request(type_config, "describe it", ["img1"], 30)
+    assert llm._warned_llama_proxy_multi_image is False
 
 
 # ---- load_profile ----
@@ -303,7 +304,7 @@ def test_process_claimed_event_success(monkeypatch):
         calls.append(url)
         return responses.pop(0)
 
-    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
 
     inserted = []
     monkeypatch.setattr(db, "complete_sighting", lambda *a, **k: inserted.append(a) or 1)
@@ -338,7 +339,7 @@ def test_process_claimed_event_uses_profile_timeout(monkeypatch):
             return _Resp(_chat_response("black sedan"))
         return _Resp(_embed_response([0.1]))
 
-    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
     monkeypatch.setattr(db, "complete_sighting", lambda *a, **k: 1)
 
     row = {"id": 10, "objects": "car", "crop_image_base64": "x", "sub_label": None, "det_id": "d5"}
@@ -360,7 +361,7 @@ def test_process_claimed_event_falls_back_to_default_timeout_when_unset(monkeypa
             return _Resp(_chat_response("white van"))
         return _Resp(_embed_response([0.1]))
 
-    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
     monkeypatch.setattr(db, "complete_sighting", lambda *a, **k: 1)
 
     row = {"id": 11, "objects": "car", "crop_image_base64": "x", "sub_label": None, "det_id": "d6"}
@@ -371,7 +372,7 @@ def test_process_claimed_event_falls_back_to_default_timeout_when_unset(monkeypa
 
 def test_process_claimed_event_unmapped_type_is_skipped(monkeypatch):
     calls = []
-    monkeypatch.setattr(ai_worker.requests, "post", lambda *a, **k: calls.append((a, k)))
+    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: calls.append((a, k)))
     row = {"id": 6, "objects": "dog", "crop_image_base64": "x", "det_id": "d2"}
     ai_worker.process_claimed_event(row, PROFILE)
     assert not calls
@@ -384,7 +385,7 @@ def test_process_claimed_event_chat_failure_routes_to_fail_ai_event(monkeypatch)
     def fake_post(*a, **k):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
     failed = []
     monkeypatch.setattr(db, "fail_ai_event", lambda *a, **k: failed.append((a, k)))
     inserted = []
@@ -405,7 +406,7 @@ def test_process_claimed_event_embedding_failure_still_inserts_sighting(monkeypa
             return _Resp(_chat_response("green coupe"))
         raise RuntimeError("embedding backend down")
 
-    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
     inserted = []
     monkeypatch.setattr(db, "complete_sighting", lambda *a, **k: inserted.append(a) or 1)
     failed = []
@@ -431,7 +432,7 @@ def test_process_claimed_event_routes_to_anthropic_provider(monkeypatch):
             return _Resp({"content": [{"type": "text", "text": "silver hatchback"}]})
         return _Resp(_embed_response([0.1, 0.2]))
 
-    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
     inserted = []
     monkeypatch.setattr(db, "complete_sighting", lambda *a, **k: inserted.append(a) or 1)
     failed = []
@@ -472,8 +473,8 @@ def test_embed_request_uses_openai_when_embedding_provider_is_openai(monkeypatch
         captured.update(url=url, json=json, headers=headers)
         return _Resp(_embed_response([0.1, 0.2]))
 
-    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
-    ai_worker._embed_request("a red truck", 30)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    llm._embed_request("a red truck", 30)
 
     assert captured["url"] == "https://api.openai.com/v1/embeddings"
     assert captured["json"] == {"model": "text-embedding-3-small", "input": "a red truck"}
@@ -491,8 +492,8 @@ def test_embed_request_sends_llama_proxy_token_when_set(monkeypatch):
         captured.update(url=url, headers=headers)
         return _Resp(_embed_response([0.1, 0.2]))
 
-    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
-    ai_worker._embed_request("a red truck", 30)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    llm._embed_request("a red truck", 30)
 
     assert captured["url"] == "http://llama.test/embed-slot/v1/embeddings"
     assert captured["headers"]["Authorization"] == "Bearer shh-secret"
@@ -508,8 +509,8 @@ def test_embed_request_sends_no_auth_header_when_llama_proxy_token_blank(monkeyp
         captured.update(headers=headers)
         return _Resp(_embed_response([0.1, 0.2]))
 
-    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
-    ai_worker._embed_request("a red truck", 30)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    llm._embed_request("a red truck", 30)
 
     assert captured["headers"] == {}
 
@@ -518,29 +519,29 @@ def test_embed_request_sends_no_auth_header_when_llama_proxy_token_blank(monkeyp
 
 def test_embed_query_text_returns_embedding_on_success(monkeypatch):
     vector = [0.1] + [0.0] * (config.EMBEDDING_DIMENSIONS - 1)
-    monkeypatch.setattr(ai_worker.requests, "post", lambda *a, **k: _Resp(_embed_response(vector)))
-    assert ai_worker.embed_query_text("a red truck with a ladder rack") == vector
+    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: _Resp(_embed_response(vector)))
+    assert llm.embed_query_text("a red truck with a ladder rack") == vector
 
 
 def test_embed_query_text_raises_on_empty_query():
     with pytest.raises(ValueError):
-        ai_worker.embed_query_text("")
+        llm.embed_query_text("")
     with pytest.raises(ValueError):
-        ai_worker.embed_query_text("   ")
+        llm.embed_query_text("   ")
 
 
 def test_embed_query_text_raises_on_wrong_dimensions(monkeypatch):
-    monkeypatch.setattr(ai_worker.requests, "post", lambda *a, **k: _Resp(_embed_response([0.1, 0.2])))
+    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: _Resp(_embed_response([0.1, 0.2])))
     with pytest.raises(ValueError):
-        ai_worker.embed_query_text("a red truck")
+        llm.embed_query_text("a red truck")
 
 
 def test_embed_query_text_raises_when_backend_unreachable(monkeypatch):
     def fail(*a, **k):
         raise ConnectionError("no route to host")
-    monkeypatch.setattr(ai_worker.requests, "post", fail)
+    monkeypatch.setattr(llm.requests, "post", fail)
     with pytest.raises(ConnectionError):
-        ai_worker.embed_query_text("a red truck")
+        llm.embed_query_text("a red truck")
 
 
 def test_run_embedding_backfill_requires_llama_proxy_base_url(monkeypatch):
@@ -554,7 +555,7 @@ def test_run_embedding_backfill_requires_llama_proxy_base_url(monkeypatch):
 @pytest.fixture
 def conn_ok():
     try:
-        db.get_conn()
+        db.check_connection()
     except Exception as exc:
         pytest.skip(f"Postgres not reachable for integration test: {exc}")
 
@@ -587,7 +588,7 @@ def test_process_claimed_event_end_to_end_marks_ai_status_done(conn_ok, monkeypa
             return _Resp(_chat_response("silver hatchback"))
         return _Resp(_embed_response([0.1] + [0.0] * (config.EMBEDDING_DIMENSIONS - 1)))
 
-    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
 
     event_id = _insert_event(camera="pytest-ai-worker")
     try:
@@ -611,7 +612,7 @@ def test_process_claimed_event_end_to_end_marks_ai_status_done(conn_ok, monkeypa
 def test_run_embedding_backfill_updates_rows_missing_embedding(conn_ok, monkeypatch):
     monkeypatch.setattr(config, "LLAMA_PROXY_BASE_URL", "http://llama.test")
     monkeypatch.setattr(
-        ai_worker.requests, "post",
+        llm.requests, "post",
         lambda *a, **k: _Resp(_embed_response([0.1] + [0.0] * (config.EMBEDDING_DIMENSIONS - 1))),
     )
 

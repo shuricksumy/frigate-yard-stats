@@ -1,7 +1,7 @@
 """Unit tests for visit_summary_worker.py -- the visit-level text-summary stage. Once every
 raw_event a visit grouped has settled its own ai_status, this sends the visit's already-produced
 sightings.description text to an LLM for one synthesized account of the whole visit. Unit tests
-monkeypatch ai_worker._chat_request/_embed_text and db.* functions, no network or Postgres
+monkeypatch llm.chat_request/embed_text and db.* functions, no network or Postgres
 required -- same style as test_ai_worker.py.
 """
 import os
@@ -14,7 +14,8 @@ os.environ.setdefault("API_KEY", "test-key")
 
 import pytest  # noqa: E402
 
-import ai_worker  # noqa: E402
+import ai_worker  # noqa: F401
+import llm  # noqa: E402
 import config  # noqa: E402
 import db  # noqa: E402
 import visit_summary_worker  # noqa: E402
@@ -61,7 +62,7 @@ def test_process_claimed_visit_skips_when_no_sighting_text(monkeypatch):
     skipped = []
     monkeypatch.setattr(db, "mark_visit_summary_skipped", lambda visit_id: skipped.append(visit_id))
     called = []
-    monkeypatch.setattr(ai_worker, "_chat_request", lambda *a, **k: called.append(a))
+    monkeypatch.setattr(llm, "chat_request", lambda *a, **k: called.append(a))
 
     visit_summary_worker.process_claimed_visit({"id": 7}, VISIT_SUMMARY_CONFIG)
 
@@ -80,8 +81,8 @@ def test_process_claimed_visit_success(monkeypatch):
         captured_chat.update(type_config=type_config, prompt=prompt, images=images, timeout=timeout)
         return _chat_response("A car arrived and parked in the driveway.")
 
-    monkeypatch.setattr(ai_worker, "_chat_request", fake_chat_request)
-    monkeypatch.setattr(ai_worker, "_embed_text", lambda text: [0.1, 0.2])
+    monkeypatch.setattr(llm, "chat_request", fake_chat_request)
+    monkeypatch.setattr(llm, "embed_text", lambda text: [0.1, 0.2])
 
     completed = []
     monkeypatch.setattr(
@@ -112,8 +113,8 @@ def test_process_claimed_visit_uses_own_timeout(monkeypatch):
         captured_timeouts.append(timeout)
         return _chat_response("summary")
 
-    monkeypatch.setattr(ai_worker, "_chat_request", fake_chat_request)
-    monkeypatch.setattr(ai_worker, "_embed_text", lambda text: None)
+    monkeypatch.setattr(llm, "chat_request", fake_chat_request)
+    monkeypatch.setattr(llm, "embed_text", lambda text: None)
     monkeypatch.setattr(db, "complete_visit_summary", lambda *a, **k: 1)
 
     profile_config_with_timeout = {**VISIT_SUMMARY_CONFIG, "timeout_seconds": 42}
@@ -134,8 +135,8 @@ def test_process_claimed_visit_falls_back_to_default_timeout_when_unset(monkeypa
         captured_timeouts.append(timeout)
         return _chat_response("summary")
 
-    monkeypatch.setattr(ai_worker, "_chat_request", fake_chat_request)
-    monkeypatch.setattr(ai_worker, "_embed_text", lambda text: None)
+    monkeypatch.setattr(llm, "chat_request", fake_chat_request)
+    monkeypatch.setattr(llm, "embed_text", lambda text: None)
     monkeypatch.setattr(db, "complete_visit_summary", lambda *a, **k: 1)
 
     visit_summary_worker.process_claimed_visit({"id": 1}, VISIT_SUMMARY_CONFIG)
@@ -153,7 +154,7 @@ def test_process_claimed_visit_chat_failure_routes_to_fail_visit_summary(monkeyp
     def fake_chat_request(*a, **k):
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(ai_worker, "_chat_request", fake_chat_request)
+    monkeypatch.setattr(llm, "chat_request", fake_chat_request)
     failed = []
     monkeypatch.setattr(db, "fail_visit_summary", lambda *a, **k: failed.append((a, k)))
     completed = []
@@ -170,8 +171,8 @@ def test_process_claimed_visit_embedding_failure_still_completes_summary(monkeyp
         db, "get_sightings_for_visit",
         lambda visit_id: [{"object_label": "car", "description": "red sedan"}],
     )
-    monkeypatch.setattr(ai_worker, "_chat_request", lambda *a, **k: _chat_response("summary text"))
-    monkeypatch.setattr(ai_worker, "_embed_text", lambda text: None)
+    monkeypatch.setattr(llm, "chat_request", lambda *a, **k: _chat_response("summary text"))
+    monkeypatch.setattr(llm, "embed_text", lambda text: None)
     completed = []
     monkeypatch.setattr(db, "complete_visit_summary", lambda *a, **k: completed.append(a) or 1)
     failed = []
@@ -197,8 +198,8 @@ def test_process_claimed_visit_routes_to_anthropic_provider(monkeypatch):
             "json": lambda self: {"content": [{"type": "text", "text": "A car arrived and left."}]},
         })()
 
-    monkeypatch.setattr(ai_worker.requests, "post", fake_post)
-    monkeypatch.setattr(ai_worker, "_embed_text", lambda text: None)
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    monkeypatch.setattr(llm, "embed_text", lambda text: None)
     monkeypatch.setattr(
         db, "get_sightings_for_visit",
         lambda visit_id: [{"object_label": "car", "description": "red sedan"}],
@@ -269,7 +270,7 @@ def test_run_once_passes_configured_tuning_knobs(monkeypatch):
 @pytest.fixture
 def conn_ok():
     try:
-        db.get_conn()
+        db.check_connection()
     except Exception as exc:
         pytest.skip(f"Postgres not reachable for integration test: {exc}")
 

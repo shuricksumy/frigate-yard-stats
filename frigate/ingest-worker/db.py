@@ -1,28 +1,116 @@
+import contextlib
 import logging
 import os
 import re
 import threading
+import time
 from datetime import datetime
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.pool
 
 import config
 import profile_config
 
 logger = logging.getLogger(__name__)
 
-_conn = None
-# Every worker thread (mqtt_ingest, crop/video/ai/visit_summary workers, API request threads)
-# shares this one global connection -- there's no pool. A plain single-statement _execute() is
-# safe to interleave (autocommit=True auto-commits and returns to idle immediately), but
-# record_visit/complete_sighting/complete_visit_summary each temporarily flip autocommit off to
-# wrap two statements in one transaction; without serializing access, a second thread's own
-# autocommit flip (or even a plain _execute) can land while the connection is still mid-transaction
-# from a different thread, which either raises "set_session cannot be used inside a transaction" or,
-# worse, silently folds an unrelated query into the wrong transaction. This lock makes every use of
-# the shared connection mutually exclusive.
-_conn_lock = threading.Lock()
+# One pooled connection PER THREAD-IN-FLIGHT, rather than one global connection shared by all of
+# them.
+#
+# History: this used to be a single module-level connection guarded by a global lock. The lock was
+# added to fix a real production bug -- record_visit/complete_sighting/complete_visit_summary each
+# temporarily flip autocommit off to wrap several statements in one transaction, and with a shared
+# connection a second thread's own flip could land mid-transaction, raising "set_session cannot be
+# used inside a transaction" (or, worse, silently folding an unrelated statement into someone
+# else's transaction). The lock closed that hole but made every database call in the process
+# mutually exclusive: a single ~350ms semantic search (measured in production) blocked MQTT
+# ingestion, all five poll loops, and every other HTTP request for its whole duration.
+#
+# A pool fixes both properties at once and is strictly better than the lock: each caller gets its
+# own connection, so there is no shared transaction state to corrupt (the original bug becomes
+# structurally impossible rather than merely guarded against), and independent work runs genuinely
+# concurrently up to POSTGRES_POOL_MAX.
+_pool = None
+# Guards pool CREATION only -- never held while a query runs, unlike the connection lock it
+# replaced. Once the pool exists this is uncontended.
+_pool_init_lock = threading.Lock()
+
+
+def _get_pool() -> psycopg2.pool.ThreadedConnectionPool:
+    global _pool
+    if _pool is None:
+        with _pool_init_lock:
+            # Re-check inside the lock -- two threads can both see None above and queue here.
+            if _pool is None:
+                _pool = psycopg2.pool.ThreadedConnectionPool(
+                    config.POSTGRES_POOL_MIN,
+                    config.POSTGRES_POOL_MAX,
+                    host=config.POSTGRES_HOST,
+                    port=config.POSTGRES_PORT,
+                    dbname=config.POSTGRES_DB,
+                    user=config.POSTGRES_USER,
+                    password=config.POSTGRES_PASSWORD,
+                )
+    return _pool
+
+
+@contextlib.contextmanager
+def _checkout_connection(autocommit: bool = True):
+    """Borrow a pooled connection for the duration of the block, then hand it back.
+
+    autocommit is set explicitly on every checkout rather than once at connect time, so a
+    connection previously used for a transaction (autocommit=False) can never leak that setting
+    into an unrelated caller that expects the plain autocommit behaviour.
+
+    psycopg2's ThreadedConnectionPool raises PoolError immediately when every connection is busy,
+    which would turn a brief burst (a web-UI grid page requests ~24 thumbnails at once) into hard
+    failures. Waiting briefly instead preserves the old lock's "queue until free" behaviour for
+    that case, while still allowing real concurrency up to POSTGRES_POOL_MAX.
+    """
+    pool = _get_pool()
+    deadline = time.monotonic() + config.POSTGRES_POOL_WAIT_SECONDS
+    while True:
+        try:
+            conn = pool.getconn()
+            break
+        except psycopg2.pool.PoolError:
+            if time.monotonic() >= deadline:
+                logger.error(
+                    "Postgres connection pool exhausted (max=%s) after waiting %ss",
+                    config.POSTGRES_POOL_MAX, config.POSTGRES_POOL_WAIT_SECONDS,
+                )
+                raise
+            time.sleep(0.05)
+    try:
+        conn.autocommit = autocommit
+        yield conn
+    finally:
+        # putconn rolls back any still-open transaction before returning the connection to the
+        # pool, so an exception mid-transaction can't hand a poisoned connection to the next
+        # caller.
+        pool.putconn(conn)
+
+
+def check_connection() -> None:
+    """Raise if Postgres isn't reachable. Used by main.py/tests as a readiness probe.
+
+    Replaces the old get_conn(), which returned the single shared connection for callers to use
+    directly -- with a pool there is no such long-lived connection to hand out, and returning a
+    pooled one would mean handing back an object that has already been released.
+    """
+    with _checkout_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute("SELECT 1")
+
+
+def close_pool() -> None:
+    """Close every pooled connection. Only used by tests that need a clean slate."""
+    global _pool
+    with _pool_init_lock:
+        if _pool is not None:
+            _pool.closeall()
+            _pool = None
 
 
 def _vector_literal(embedding: list[float] | None) -> str | None:
@@ -40,24 +128,8 @@ def _vector_literal(embedding: list[float] | None) -> str | None:
     return "[" + ",".join(repr(float(x)) for x in embedding) + "]"
 
 
-def get_conn():
-    global _conn
-    with _conn_lock:
-        if _conn is None or _conn.closed:
-            _conn = psycopg2.connect(
-                host=config.POSTGRES_HOST,
-                port=config.POSTGRES_PORT,
-                dbname=config.POSTGRES_DB,
-                user=config.POSTGRES_USER,
-                password=config.POSTGRES_PASSWORD,
-            )
-            _conn.autocommit = True
-    return _conn
-
-
 def _execute(query, params=None, fetch=False):
-    conn = get_conn()
-    with _conn_lock:
+    with _checkout_connection() as conn:
         with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
             cur.execute(query, params)
             if fetch:
@@ -120,9 +192,9 @@ def ensure_schema() -> None:
     # this file -- only affects a brand-new column, see _ensure_embedding_dimension() for widening
     # an existing one.
     schema_sql = schema_sql.replace("__EMBEDDING_DIMENSIONS__", str(config.EMBEDDING_DIMENSIONS))
-    conn = get_conn()
-    with conn.cursor() as cur:
-        cur.execute(schema_sql)
+    with _checkout_connection() as conn:
+        with conn.cursor() as cur:
+            cur.execute(schema_sql)
     _ensure_embedding_dimension()
     logger.info("Schema ensured from %s", config.SCHEMA_SQL_PATH)
 
@@ -472,6 +544,37 @@ def get_raw_event(event_id: int) -> dict | None:
     return rows[0] if rows else None
 
 
+def get_raw_event_media(event_id: int) -> dict | None:
+    # Just the three columns the media endpoints (GET /events/{id}/thumbnail, /image, and
+    # /media/video/{id}) actually read, instead of get_raw_event's SELECT *.
+    #
+    # Worth its own function because of crop_image_base64: that column holds the full AI-facing
+    # JPEG as base64 (~100-200KB at the default 1280px cap), and SELECT * pulls all of it over the
+    # wire on every call. A web-UI grid page requests ~24 thumbnails at once, so the old path moved
+    # several megabytes out of Postgres per page render purely to hand most of it straight to the
+    # garbage collector -- the thumbnail endpoint only downscales it to 240px, and the video
+    # endpoint never looks at it at all.
+    #
+    # The thumbnail/image endpoints still need crop_image_base64 itself (it IS the image source
+    # when no file exists on disk), so this can't avoid fetching it in every case -- but it does
+    # avoid fetching it for the video endpoint, and avoids dragging every other column along in all
+    # three.
+    rows = _execute(
+        "SELECT image_path, crop_image_base64, video_path FROM yard_stats.raw_events WHERE id = %s",
+        (event_id,), fetch=True,
+    )
+    return rows[0] if rows else None
+
+
+def get_raw_event_video_path(event_id: int) -> str | None:
+    # Narrower still -- GET /media/video/{id} only needs the path, never the image columns.
+    rows = _execute(
+        "SELECT video_path FROM yard_stats.raw_events WHERE id = %s",
+        (event_id,), fetch=True,
+    )
+    return rows[0]["video_path"] if rows else None
+
+
 def set_event_image_path(event_id: int, image_path: str) -> None:
     _execute(
         "UPDATE yard_stats.raw_events SET image_path = %s WHERE id = %s",
@@ -604,9 +707,9 @@ def record_visit(review: dict, profile: dict | None = None) -> int | None:
     # insert_raw_event's initial_video_status: a cheap flag set once at insert, so the visit video
     # queue's WHERE clause never even considers these rows while neither is wanted.
     initial_video_status = "new" if profile_config.video_alerts_needed(profile, representative_label) else "skipped"
-    conn = get_conn()
-    with _conn_lock:
-        conn.autocommit = False
+    # Own pooled connection for the whole transaction -- no other thread can see or touch it, so
+    # the autocommit flip that used to need a global lock is now inherently thread-safe.
+    with _checkout_connection(autocommit=False) as conn:
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
@@ -634,8 +737,6 @@ def record_visit(review: dict, profile: dict | None = None) -> int | None:
         except Exception:
             conn.rollback()
             raise
-        finally:
-            conn.autocommit = True
 
 
 def get_representative_event_for_visit(visit_id: int) -> dict | None:
@@ -880,9 +981,8 @@ def fail_visit_summary(visit_id: int, max_attempts: int) -> dict:
 def complete_visit_summary(visit_id: int, summary: str | None, embedding: list[float] | None = None) -> int:
     # Same insert-plus-mark-done-in-one-transaction shape as complete_sighting, just against
     # visit_summaries/visits.summary_status instead of sightings/raw_events.ai_status.
-    conn = get_conn()
-    with _conn_lock:
-        conn.autocommit = False
+    # Own pooled connection for the whole transaction -- see record_visit's note.
+    with _checkout_connection(autocommit=False) as conn:
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
@@ -903,8 +1003,6 @@ def complete_visit_summary(visit_id: int, summary: str | None, embedding: list[f
         except Exception:
             conn.rollback()
             raise
-        finally:
-            conn.autocommit = True
 
 
 def get_visit_summary(visit_id: int) -> dict | None:
@@ -1009,8 +1107,12 @@ def mark_crop_done(event_id: int, crop_image_base64: str, sub_label: str | None,
     )
 
 
-def mark_crop_failed(event_id: int) -> None:
+def mark_crop_failed(event_id: int, max_attempts: int | None = None) -> None:
     # Same retry-or-fail-with-cap logic as n8n's "Handle Failure (Retry or Fail)" node.
+    # max_attempts is a parameter for consistency with every sibling
+    # (mark_video_retry_or_failed/mark_visit_video_retry_or_failed/fail_ai_event/
+    # fail_visit_summary), which all take theirs from the caller. Defaults to config.MAX_ATTEMPTS
+    # when omitted, so the existing crop_worker call site keeps working unchanged.
     _execute(
         """
         UPDATE yard_stats.raw_events
@@ -1019,7 +1121,7 @@ def mark_crop_failed(event_id: int) -> None:
             crop_status_changed_at = now()
         WHERE id = %s
         """,
-        (config.MAX_ATTEMPTS, event_id),
+        (config.MAX_ATTEMPTS if max_attempts is None else max_attempts, event_id),
     )
 
 
@@ -2047,9 +2149,8 @@ def complete_sighting(
     # two left the row stuck 'processing' until the next reap. One universal function now --
     # object_label is just data on the row (whatever raw_events.objects said), not a branch;
     # there's no vehicle-vs-person split anywhere in this function or the table it writes to.
-    conn = get_conn()
-    with _conn_lock:
-        conn.autocommit = False
+    # Own pooled connection for the whole transaction -- see record_visit's note.
+    with _checkout_connection(autocommit=False) as conn:
         try:
             with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
                 cur.execute(
@@ -2089,8 +2190,6 @@ def complete_sighting(
         except Exception:
             conn.rollback()
             raise
-        finally:
-            conn.autocommit = True
 
 
 def semantic_search_sightings(

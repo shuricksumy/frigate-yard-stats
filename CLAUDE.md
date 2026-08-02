@@ -209,6 +209,20 @@ are actually enforced.
   Code-node gymnastics. Self-contained: builds from its own folder, bakes `schema.sql` and
   `static/` into the image, needs only Postgres + MQTT + Frigate's HTTP API to run (plus Telegram's
   API if `TELEGRAM_EVENTS_MODE` is anything other than `none`).
+  Two small shared modules sit under the stages rather than beside them:
+  **`poll_loop.py`** owns the run-forever skeleton every background stage's thread runs on (log the
+  stage's settings once, then loop calling its `run_once`, swallowing and logging any exception so
+  one bad iteration can never kill the thread, then sleep) -- that skeleton was previously copied
+  byte-for-byte into all five workers. It is deliberately *only* that; each stage's `run_once` stays
+  its own, since the claim function, capacity source and per-row work genuinely differ (see the
+  "Superseded design, reverted entirely" note for what over-generalizing a queue stage cost here
+  before). **`llm.py`** owns LLM transport -- the three-provider chat dispatch
+  (`llama_proxy`/`openai`/`anthropic`), response-text extraction, and the embedding call -- split
+  out of `ai_worker.py`, which had grown to own both the AI *stage* and every detail of *talking to
+  a model*. `visit_summary_worker.py` (text-only summary call) and `api.py` (`POST /search`'s
+  query embed) both needed the latter without the former and were reaching into `ai_worker`'s
+  underscore-private functions to get it; they now import `llm` directly. `ai_worker.py` keeps only
+  stage logic (claim, analyze, write the sighting back, embedding backfill).
 - **n8n** owns everything AI-shaped: deciding when to claim work and calling the VLM(s), the daily
   report, and the Q&A workflow. Its processors never touch Frigate's API, crop or video anything
   themselves, and never call Telegram — they only ever read `crop_image_base64` that's already
@@ -646,16 +660,54 @@ rename entirely (none of these three functions' transaction logic was touched by
 likely always been theoretically possible; it only started actually colliding once
 `visit_summary_worker` added a third concurrent caller of this shape.
 
-Fixed with a module-level `threading.Lock` (`db._conn_lock`) that now wraps every point of contact
-with the shared connection: `get_conn()`'s own lazy-connect, `_execute()`'s single-statement path,
-and the full body of `record_visit`/`complete_sighting`/`complete_visit_summary` (from the
-`autocommit = False` flip through `commit()`/`rollback()` and the `autocommit = True` restore).
-This fully serializes all access to the one shared connection -- no two of these operations, from
-any thread, can ever run concurrently again, closing both the loud error and the silent
-cross-transaction-corruption risk it implied. Verified with a dedicated regression test
-(`tests/test_db_connection_lock.py`, no real Postgres needed -- a fake connection object with a
-deliberately unprotected check-sleep-set-sleep-clear pattern reliably catches a real overlap)
-confirmed to fail against the pre-fix code and pass against the fix.
+Fixed *first* with a module-level `threading.Lock` (`db._conn_lock`) wrapping every point of contact
+with the shared connection. That was correct but blunt -- see the next section for what replaced it.
+
+#### Superseded by a connection pool -- the lock fixed correctness but serialized the whole process
+
+The lock above closed the bug, but made **every** database call in the process mutually exclusive:
+`_execute` held it for the full duration of each query, so a single semantic search (measured at
+**357 ms** against real production data) blocked MQTT ingestion, all five poll loops, and every
+other in-flight HTTP request for its whole duration. FastAPI runs this project's `def` endpoints in
+a threadpool, so a web-UI grid page requesting ~24 thumbnails at once queued them all behind one
+another too.
+
+Replaced with a **`psycopg2.pool.ThreadedConnectionPool`** (`db._get_pool`/`db._checkout_connection`),
+which fixes both properties at once and is strictly better than the lock:
+
+- **The original bug becomes structurally impossible rather than merely guarded against.** Each
+  caller checks out its *own* connection, so there is no shared transaction state for a concurrent
+  `autocommit` flip to corrupt. `record_visit`/`complete_sighting`/`complete_visit_summary` keep
+  their transactions verbatim, just on a private connection, and no longer take any lock at all.
+- **Independent work runs genuinely concurrently.** Measured directly: 10 concurrent 0.3s queries
+  took **0.43 s** through the pool versus the ~3.0 s the lock would have forced.
+
+`_checkout_connection(autocommit=...)` is the one way to reach a connection. It sets `autocommit`
+explicitly on *every* checkout rather than once at connect time, so a connection previously used
+for a transaction can never leak `autocommit=False` into an unrelated caller that assumes the plain
+behavior (a leak that would silently run that caller inside a transaction nothing ever commits).
+psycopg2's own `putconn` rolls back any still-open transaction on release, so an exception
+mid-transaction can't hand a poisoned connection to the next caller either.
+
+`psycopg2`'s pool raises `PoolError` immediately when every connection is busy, which would turn a
+normal thumbnail burst into hard failures -- so `_checkout_connection` waits and retries up to
+`POSTGRES_POOL_WAIT_SECONDS` first, preserving the old lock's "queue until free" behavior for that
+case while still allowing real concurrency up to `POSTGRES_POOL_MAX`. Sizing lives in `.env`
+(`POSTGRES_POOL_MIN`/`MAX`/`WAIT_SECONDS`, default 1/20/10s) rather than `profiles.yaml`'s
+`defaults:` like the other tuning knobs, for the same ordering reason `EMBEDDING_DIMENSIONS` is an
+env var: the pool is created during `db.ensure_schema()`, which `main.py` runs *before*
+`config.apply_profile_defaults()`, so a `profiles.yaml` value would be read too late to matter.
+
+`db.get_conn()` is gone entirely, replaced by `db.check_connection()` (a readiness probe that
+borrows and immediately releases). With a pool there is no long-lived connection to hand out, and a
+function returning a connection that has already been released back to the pool would be a
+footgun. Every call site was a reachability check that ignored the return value anyway.
+
+`tests/test_db_connection_lock.py` was replaced by `tests/test_db_connection_pool.py`, which asserts
+the invariant that actually matters now (no two concurrent callers ever hold the same connection)
+plus the properties the pool needs for that to be worth anything: connections are always returned
+even when a query raises mid-transaction, `autocommit` never leaks between callers, and a burst
+larger than the pool waits rather than failing.
 
 ### Alert AI stage (removed) -- history of a feature that was built, fixed twice, then dropped
 

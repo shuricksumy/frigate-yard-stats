@@ -47,7 +47,7 @@ def _cleanup(*ids):
 @pytest.fixture
 def conn_ok():
     try:
-        db.get_conn()
+        db.check_connection()
     except Exception as exc:
         pytest.skip(f"Postgres not reachable for integration test: {exc}")
 

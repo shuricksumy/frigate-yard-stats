@@ -1,9 +1,10 @@
 import logging
-import time
 
 import ai_worker
 import config
 import db
+import llm
+import poll_loop
 
 logger = logging.getLogger(__name__)
 
@@ -29,9 +30,9 @@ def process_claimed_visit(row: dict, visit_summary_config: dict) -> None:
     timeout = visit_summary_config.get("timeout_seconds", config.AI_STAGE_DEFAULT_TIMEOUT_SECONDS)
     try:
         prompt = f"{visit_summary_config['prompt']}\n\n{text}"
-        response = ai_worker._chat_request(visit_summary_config, prompt, [], timeout)
-        summary = ai_worker._extract_response_text(response, visit_summary_config)
-        embedding = ai_worker._embed_text(summary)
+        response = llm.chat_request(visit_summary_config, prompt, [], timeout)
+        summary = llm.extract_response_text(response, visit_summary_config)
+        embedding = llm.embed_text(summary)
         db.complete_visit_summary(visit_id, summary, embedding)
         logger.info("Visit summary done for visit id=%s", visit_id)
     except Exception:
@@ -59,19 +60,16 @@ def run_forever(profile: dict | None = None) -> None:
         profile = ai_worker.load_profile(config.AI_STAGE_PROFILE_PATH)
     visit_summary_config = profile.get("visit_summary") or {}
     poll_interval = visit_summary_config.get("poll_interval_seconds", config.AI_STAGE_POLL_INTERVAL_SECONDS)
-    logger.info(
-        "visit_summary_worker starting: enabled=%s parallel_limit=%s stale_minutes=%s max_attempts=%s "
-        "poll_interval=%ss provider=%s",
-        visit_summary_config.get("enabled", False),
-        visit_summary_config.get("parallel_limit", config.AI_STAGE_PARALLEL_LIMIT),
-        visit_summary_config.get("stale_minutes", config.AI_STAGE_STALE_MINUTES),
-        visit_summary_config.get("max_attempts", config.AI_STAGE_MAX_ATTEMPTS),
+    poll_loop.run_forever(
+        "visit_summary_worker",
+        lambda: run_once(profile),
         poll_interval,
-        visit_summary_config.get("provider", "llama_proxy"),
+        {
+            "enabled": visit_summary_config.get("enabled", False),
+            "parallel_limit": visit_summary_config.get("parallel_limit", config.AI_STAGE_PARALLEL_LIMIT),
+            "stale_minutes": visit_summary_config.get("stale_minutes", config.AI_STAGE_STALE_MINUTES),
+            "max_attempts": visit_summary_config.get("max_attempts", config.AI_STAGE_MAX_ATTEMPTS),
+            "poll_interval": f"{poll_interval}s",
+            "provider": visit_summary_config.get("provider", "llama_proxy"),
+        },
     )
-    while True:
-        try:
-            run_once(profile)
-        except Exception:
-            logger.exception("visit_summary_worker poll iteration failed")
-        time.sleep(poll_interval)

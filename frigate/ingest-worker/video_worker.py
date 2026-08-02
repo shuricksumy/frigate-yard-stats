@@ -3,6 +3,7 @@ import time
 
 import config
 import db
+import poll_loop
 import profile_config
 import telegram
 import video
@@ -87,8 +88,10 @@ def run_once(profile: dict | None = None) -> None:
     # Eligible if EITHER storage is on OR Telegram wants a video for that type (send-without-
     # store) -- see profile_config.py's "send-to-Telegram-without-storing" section.
     object_types, exclude_object_types = profile_config.video_events_claim_filter(profile)
-    if object_types == []:
-        # Base disabled, nothing opted in per-type -- nothing for this stage to do at all.
+    # An EMPTY list means "base disabled and nothing opted in per-type" -- nothing for this stage
+    # to do at all. None means "no filter", i.e. every type is eligible, so the two must not be
+    # conflated (a plain `if not object_types` would wrongly skip the unfiltered case).
+    if object_types is not None and not object_types:
         return
     for row in db.claim_video_batch(
         available_capacity, config.VIDEO_MAX_AGE_HOURS,
@@ -98,16 +101,21 @@ def run_once(profile: dict | None = None) -> None:
 
 
 def run_forever(profile: dict | None = None) -> None:
-    logger.info(
-        "video_worker starting: parallel_limit=%s initial_wait=%ss min_valid_bytes=%s "
-        "max_attempts=%s retry_wait=%ss max_age_hours=%s poll_interval=%ss",
-        config.VIDEO_PARALLEL_LIMIT, config.VIDEO_INITIAL_WAIT_SECONDS, config.VIDEO_MIN_VALID_BYTES,
-        config.VIDEO_MAX_ATTEMPTS, config.VIDEO_RETRY_WAIT_SECONDS, config.VIDEO_MAX_AGE_HOURS,
+    poll_loop.run_forever(
+        "video_worker",
+        lambda: run_once(profile),
         config.POLL_INTERVAL_SECONDS,
+        _startup_settings(),
     )
-    while True:
-        try:
-            run_once(profile)
-        except Exception:
-            logger.exception("video_worker poll iteration failed")
-        time.sleep(config.POLL_INTERVAL_SECONDS)
+
+
+def _startup_settings() -> dict:
+    return {
+        "parallel_limit": config.VIDEO_PARALLEL_LIMIT,
+        "initial_wait": f"{config.VIDEO_INITIAL_WAIT_SECONDS}s",
+        "min_valid_bytes": config.VIDEO_MIN_VALID_BYTES,
+        "max_attempts": config.VIDEO_MAX_ATTEMPTS,
+        "retry_wait": f"{config.VIDEO_RETRY_WAIT_SECONDS}s",
+        "max_age_hours": config.VIDEO_MAX_AGE_HOURS,
+        "poll_interval": f"{config.POLL_INTERVAL_SECONDS}s",
+    }

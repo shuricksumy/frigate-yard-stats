@@ -12,6 +12,7 @@ import config
 import crop
 import crop_worker
 import db
+import llm
 import mqtt_ingest
 import profile_config
 import report
@@ -277,7 +278,7 @@ def get_event_thumbnail(event_id: int):
     frame pulled from the stored video (belt and suspenders -- in practice a video always implies a
     crop image already exists). Accepts X-API-Key header or ?api_key= query param since this is
     loaded directly by an <img> tag."""
-    row = db.get_raw_event(event_id)
+    row = db.get_raw_event_media(event_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"raw_event {event_id} not found")
     if row.get("image_path") and os.path.isfile(row["image_path"]):
@@ -301,7 +302,7 @@ def get_event_image(event_id: int):
     copy stored in Postgres (crop_image_base64), then a frame pulled from the stored video.
     Accepts X-API-Key header or ?api_key= query param since this is loaded directly by an <img>
     tag."""
-    row = db.get_raw_event(event_id)
+    row = db.get_raw_event_media(event_id)
     if row is None:
         raise HTTPException(status_code=404, detail=f"raw_event {event_id} not found")
     if row.get("image_path") and os.path.isfile(row["image_path"]):
@@ -365,10 +366,9 @@ def get_event_video(event_id: int):
     so the browser's video scrubber works) -- never queried through Postgres, video_path only
     ever points at a file under VIDEO_STORAGE_PATH. Accepts X-API-Key header or ?api_key= query
     param since this is loaded directly by a <video> tag."""
-    row = db.get_raw_event(event_id)
-    if row is None or not row.get("video_path"):
+    video_path = db.get_raw_event_video_path(event_id)
+    if not video_path:
         raise HTTPException(status_code=404, detail=f"No video for raw_event {event_id}")
-    video_path = row["video_path"]
     if not os.path.isfile(video_path):
         raise HTTPException(status_code=404, detail=f"Video file missing on disk for raw_event {event_id}")
     return FileResponse(video_path, media_type="video/mp4", filename=os.path.basename(video_path))
@@ -497,7 +497,7 @@ def text_search(search: schemas.TextSearchRequest):
     backend directly, so this is the one endpoint that does the embed-then-search round trip in a
     single call for it."""
     try:
-        embedding = ai_worker.embed_query_text(search.query)
+        embedding = llm.embed_query_text(search.query)
     except Exception as exc:
         raise HTTPException(
             status_code=502, detail=f"Embedding backend unavailable or misconfigured: {exc}",
