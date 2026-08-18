@@ -5,6 +5,13 @@ no build step (plain HTML/CSS + [Alpine.js](https://alpinejs.dev), vendored loca
 loads from a CDN). It reads the exact same API n8n and everything else uses; it isn't a special
 privileged view into the database.
 
+It also works unchanged behind a reverse proxy that serves it under a sub-path — including as a
+**Home Assistant sidebar panel**, via the `frigate_yard_stats_proxy` add-on in
+[home-assistant-apps](https://github.com/shuricksumy/home-assistant-apps). Nothing to configure on
+either side; see
+[`configuration.md`](configuration.md#behind-a-reverse-proxy--sub-path-home-assistant-ingress)
+for why.
+
 ## Logging in
 
 The first time you open `/ui`, it asks for your API key (the same `API_KEY` value from `.env`).

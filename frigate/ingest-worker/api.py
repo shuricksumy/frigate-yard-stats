@@ -3,7 +3,7 @@ import os
 from datetime import datetime, timedelta, timezone
 
 from fastapi import Depends, FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 import admin
@@ -669,6 +669,29 @@ def admin_ui():
     /ui/index.html -- the page itself carries no data, every fetch() it makes still sends
     X-API-Key and is protected server-side same as any other admin endpoint."""
     return FileResponse(os.path.join(_STATIC_DIR, "admin.html"))
+
+
+@app.get("/ui", include_in_schema=False)
+def ui_root_redirect():
+    """Redirect /ui -> /ui/ ourselves, with a RELATIVE Location, instead of letting the
+    StaticFiles mount below do it.
+
+    Two reasons the mount's own redirect is wrong behind a reverse proxy:
+
+    1. It emits an ABSOLUTE Location built from the request as the backend sees it (confirmed:
+       `Location: http://127.0.0.1:8899/ui/`). Served through a proxy that does no response
+       rewriting -- which the Home Assistant add-on deliberately doesn't -- that sends the
+       browser to the backend's own internal address instead of back through the proxy.
+    2. The trailing slash is load-bearing for the UI itself. static/app.js derives its API root
+       as `new URL("..", document.baseURI)`, so at `/api/hassio_ingress/TOK/ui/` it correctly
+       resolves to `/api/hassio_ingress/TOK`, but at `/api/hassio_ingress/TOK/ui` (no slash) it
+       resolves one level too high and silently drops the token from every API call.
+
+    A relative Location ("ui/") is resolved by the browser against whatever URL it actually
+    requested, so it lands on `<whatever-prefix>/ui/` in every deployment with no knowledge of
+    the prefix on our side. Registered before the mount so it isn't shadowed by it.
+    """
+    return RedirectResponse(url="ui/", status_code=307)
 
 
 if os.path.isdir(_STATIC_DIR):

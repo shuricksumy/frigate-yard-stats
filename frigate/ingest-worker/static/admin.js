@@ -3,6 +3,21 @@
 // vanilla JS + Alpine.js (vendored locally in vendor/alpine.min.js). Shares the api_key cookie
 // with the main report UI (app.js) -- logging in on either page logs you in on both.
 
+
+// This page is served from /ui/admin, while the API it calls lives one level above it. Deriving
+// the API root from the page's own location rather than hardcoding a leading "/" keeps every call
+// correct both at the domain root and behind a reverse proxy serving this under a sub-path (Home
+// Assistant ingress, for one) -- a leading-"/" URL would resolve against the ORIGIN and escape the
+// sub-path entirely. Same derivation as app.js; see its comment for the resolution table. Relies
+// on the page keeping its trailing slash, which api.py's /ui redirect preserves.
+const API_BASE = new URL("..", document.baseURI).href.replace(/\/$/, "");
+
+// Every API URL in this file goes through here -- _get/_post below apply it for you, so their
+// callers pass a bare "/admin/overview"-style path and never build a prefix themselves.
+function apiUrl(path) {
+  return `${API_BASE}${path}`;
+}
+
 const API_KEY_COOKIE = "api_key";
 const COOKIE_MAX_AGE_SECONDS = 10 * 365 * 24 * 60 * 60; // ~10 years -- "never" isn't representable
 
@@ -108,7 +123,7 @@ function adminApp() {
     // this is cosmetic, not worth alarming over.
     async fetchVersionInfo() {
       try {
-        const resp = await fetch("/status");
+        const resp = await fetch(apiUrl("/status"));
         if (!resp.ok) return;
         const data = await resp.json();
         this.versionInfo = {
@@ -154,7 +169,7 @@ function adminApp() {
 
     async _testApiKey(key) {
       try {
-        const resp = await fetch("/admin/overview", { headers: { "X-API-Key": key } });
+        const resp = await fetch(apiUrl("/admin/overview"), { headers: { "X-API-Key": key } });
         return resp.ok;
       } catch {
         return false;
@@ -166,7 +181,7 @@ function adminApp() {
     },
 
     async _get(path) {
-      const resp = await fetch(path, { headers: this._headers() });
+      const resp = await fetch(apiUrl(path), { headers: this._headers() });
       if (resp.status === 401) {
         this.logout();
         throw new Error("API key rejected");
@@ -176,7 +191,7 @@ function adminApp() {
     },
 
     async _post(path) {
-      const resp = await fetch(path, { method: "POST", headers: this._headers() });
+      const resp = await fetch(apiUrl(path), { method: "POST", headers: this._headers() });
       if (resp.status === 401) {
         this.logout();
         throw new Error("API key rejected");
@@ -368,7 +383,7 @@ function adminApp() {
       this.backfilling = true;
       this.backfillResult = "";
       try {
-        const r = await fetch("/embeddings/backfill?confirm=true&limit=200", {
+        const r = await fetch(apiUrl("/embeddings/backfill?confirm=true&limit=200"), {
           method: "POST", headers: this._headers(),
         });
         const d = await r.json();
@@ -399,7 +414,7 @@ function adminApp() {
       const key = table + stage;
       this.requeuing = key;
       try {
-        const r = await fetch(`/admin/queue/requeue-failed?table=${table}&stage=${stage}`, {
+        const r = await fetch(apiUrl(`/admin/queue/requeue-failed?table=${table}&stage=${stage}`), {
           method: "POST", headers: this._headers(),
         });
         const d = await r.json();
@@ -420,7 +435,7 @@ function adminApp() {
       const key = table + stage;
       this.skippingFailed = key;
       try {
-        const r = await fetch(`/admin/queue/skip-failed?table=${table}&stage=${stage}&days=${days}`, {
+        const r = await fetch(apiUrl(`/admin/queue/skip-failed?table=${table}&stage=${stage}&days=${days}`), {
           method: "POST", headers: this._headers(),
         });
         const d = await r.json();
@@ -435,7 +450,7 @@ function adminApp() {
 
     _purgeUrl(confirm) {
       const onlyMedia = !this.purgeDeleteAll;
-      let url = `/retention/purge?older_than_days=${this.purgeDays}&confirm=${confirm}&only_media=${onlyMedia}`;
+      let url = apiUrl(`/retention/purge?older_than_days=${this.purgeDays}&confirm=${confirm}&only_media=${onlyMedia}`);
       if (onlyMedia) {
         url += `&delete_video=${this.purgeDeleteVideo}&delete_snapshots=${this.purgeDeleteSnapshots}` +
           `&delete_event_images=${this.purgeDeleteEventImages}`;
@@ -509,7 +524,7 @@ function adminApp() {
       this.generatingReport = true;
       this.reportError = "";
       try {
-        let url = `/reports/generate?source=${this.reportSource}&hours=${this.reportHours}&include_image=${this.reportIncludeImage}`;
+        let url = apiUrl(`/reports/generate?source=${this.reportSource}&hours=${this.reportHours}&include_image=${this.reportIncludeImage}`);
         if (this.reportObjectLabel) url += `&object_label=${encodeURIComponent(this.reportObjectLabel)}`;
         const r = await fetch(url, { headers: this._headers() });
         if (!r.ok) throw new Error(`HTTP ${r.status}`);

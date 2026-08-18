@@ -328,6 +328,40 @@ tracks, so the web UI's Type filter dropdown matches reality. Add a label here (
 added to `frigate.conf`'s `objects.track`) and it appears in the dropdown on next restart, no code
 change needed. See [`web-ui.md`](web-ui.md) for a tour of the UI itself.
 
+### Behind a reverse proxy / sub-path (Home Assistant ingress)
+
+**Nothing to configure.** The UI works both at the domain root (`http://<host>:8080/ui/`) and under
+a generated sub-path, with no base-URL setting and no extra header from the proxy.
+
+It works because the frontend never writes an absolute URL. Every API call is resolved relative to
+the page's own location (`static/app.js`'s `API_BASE`, derived from `document.baseURI`), so it
+follows whatever prefix the page was actually served under:
+
+| Deployment | Page URL | API calls go to |
+| --- | --- | --- |
+| standalone | `http://host:8080/ui/` | `http://host:8080/…` |
+| Home Assistant add-on ingress | `https://ha/api/hassio_ingress/<token>/ui/` | `https://ha/api/hassio_ingress/<token>/…` |
+| `hass_ingress` | `https://ha/api/ingress/yard/ui/` | `https://ha/api/ingress/yard/…` |
+
+A leading-`/` URL would resolve against the *origin* instead and escape the sub-path entirely —
+`/events` would hit Home Assistant itself and 404. `tests/test_static_api_base.py` enforces this:
+it runs the real JS under each of the three `document.baseURI` shapes above and fails on any
+absolute-path URL literal left in `static/*.js`.
+
+Two consequences worth knowing:
+
+- **The trailing slash matters.** `/ui` redirects to `/ui/` with a *relative* `Location` header, so
+  the browser stays inside the proxy's prefix. (Letting `StaticFiles` do that redirect emitted an
+  absolute URL containing the backend's own internal address, which breaks through a proxy that
+  doesn't rewrite response headers — the Home Assistant add-on deliberately doesn't.)
+- **The API key cookie is set with `path=/`.** Under ingress that scopes it to the whole Home
+  Assistant origin rather than just this app's prefix. It works, but if you run another ingress app
+  that also stores an `api_key` cookie, the two would share it.
+
+For Home Assistant specifically, the `frigate_yard_stats_proxy` add-on (in the `home-assistant-apps`
+repo) proxies this service in as a sidebar panel. It does no response rewriting by design — the
+sub-path handling lives here instead, so any reverse proxy works the same way.
+
 ## Semantic search (pgvector)
 
 Requires `postgres-projects` to run the `pgvector/pgvector:pg16` image (already the default in

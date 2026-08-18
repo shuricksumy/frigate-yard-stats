@@ -224,6 +224,12 @@ other (own containers, own Postgres schema — see `CLAUDE.md`), but designed to
   and `frigate/profiles.yaml`.
 - [**llama-service**](https://github.com/shuricksumy/llama-service) — the underlying local LLM
   serving setup this pipeline's VLM/embedding calls ultimately run on.
+- [**home-assistant-apps**](https://github.com/shuricksumy/home-assistant-apps) — Home Assistant
+  add-ons, including `frigate_yard_stats_proxy`, which serves this project's web report UI as a
+  Home Assistant sidebar panel via Ingress. The add-on does no response rewriting: the UI resolves
+  every API call relative to its own location, so it works under Ingress' generated sub-path with
+  no base-URL setting and no extra configuration on either side — see
+  [`docs/configuration.md`](docs/configuration.md#behind-a-reverse-proxy--sub-path-home-assistant-ingress).
 
 ## License
 

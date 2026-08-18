@@ -2,6 +2,23 @@
 // /events/{id}/image, /media/video/{id}. No external requests, no build step -- vanilla JS +
 // Alpine.js (vendored locally in vendor/alpine.min.js).
 
+// This page is served from /ui/, while the API it calls lives one level above it. Deriving the
+// API root from the page's own location rather than hardcoding a leading "/" keeps every call
+// correct both at the domain root and behind a reverse proxy serving this under a sub-path
+// (Home Assistant ingress, for one) -- a leading-"/" URL would resolve against the ORIGIN and
+// escape the sub-path entirely. Needs no server cooperation and no base-URL setting:
+//   standalone   http://host:8080/ui/                    -> http://host:8080
+//   HA ingress   https://ha/api/hassio_ingress/TOK/ui/   -> https://ha/api/hassio_ingress/TOK
+// Note this relies on the page being served WITH its trailing slash, so that ".." resolves from
+// /ui/ rather than from its parent -- api.py redirects /ui to /ui/ for exactly that reason.
+const API_BASE = new URL("..", document.baseURI).href.replace(/\/$/, "");
+
+// Every API URL in this file goes through here -- never write a bare "/path" into fetch() or a
+// src/href, or it breaks under a sub-path deployment.
+function apiUrl(path) {
+  return `${API_BASE}${path}`;
+}
+
 const API_KEY_COOKIE = "api_key";
 const COOKIE_MAX_AGE_SECONDS = 10 * 365 * 24 * 60 * 60; // ~10 years -- "never" isn't representable
 const AUTO_REFRESH_SECONDS = 15;
@@ -139,7 +156,7 @@ function eventsApp() {
     // this is cosmetic, not worth alarming over.
     async fetchVersionInfo() {
       try {
-        const resp = await fetch("/status");
+        const resp = await fetch(apiUrl("/status"));
         if (!resp.ok) return;
         const data = await resp.json();
         this.versionInfo = {
@@ -251,7 +268,7 @@ function eventsApp() {
       // Frigate's object labels aren't fixed (depends on your model/config) -- the Type dropdown
       // is populated from the server's OBJECT_TYPES config instead of being hardcoded here.
       try {
-        const resp = await fetch("/object-types", { headers: { "X-API-Key": this.apiKey } });
+        const resp = await fetch(apiUrl("/object-types"), { headers: { "X-API-Key": this.apiKey } });
         if (!resp.ok) return;
         const data = await resp.json();
         this.objectTypes = data.object_types || [];
@@ -264,7 +281,7 @@ function eventsApp() {
       // Unlike Type (a manually-maintained env var), the Camera dropdown is populated from
       // whatever cameras actually have data -- see db.get_distinct_cameras' own comment for why.
       try {
-        const resp = await fetch("/cameras", { headers: { "X-API-Key": this.apiKey } });
+        const resp = await fetch(apiUrl("/cameras"), { headers: { "X-API-Key": this.apiKey } });
         if (!resp.ok) return;
         const data = await resp.json();
         this.cameras = data.cameras || [];
@@ -304,7 +321,7 @@ function eventsApp() {
 
     async testApiKey(key) {
       try {
-        const resp = await fetch("/events?limit=1", { headers: { "X-API-Key": key } });
+        const resp = await fetch(apiUrl("/events?limit=1"), { headers: { "X-API-Key": key } });
         return resp.ok;
       } catch {
         return false;
@@ -383,7 +400,7 @@ function eventsApp() {
           params.set("hours", String(this.filters.hours));
         }
 
-        const resp = await fetch(`/events?${params.toString()}`, {
+        const resp = await fetch(apiUrl(`/events?${params.toString()}`), {
           headers: { "X-API-Key": this.apiKey },
         });
         if (resp.status === 401) {
@@ -436,7 +453,7 @@ function eventsApp() {
           params.set("hours", String(this.filters.hours));
         }
 
-        const resp = await fetch(`/visits?${params.toString()}`, {
+        const resp = await fetch(apiUrl(`/visits?${params.toString()}`), {
           headers: { "X-API-Key": this.apiKey },
         });
         if (resp.status === 401) {
@@ -505,7 +522,7 @@ function eventsApp() {
           body.hours = Number(this.filters.hours);
         }
 
-        const resp = await fetch("/search", {
+        const resp = await fetch(apiUrl("/search"), {
           method: "POST",
           headers: { "X-API-Key": this.apiKey, "Content-Type": "application/json" },
           body: JSON.stringify(body),
@@ -609,23 +626,23 @@ function eventsApp() {
     },
 
     thumbnailUrl(eventId, full = false) {
-      const path = full ? `/events/${eventId}/image` : `/events/${eventId}/thumbnail`;
+      const path = full ? apiUrl(`/events/${eventId}/image`) : apiUrl(`/events/${eventId}/thumbnail`);
       return `${path}?api_key=${encodeURIComponent(this.apiKey)}`;
     },
 
     // Visits get their own image endpoints -- falls back to the representative event's own
     // crop server-side (see GET /visits/{id}/thumbnail|image), not something the UI branches on.
     visitThumbnailUrl(visitId, full = false) {
-      const path = full ? `/visits/${visitId}/image` : `/visits/${visitId}/thumbnail`;
+      const path = full ? apiUrl(`/visits/${visitId}/image`) : apiUrl(`/visits/${visitId}/thumbnail`);
       return `${path}?api_key=${encodeURIComponent(this.apiKey)}`;
     },
 
     videoUrl(eventId) {
-      return `/media/video/${eventId}?api_key=${encodeURIComponent(this.apiKey)}`;
+      return apiUrl(`/media/video/${eventId}?api_key=${encodeURIComponent(this.apiKey)}`);
     },
 
     visitVideoUrl(visitId) {
-      return `/media/video/visit/${visitId}?api_key=${encodeURIComponent(this.apiKey)}`;
+      return apiUrl(`/media/video/visit/${visitId}?api_key=${encodeURIComponent(this.apiKey)}`);
     },
 
     // The lightbox is shared between the Events and Visits views -- lightboxEvent.visitId is
@@ -700,7 +717,7 @@ function eventsApp() {
           // Sightings and connected-events are independent fetches -- run them in parallel rather
           // than one after the other, since neither depends on the other's result.
           const [sightingsResp] = await Promise.all([
-            fetch(`/visits/${event.visitId}/sightings`, { headers: { "X-API-Key": this.apiKey } }),
+            fetch(apiUrl(`/visits/${event.visitId}/sightings`), { headers: { "X-API-Key": this.apiKey } }),
             this.fetchConnectedEvents(event.visitId),
           ]);
           if (sightingsResp.ok) {
@@ -711,7 +728,7 @@ function eventsApp() {
             this.lightboxVisitSummary = data.visit_summary ? data.visit_summary.summary : null;
           }
         } else {
-          const resp = await fetch(`/events/${event.id}`, { headers: { "X-API-Key": this.apiKey } });
+          const resp = await fetch(apiUrl(`/events/${event.id}`), { headers: { "X-API-Key": this.apiKey } });
           if (resp.ok) {
             const d = await resp.json();
             if (d.sighting) {
@@ -737,7 +754,7 @@ function eventsApp() {
     // newest-first for this specific strip.
     async fetchConnectedEvents(visitId) {
       try {
-        const resp = await fetch(`/events?visit_id=${visitId}&has_media=false&limit=50`, {
+        const resp = await fetch(apiUrl(`/events?visit_id=${visitId}&has_media=false&limit=50`), {
           headers: { "X-API-Key": this.apiKey },
         });
         if (resp.ok) this.lightboxConnectedEvents = (await resp.json()).reverse();
