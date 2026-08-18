@@ -142,10 +142,36 @@ def test_apiurl_is_not_self_recursive(script):
 
 # ---- server-side: the /ui -> /ui/ redirect ----
 
-def _client():
-    from fastapi.testclient import TestClient
+# Driven through the ASGI interface directly rather than fastapi.testclient.TestClient, which
+# needs httpx -- not a dependency of this project (see requirements.txt). Adding one just for a
+# test would break the "no new runtime dependency" requirement, and it is not needed: a FastAPI app
+# IS an ASGI callable, so a scope plus a send/receive pair exercises the real routing, the real
+# mount, and the real response headers with nothing extra installed.
+def _asgi_get(path: str) -> tuple[int, dict, bytes]:
+    import asyncio
+
     import api
-    return TestClient(api.app)
+
+    scope = {
+        "type": "http", "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1", "method": "GET", "scheme": "http",
+        "path": path, "raw_path": path.encode(), "query_string": b"",
+        "root_path": "", "headers": [(b"host", b"testserver")],
+        "client": ("127.0.0.1", 12345), "server": ("testserver", 80),
+    }
+    messages: list[dict] = []
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message):
+        messages.append(message)
+
+    asyncio.run(api.app(scope, receive, send))
+    start = next(m for m in messages if m["type"] == "http.response.start")
+    headers = {k.decode().lower(): v.decode() for k, v in start["headers"]}
+    body = b"".join(m.get("body", b"") for m in messages if m["type"] == "http.response.body")
+    return start["status"], headers, body
 
 
 def test_ui_redirect_location_is_relative_not_absolute():
@@ -154,9 +180,9 @@ def test_ui_redirect_location_is_relative_not_absolute():
     # which the Home Assistant add-on deliberately doesn't -- that sends the browser to the
     # backend's internal address. A relative Location resolves against whatever the browser
     # actually requested, so it works under any prefix without the server knowing about it.
-    resp = _client().get("/ui", follow_redirects=False)
-    assert resp.status_code in (301, 302, 307, 308)
-    location = resp.headers["location"]
+    status, headers, _ = _asgi_get("/ui")
+    assert status in (301, 302, 307, 308)
+    location = headers["location"]
     assert not location.startswith("/"), f"absolute-path Location escapes the sub-path: {location}"
     assert not location.startswith("http"), f"absolute Location leaks the backend address: {location}"
     assert location == "ui/"
@@ -170,12 +196,11 @@ def test_ui_redirect_location_is_relative_not_absolute():
 def test_ui_redirect_resolves_to_the_right_url_in_every_deployment(requested, expected):
     # What the browser will actually do with that Location header.
     from urllib.parse import urljoin
-    location = _client().get("/ui", follow_redirects=False).headers["location"]
-    assert urljoin(requested, location) == expected
+    _, headers, _ = _asgi_get("/ui")
+    assert urljoin(requested, headers["location"]) == expected
 
 
-def test_ui_and_admin_pages_still_serve():
-    client = _client()
-    assert client.get("/ui/").status_code == 200
-    assert client.get("/ui/admin").status_code == 200
-    assert client.get("/ui/app.js").status_code == 200
+@pytest.mark.parametrize("path", ["/ui/", "/ui/admin", "/ui/app.js"])
+def test_ui_and_admin_pages_still_serve(path):
+    status, _, _ = _asgi_get(path)
+    assert status == 200, f"{path} returned {status}"
