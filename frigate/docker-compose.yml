@@ -63,6 +63,14 @@ services:
       POSTGRES_DB: home_automation
       POSTGRES_USER: n8n_projects
       POSTGRES_PASSWORD: ${POSTGRES_PROJECTS_PASSWORD}
+      # Connection-pool bounds (db.py). Every worker thread and API request thread checks out its
+      # own connection; past the cap a caller waits rather than failing. Listed here explicitly
+      # because this `environment:` block is an allow-list -- a value set only in .env would never
+      # reach the container. The defaults below are the same ones config.py falls back to, so
+      # leaving them unset in .env changes nothing.
+      POSTGRES_POOL_MIN: ${POSTGRES_POOL_MIN:-1}
+      POSTGRES_POOL_MAX: ${POSTGRES_POOL_MAX:-20}
+      POSTGRES_POOL_WAIT_SECONDS: ${POSTGRES_POOL_WAIT_SECONDS:-10}
       FRIGATE_API_BASE: ${FRIGATE_API_BASE}
       # Crop tuning, queue tuning, retention, video storage, Telegram, and the internal AI stage
       # are ALL configured in profiles.yaml now, not here -- see that file's own comments and
