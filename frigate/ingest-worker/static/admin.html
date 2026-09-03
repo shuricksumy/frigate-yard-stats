@@ -422,7 +422,7 @@
           <div class="grid delete-grid">
             <template x-for="row in delPreview.sample" :key="row.id">
               <div class="card" :class="{ 'card-selected': delSelectedIds.includes(row.id) }"
-                   @click="delToggle(row.id)">
+                   @click="delOpenPreview(row)" title="Click to preview -- use the checkbox to select for deletion">
                 <img x-show="row.has_image || row.has_video" :src="deleteThumbnailUrl(row.id)" loading="lazy" alt="">
                 <div class="no-image" x-show="!row.has_image && !row.has_video">no media</div>
                 <div class="meta">
@@ -445,8 +445,57 @@
           </div>
         </div>
       </template>
+      <p class="status-line" x-show="delPreview">
+        Nothing is selected to start with -- tick the checkbox on a card to include it, or use
+        "Select all shown". Clicking a card opens a larger preview.
+      </p>
       <p x-show="deleteResult" x-text="deleteResult"></p>
     </section>
+
+    <!-- Preview popup for one candidate event -- a bigger look before deciding, and a place to
+         select/deselect without hunting for the card's own checkbox. -->
+    <div class="modal-backdrop" x-show="delLightbox" style="display:none"
+         @click.self="delClosePreview()" @keydown.escape.window="delClosePreview()">
+      <div class="modal lightbox" x-show="delLightbox">
+        <template x-if="delLightbox">
+          <div>
+            <img x-show="delLightbox.has_image" :src="delImageUrl(delLightbox.id)" alt="">
+            <div class="lightbox-no-media" x-show="!delLightbox.has_image">
+              No stored image for this event.
+            </div>
+            <div class="lightbox-info">
+              <div class="lightbox-info-group">
+                <h4 x-text="(delLightbox.objects || 'event') + ' -- ' + delLightbox.camera"></h4>
+                <dl>
+                  <div class="lightbox-info-row">
+                    <dt>When</dt><dd x-text="formatTs(delLightbox.start_ts)"></dd>
+                  </div>
+                  <div class="lightbox-info-row">
+                    <dt>Duration</dt>
+                    <dd x-text="Math.round(delLightbox.duration_seconds) + 's'"></dd>
+                  </div>
+                  <div class="lightbox-info-row">
+                    <dt>Event id</dt><dd x-text="delLightbox.id"></dd>
+                  </div>
+                  <div class="lightbox-info-row" x-show="delLightbox.visit_id">
+                    <dt>Visit</dt><dd x-text="delLightbox.visit_id"></dd>
+                  </div>
+                  <div class="lightbox-info-row" x-show="delLightbox.description">
+                    <dt>AI analysis</dt><dd x-text="delLightbox.description"></dd>
+                  </div>
+                </dl>
+              </div>
+              <div class="delete-preview-actions">
+                <button :class="delSelectedIds.includes(delLightbox.id) ? 'btn-danger' : ''"
+                        @click="delToggle(delLightbox.id)"
+                        x-text="delSelectedIds.includes(delLightbox.id) ? 'Selected for deletion -- click to keep' : 'Select for deletion'"></button>
+                <button @click="delClosePreview()">Close</button>
+              </div>
+            </div>
+          </div>
+        </template>
+      </div>
+    </div>
 
     <!-- ============ Reports ============ -->
     <section class="admin-card">

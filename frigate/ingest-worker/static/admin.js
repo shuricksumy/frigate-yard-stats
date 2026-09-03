@@ -118,6 +118,8 @@ function adminApp() {
     delSelectedIds: [],
     delPage: 0,
     delPageSize: 48,
+    // The row currently open in the preview popup, or null.
+    delLightbox: null,
     deleteResult: "",
 
     reportSource: "events",
@@ -574,6 +576,7 @@ function adminApp() {
     async previewDelete(keepSelection = false) {
       this.deleting = true;
       this.deleteResult = "";
+      this.delLightbox = null;
       if (!keepSelection) {
         this.delPage = 0;
         this.delSelectedIds = [];
@@ -593,11 +596,11 @@ function adminApp() {
         const d = await r.json();
         if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
         this.delPreview = d;
-        // Everything on a newly-shown page starts selected -- the operator filtered for these
-        // deliberately, so unticking the exceptions is less work than ticking the rule. Ids
-        // already chosen on other pages are kept.
-        const shown = d.sample.map((row) => row.id);
-        this.delSelectedIds = [...new Set([...this.delSelectedIds, ...shown])];
+        // Nothing is selected by default. Deleting is irreversible, so it should take a
+        // deliberate act to include a row rather than a deliberate act to spare one -- a filter
+        // that matches more than you expected then costs you nothing. "Select all shown" is one
+        // click away when the filter really is exactly right. Selections already made on other
+        // pages are preserved.
         if (d.events === 0) this.deleteResult = "No events match those filters.";
       } catch (e) {
         this.deleteResult = "Preview failed: " + e.message;
@@ -621,6 +624,23 @@ function adminApp() {
       if (this.delPage === 0) return;
       this.delPage -= 1;
       await this.previewDelete(true);
+    },
+
+    // Card click opens this; the checkbox toggles selection instead. Clicking a thumbnail to
+    // silently (de)select it made the grid easy to mis-click, and gave no way to look closer at a
+    // borderline event before deciding.
+    delOpenPreview(row) {
+      this.delLightbox = row;
+    },
+
+    delClosePreview() {
+      this.delLightbox = null;
+    },
+
+    // Full-size image for the preview popup, falling back to the thumbnail endpoint's own
+    // resolution chain when there's no stored full-resolution copy.
+    delImageUrl(eventId) {
+      return apiUrl(`/events/${eventId}/image?api_key=${encodeURIComponent(this.apiKey)}`);
     },
 
     delToggle(id) {

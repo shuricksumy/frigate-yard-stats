@@ -220,9 +220,8 @@ both pages). It shows:
   a different job from Retention purge above: that one is age-based housekeeping ("everything older
   than N days"), this one is "these particular events are wrong". Narrow with the filters, hit
   Preview, and the matching events come back as a grid of thumbnails with their AI description and
-  duration — the same view you'd use to recognise a false alarm while browsing. Everything shown
-  starts ticked (you filtered for it deliberately); untick anything worth keeping, then Delete,
-  which asks for confirmation spelling out the counts first.
+  duration — the same view you'd use to recognise a false alarm while browsing. Tick the ones to remove
+  (or "Select all shown"), then Delete, which asks for confirmation spelling out the counts first.
 
   **"Shorter than (seconds)" is usually the filter that isolates false alarms.** Repeated
   re-detections of one parked car are typically only a few seconds each — Frigate's tracker losing
@@ -239,6 +238,13 @@ both pages). It shows:
   **Paging.** The grid shows 48 at a time with Prev/Next and a "page N of M" indicator, so a large
   cleanup isn't capped at one screenful. Two things worth knowing about how selection interacts
   with it:
+  - **Nothing is selected by default.** Deleting is irreversible, so including a row takes a
+    deliberate tick rather than a deliberate untick — a filter that matches more than you expected
+    then costs you nothing. "Select all shown" is one click away when the filter really is right.
+  - **Clicking a card opens a larger preview** (full image, time, duration, event/visit id, and the
+    AI analysis) with its own select/deselect button — for looking closer at a borderline event
+    before deciding. Selection itself is the checkbox on each card, so a mis-click can't silently
+    arm or spare something.
   - **Selection persists across pages.** Page through, keep ticking, and Delete removes everything
     ticked anywhere — not just the page you're looking at. The button and the confirmation dialog
     always show the full total, and a note appears once your selection reaches beyond the current

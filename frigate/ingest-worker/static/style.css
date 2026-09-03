@@ -661,3 +661,23 @@ input:disabled, select:disabled {
   margin-right: 6px;
   vertical-align: middle;
 }
+
+/* Selected state is now driven by the checkbox rather than a click anywhere on the card, so the
+   card itself is a preview affordance -- hover reads as "openable", not "armed". */
+.delete-grid .card .meta input[type="checkbox"] {
+  cursor: pointer;
+  /* Bigger than the browser default: it is now the ONLY way to select from the grid, so it needs
+     to be an easy target rather than an afterthought next to the label. */
+  width: 16px;
+  height: 16px;
+}
+
+/* Admin's own delete-preview popup. Deliberately NOT reusing .lightbox-action-buttons: that class
+   belongs to the report UI's lightbox (style.css is shared by both pages), and redefining it here
+   would silently restyle the browsing UI too. */
+.delete-preview-actions {
+  display: flex;
+  gap: 8px;
+  padding: 12px;
+  border-top: 1px solid var(--border);
+}
