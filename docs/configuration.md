@@ -247,6 +247,44 @@ above to a subset of your data:
 
 Both can be set at once (e.g. `object_label=car&camera=outside2`) to narrow to their intersection.
 
+### Deleting specific events (false alarms)
+
+`POST /events/delete` (or the **Delete events** section on `/ui/admin` — see
+[`web-ui.md`](web-ui.md#admin-dashboard)) is for a different job from the age-based purge above:
+removing *particular* events that are wrong, rather than everything past a cutoff. The usual case
+is false alarms — repeated re-detections of one parked car, which cluster at a few seconds each
+(see [`frigate.md`](frigate.md) for why, and how to reduce them at the source).
+
+Same dry-run-first contract as `/retention/purge`, in two steps:
+
+1. POST with filters and no `confirm` — returns the counts plus a `sample` of matching events
+   (thumbnail-ready fields) for the admin preview grid. Nothing is deleted.
+2. POST with `event_ids` (the ones you left ticked) and `confirm=true` — deletes exactly those.
+
+Filters: `camera`, `object_label`, `start`/`end`, `max_duration_seconds` (matches events whose
+`end_ts - start_ts` is at or under this — usually the one that isolates flicker false alarms),
+`ai_status`, and `q` (free-text over the AI description, same substring match `GET /events`' own
+`q` uses). `event_ids`, when given, is authoritative and every other filter is ignored, so what
+gets deleted is exactly what was previewed. **At least one filter or an explicit id list is
+required** — a request with neither is rejected rather than treated as "match everything".
+
+`limit`/`offset` page the preview. `events` in the response is always the FULL match count
+regardless of paging, so a caller can work out how many pages there are; `sample_truncated` says
+whether more remain after the current page. Ordering is `start_ts DESC, id DESC` — the id
+tiebreaker matters because flicker re-detections of one parked car can share a timestamp to the
+microsecond, and ordering by time alone would let rows swap between pages and be seen twice or
+missed entirely.
+
+**Empty visits are swept automatically.** A visit groups several events, so deleting all of a
+visit's events would otherwise leave the visit row behind with nothing linked to it — still listed
+by `GET /visits`, still counted on the dashboard. Any visit left with no events at all is deleted
+too, along with its `visit_summaries`/`visit_sightings` rows and stored clip. A visit that keeps at
+least one event is untouched. The preview's `visits` count tells you how many would be swept.
+
+Deletion is permanent and takes the events' `sightings` (AI analysis text and embeddings) and any
+stored images/clips on disk with them. If you only want the space back and would rather keep the
+text searchable, use `/retention/purge`'s `only_media` mode instead.
+
 ## Per-object-type overrides
 
 A number of settings live entirely in `frigate/profiles.yaml`, not `.env` at all. Two categories:

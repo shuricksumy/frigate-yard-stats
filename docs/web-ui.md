@@ -216,6 +216,48 @@ both pages). It shows:
   single camera — unlike object type, this **does** apply to visits too, since visit grouping is
   per-camera only (a visit's own camera is always a single, unambiguous value). Object type and
   camera compose — set both to restrict to, say, just `car` events on one specific camera.
+- **Delete events** — permanently remove *specific* events, for clearing out false alarms. This is
+  a different job from Retention purge above: that one is age-based housekeeping ("everything older
+  than N days"), this one is "these particular events are wrong". Narrow with the filters, hit
+  Preview, and the matching events come back as a grid of thumbnails with their AI description and
+  duration — the same view you'd use to recognise a false alarm while browsing. Everything shown
+  starts ticked (you filtered for it deliberately); untick anything worth keeping, then Delete,
+  which asks for confirmation spelling out the counts first.
+
+  **"Shorter than (seconds)" is usually the filter that isolates false alarms.** Repeated
+  re-detections of one parked car are typically only a few seconds each — Frigate's tracker losing
+  and re-acquiring a stationary object — while genuine activity lasts longer. See
+  [`frigate.md`](frigate.md) for why that happens and how to reduce it at the source.
+
+  **Advanced filters** (toggle to reveal, same idea as the browsing UI's own advanced panel) adds
+  From/To, AI status, and a free-text search over the AI description — so you can delete, say,
+  everything whose analysis mentions a specific parked car, or everything stuck at `failed`.
+
+  At least one filter is required: this never matches every event by default, so deleting the whole
+  table is never one missing field away.
+
+  **Paging.** The grid shows 48 at a time with Prev/Next and a "page N of M" indicator, so a large
+  cleanup isn't capped at one screenful. Two things worth knowing about how selection interacts
+  with it:
+  - **Selection persists across pages.** Page through, keep ticking, and Delete removes everything
+    ticked anywhere — not just the page you're looking at. The button and the confirmation dialog
+    always show the full total, and a note appears once your selection reaches beyond the current
+    page so the number is never a surprise.
+  - **"Select all shown" and "Clear selection" only affect the current page**, exactly as named —
+    clearing wouldn't silently discard choices you made on pages you can no longer see.
+
+  After a delete, the panel re-previews what's left from page 1, so working through a big backlog
+  is delete → delete → delete rather than re-entering the filters each time.
+
+  **Visits are handled for you.** A visit groups several events, so deleting all of a visit's
+  events would otherwise leave the visit behind as an empty shell — still listed on the Visits tab
+  with nothing behind it. Any visit left with no events at all is removed too (along with its
+  summary and stored clip); a visit that keeps even one event is left alone, just with a shorter
+  event list. The preview tells you up front how many visits this would empty.
+
+  Deletion is permanent and covers the events' sightings (AI analysis text and embeddings) and any
+  stored images/clips on disk. There is no undo — if you only want to reclaim space and would
+  rather keep the text searchable, use Retention purge's media-only mode instead.
 - **Reports** — generate a report on demand (Events or Visits/alerts, any object type or all, a
   time window, an "Include image" checkbox) and open it in a new tab -- the exact same HTML n8n's
   scheduled report workflows email/Telegram, without waiting for the next scheduled run.

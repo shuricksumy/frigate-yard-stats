@@ -229,3 +229,69 @@ class ClaimResponse(BaseModel):
     # reliably auto-split into n8n items across versions. n8n uses an explicit Split Out node on
     # the "events" field instead, which is unambiguous, version-stable behavior.
     events: list[EventDetail]
+
+
+class EventDeleteRequest(BaseModel):
+    """Selective, permanent deletion of specific raw_events (admin dashboard's Delete events).
+
+    Distinct from /retention/purge, which is age-based housekeeping over everything older than a
+    cutoff. This one is "these specific rows are false alarms, remove them" -- narrowed by filter,
+    eyeballed in a preview grid, then confirmed with the exact ids to delete.
+    """
+    # Authoritative when given: the entire selection, with every filter below ignored. This is what
+    # the admin UI sends on confirm, so the rows deleted are exactly the ones previewed and left
+    # ticked -- re-deriving them from filters could pick up a row that appeared in between.
+    event_ids: list[int] | None = None
+    camera: str | None = None
+    object_label: str | None = None
+    start: datetime | None = None
+    end: datetime | None = None
+    # The flicker signature -- a tracked-object lifecycle this short is almost never real activity
+    # (repeated re-detections of one parked car cluster at a few seconds each). Matches events
+    # whose end_ts - start_ts is <= this.
+    max_duration_seconds: float | None = None
+    # Advanced filters, mirroring the report UI's own advanced panel.
+    ai_status: str | None = None
+    # Free-text over the AI description, same substring match GET /events' `q` uses. Only ever
+    # matches events that already have a sighting.
+    q: str | None = None
+    # Dry run by default, same as /retention/purge: without this the endpoint only ever reports
+    # what it would delete.
+    confirm: bool = False
+    # One page of the preview (ignored when confirm=true). `events` in the response is always the
+    # FULL match count, so a caller can page through a large cleanup rather than being capped at
+    # whatever a single request returns.
+    limit: int = 200
+    offset: int = 0
+
+
+class EventDeletePreviewRow(BaseModel):
+    id: int
+    camera: str | None
+    objects: str | None
+    start_ts: datetime
+    end_ts: datetime
+    duration_seconds: float | None
+    ai_status: str
+    visit_id: int | None
+    has_image: bool
+    has_video: bool
+    description: str | None = None
+
+
+class EventDeleteResponse(BaseModel):
+    confirmed: bool
+    # Counts of what matched (dry run) or what was actually removed (confirmed).
+    events: int
+    sightings: int
+    # Visits deleted because the selection emptied them of every linked event -- on a dry run,
+    # how many WOULD be swept. Same "would be / were" meaning as events/sightings above.
+    visits: int
+    video_files: int = 0
+    image_files: int = 0
+    files_deleted: int = 0
+    sample: list[EventDeletePreviewRow] = []
+    # True when this page isn't the whole match -- i.e. there are further pages.
+    sample_truncated: bool = False
+    limit: int = 0
+    offset: int = 0

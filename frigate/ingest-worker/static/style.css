@@ -622,3 +622,42 @@ input:disabled, select:disabled {
 .app-footer a:hover {
   color: var(--accent);
 }
+
+/* ---- Admin: Delete events preview grid ----
+   Reuses .grid/.card from the report UI so a previewed event looks the same as it does when
+   browsing -- recognising a false alarm by its thumbnail is the whole point of previewing.
+   Cards here are selection toggles rather than lightbox openers, so they get their own
+   selected state instead of .clickable's plain cursor change. */
+.delete-grid {
+  margin-top: 12px;
+  /* Denser than the browsing grid: this is a triage view, so more of them on screen at once
+     beats a larger thumbnail. */
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.delete-grid .card {
+  cursor: pointer;
+  /* Reserved up front so selecting doesn't shift the grid -- the border is only recoloured. */
+  border: 2px solid var(--border);
+}
+
+.delete-grid .card:hover {
+  border-color: var(--muted);
+}
+
+.delete-grid .card.card-selected {
+  /* Selected means "will be deleted", so this deliberately reads as a warning rather than the
+     usual neutral/positive selection blue. */
+  border-color: #d9534f;
+}
+
+.delete-grid .card.card-selected .meta {
+  background: rgba(217, 83, 79, 0.12);
+}
+
+.delete-grid .card .meta input[type="checkbox"] {
+  margin-right: 6px;
+  vertical-align: middle;
+}

@@ -98,6 +98,28 @@ function adminApp() {
     purgePreview: null,
     purgeResult: "",
 
+    // Delete events (false-alarm cleanup) -- selective and interactive, unlike the age-based
+    // purge above. delSelectedIds is what actually gets deleted: the preview narrows by filter,
+    // then the operator unticks anything worth keeping.
+    delCamera: "",
+    delObjectLabel: "",
+    delMaxDuration: "",
+    delStart: "",
+    delEnd: "",
+    delAiStatus: "",
+    delQ: "",
+    delAdvanced: false,
+    deleting: false,
+    delPreview: null,
+    // Selection PERSISTS across pages -- paging through a big cleanup and losing what you already
+    // ticked would make the pager useless for the job it exists for. The Delete button and the
+    // confirm dialog always show the full total, and the pager says so explicitly when the
+    // selection reaches beyond the current page.
+    delSelectedIds: [],
+    delPage: 0,
+    delPageSize: 48,
+    deleteResult: "",
+
     reportSource: "events",
     reportObjectLabel: "",
     reportHours: 24,
@@ -517,6 +539,146 @@ function adminApp() {
         this.purgeResult = "Delete failed: " + e.message;
       } finally {
         this.purging = false;
+      }
+    },
+
+    // Same cookie-in-query-param trick the report UI uses -- an <img> tag can't send an
+    // X-API-Key header, and these thumbnails are the whole point of previewing before deleting.
+    deleteThumbnailUrl(eventId) {
+      return apiUrl(`/events/${eventId}/thumbnail?api_key=${encodeURIComponent(this.apiKey)}`);
+    },
+
+    formatTs(iso) {
+      try {
+        return new Date(iso).toLocaleString();
+      } catch {
+        return iso;
+      }
+    },
+
+    _deleteSelection() {
+      // Only the filters, for the preview call. The confirm call sends explicit ids instead.
+      const body = {};
+      if (this.delCamera) body.camera = this.delCamera;
+      if (this.delObjectLabel) body.object_label = this.delObjectLabel;
+      if (String(this.delMaxDuration).trim() !== "") body.max_duration_seconds = Number(this.delMaxDuration);
+      if (this.delStart) body.start = new Date(this.delStart).toISOString();
+      if (this.delEnd) body.end = new Date(this.delEnd).toISOString();
+      if (this.delAiStatus) body.ai_status = this.delAiStatus;
+      if (this.delQ.trim()) body.q = this.delQ.trim();
+      return body;
+    },
+
+    // A fresh preview (filters changed) resets to page 1 and drops any previous selection, since
+    // it may refer to events this filter no longer matches. Paging keeps both.
+    async previewDelete(keepSelection = false) {
+      this.deleting = true;
+      this.deleteResult = "";
+      if (!keepSelection) {
+        this.delPage = 0;
+        this.delSelectedIds = [];
+      }
+      try {
+        const body = this._deleteSelection();
+        if (Object.keys(body).length === 0) {
+          this.delPreview = null;
+          this.deleteResult = "Set at least one filter -- this never matches every event by default.";
+          return;
+        }
+        body.limit = this.delPageSize;
+        body.offset = this.delPage * this.delPageSize;
+        const r = await fetch(apiUrl("/events/delete"), {
+          method: "POST", headers: this._headers(), body: JSON.stringify(body),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+        this.delPreview = d;
+        // Everything on a newly-shown page starts selected -- the operator filtered for these
+        // deliberately, so unticking the exceptions is less work than ticking the rule. Ids
+        // already chosen on other pages are kept.
+        const shown = d.sample.map((row) => row.id);
+        this.delSelectedIds = [...new Set([...this.delSelectedIds, ...shown])];
+        if (d.events === 0) this.deleteResult = "No events match those filters.";
+      } catch (e) {
+        this.deleteResult = "Preview failed: " + e.message;
+      } finally {
+        this.deleting = false;
+      }
+    },
+
+    delTotalPages() {
+      if (!this.delPreview || !this.delPreview.events) return 0;
+      return Math.ceil(this.delPreview.events / this.delPageSize);
+    },
+
+    async delNextPage() {
+      if (this.delPage + 1 >= this.delTotalPages()) return;
+      this.delPage += 1;
+      await this.previewDelete(true);
+    },
+
+    async delPrevPage() {
+      if (this.delPage === 0) return;
+      this.delPage -= 1;
+      await this.previewDelete(true);
+    },
+
+    delToggle(id) {
+      const i = this.delSelectedIds.indexOf(id);
+      if (i === -1) this.delSelectedIds.push(id);
+      else this.delSelectedIds.splice(i, 1);
+    },
+
+    // Scoped to the rows currently on screen -- "Select all shown" says shown, and silently
+    // clearing choices made on other pages would be worse than making the operator go back.
+    delSelectAll(select) {
+      if (!this.delPreview) return;
+      const shown = this.delPreview.sample.map((r) => r.id);
+      if (select) {
+        this.delSelectedIds = [...new Set([...this.delSelectedIds, ...shown])];
+      } else {
+        this.delSelectedIds = this.delSelectedIds.filter((id) => !shown.includes(id));
+      }
+    },
+
+    async confirmDelete() {
+      const count = this.delSelectedIds.length;
+      if (count === 0) return;
+      const emptied = (this.delPreview && this.delPreview.visits) || 0;
+      const visitNote = emptied
+        ? `\n\nUp to ${emptied} visit(s) left with no events at all will also be removed.`
+        : "";
+      if (!confirm(
+        `Permanently delete ${count} event(s), their AI analysis, and any stored images/clips?` +
+        `${visitNote}\n\nThis cannot be undone.`
+      )) return;
+      this.deleting = true;
+      this.deleteResult = "";
+      try {
+        // Explicit ids, not the filters -- deletes exactly what is ticked, even if a matching
+        // event appeared since the preview.
+        const r = await fetch(apiUrl("/events/delete"), {
+          method: "POST", headers: this._headers(),
+          body: JSON.stringify({ event_ids: this.delSelectedIds, confirm: true }),
+        });
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.detail || `HTTP ${r.status}`);
+        const summary =
+          `Deleted ${d.events} event(s), ${d.sightings} sighting(s), ` +
+          `${d.visits} emptied visit(s), ${d.files_deleted} file(s).`;
+        this.delSelectedIds = [];
+        this.delPage = 0;
+        this.refreshAll();
+        // Re-preview rather than clearing: after deleting a page of a large cleanup, the next
+        // batch is what you want on screen, not an empty panel to re-filter from scratch.
+        await this.previewDelete();
+        // Set AFTER the re-preview, not before -- previewDelete clears deleteResult on entry, so
+        // assigning first meant the confirmation of what was just deleted flashed and vanished.
+        this.deleteResult = summary;
+      } catch (e) {
+        this.deleteResult = "Delete failed: " + e.message;
+      } finally {
+        this.deleting = false;
       }
     },
 

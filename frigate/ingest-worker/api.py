@@ -142,6 +142,51 @@ def purge_old_records(
     return result
 
 
+@app.post("/events/delete", response_model=schemas.EventDeleteResponse, tags=["admin"], dependencies=[Depends(require_api_key)])
+def delete_events(request: schemas.EventDeleteRequest):
+    """Permanently delete specific raw_events, and sweep any visit they leave empty.
+
+    Built for cleaning up false alarms (repeated re-detections of one parked car, which cluster at
+    a few seconds each -- see CLAUDE.md's min_event_duration_seconds notes). Distinct from
+    POST /retention/purge, which is age-based housekeeping across everything past a cutoff; this
+    is selective and interactive.
+
+    Two-step by design, same dry-run-first contract /retention/purge uses:
+
+    1. POST with filters and no `confirm` -- returns the counts plus a `sample` of matching events
+       (thumbnail-ready fields) for the admin dashboard's preview grid. Nothing is deleted.
+    2. POST with `event_ids` (the ones left ticked in that grid) and `confirm=true` -- deletes
+       exactly those.
+
+    Visit handling is the part that can't be done by deleting rows alone: a visit whose every
+    linked raw_event is in the selection would otherwise survive as an empty shell, still listed
+    on the Visits tab with nothing behind it. Those are deleted too, along with their
+    visit_summaries/visit_sightings and stored clip. A visit that keeps at least one event is left
+    alone -- only its now-shorter event list changes.
+
+    A request with neither `event_ids` nor any filter is rejected (400) rather than treated as
+    "match everything" -- deleting the entire table should never be one missing parameter away.
+    """
+    selection = {
+        "event_ids": request.event_ids,
+        "camera": request.camera,
+        "object_label": request.object_label,
+        "start": request.start,
+        "end": request.end,
+        "max_duration_seconds": request.max_duration_seconds,
+        "ai_status": request.ai_status,
+        "q": request.q,
+    }
+    try:
+        if not request.confirm:
+            preview = db.preview_event_deletion(limit=request.limit, offset=request.offset, **selection)
+            return {"confirmed": False, **preview}
+        result = db.delete_events(**selection)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"confirmed": True, **result, "sample": [], "sample_truncated": False}
+
+
 @app.post("/embeddings/backfill", tags=["sightings"], dependencies=[Depends(require_api_key)])
 def backfill_embeddings(
     limit: int = Query(50, ge=1, le=500, description="Max rows per sighting type to process in this call -- call repeatedly (each with confirm=true) until the counts reach zero for a larger backlog."),

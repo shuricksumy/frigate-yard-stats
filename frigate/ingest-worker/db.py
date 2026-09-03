@@ -1578,6 +1578,243 @@ def purge_older_than(
     return counts
 
 
+def build_event_selection(
+    event_ids: list[int] | None = None,
+    camera: str | None = None,
+    object_label: str | None = None,
+    start: datetime | None = None,
+    end: datetime | None = None,
+    max_duration_seconds: float | None = None,
+    ai_status: str | None = None,
+    q: str | None = None,
+) -> tuple[str, list]:
+    """WHERE clause (over yard_stats.raw_events) + params for the selective-delete family.
+
+    Explicit event_ids are AUTHORITATIVE: when given, they are the entire selection and every
+    other filter is ignored. That keeps "delete exactly what I ticked in the preview grid" honest
+    -- the preview and the delete must select the identical rows, and re-applying a time filter to
+    an explicit id list could silently drop one between previewing it and confirming (a row can
+    age past the window in between).
+    """
+    if event_ids:
+        return "re.id = ANY(%s)", [list(event_ids)]
+
+    clauses: list[str] = []
+    params: list = []
+    if camera:
+        clauses.append("re.camera = %s")
+        params.append(camera)
+    if object_label:
+        clauses.append("re.objects = %s")
+        params.append(object_label)
+    if start:
+        clauses.append("re.start_ts >= %s")
+        params.append(start)
+    if end:
+        clauses.append("re.start_ts <= %s")
+        params.append(end)
+    if max_duration_seconds is not None:
+        # The flicker signature: a tracked-object lifecycle far too short to be real activity.
+        # See CLAUDE.md's min_event_duration_seconds notes -- confirmed live that repeated
+        # re-detections of one parked car cluster at a few seconds each.
+        clauses.append("EXTRACT(EPOCH FROM (re.end_ts - re.start_ts)) <= %s")
+        params.append(max_duration_seconds)
+    if ai_status:
+        clauses.append("re.ai_status = %s")
+        params.append(ai_status)
+    if q:
+        # Free-text over the AI's own description, same substring match GET /events' own `q` uses.
+        # An EXISTS against sightings rather than a JOIN, so an event with more than one sighting
+        # row can never be selected twice (nothing at the schema level enforces one-per-event).
+        clauses.append(
+            "EXISTS (SELECT 1 FROM yard_stats.sightings s "
+            "WHERE s.raw_event_id = re.id AND s.description ILIKE %s)"
+        )
+        params.append(f"%{q}%")
+    if not clauses:
+        # Refuse an unbounded match rather than silently offering to delete the whole table.
+        raise ValueError("at least one filter (or an explicit event_ids list) is required")
+    return " AND ".join(clauses), params
+
+
+def preview_event_deletion(limit: int = 200, offset: int = 0, **selection) -> dict:
+    """What delete_events(execute=True) would remove, plus one page of it for the admin grid.
+
+    Same dry-run-first shape /retention/purge already uses, but selective rather than
+    age-based: the caller narrows with filters, eyeballs the sample, then confirms with the
+    explicit ids it actually wants gone.
+
+    `events` is always the FULL match count regardless of limit/offset, so the caller can page
+    through a large cleanup (ceil(events / limit) pages) rather than being capped at whatever one
+    request returns. Ordering is stable (start_ts DESC, id DESC) so paging doesn't reshuffle rows
+    underneath the operator -- start_ts alone is not unique enough, since flicker re-detections of
+    one parked car can share a timestamp to the microsecond.
+    """
+    where, params = build_event_selection(**selection)
+    counts = _execute(
+        f"""
+        SELECT count(*)::int AS events,
+               count(video_path)::int AS video_files,
+               count(image_path)::int AS image_files
+        FROM yard_stats.raw_events re WHERE {where}
+        """,
+        params, fetch=True,
+    )[0]
+    sightings = _execute(
+        f"SELECT count(*)::int AS c FROM yard_stats.sightings WHERE raw_event_id IN "
+        f"(SELECT re.id FROM yard_stats.raw_events re WHERE {where})",
+        params, fetch=True,
+    )[0]["c"]
+    # Visits that would be left with no linked events at all once this selection is deleted --
+    # the ones delete_events sweeps. Counted here so the preview can warn about them up front.
+    emptied_visits = _execute(
+        f"""
+        SELECT count(*)::int AS c FROM yard_stats.visits v
+        WHERE EXISTS (SELECT 1 FROM yard_stats.raw_events re WHERE re.visit_id = v.id AND ({where}))
+          AND NOT EXISTS (
+              SELECT 1 FROM yard_stats.raw_events re
+              WHERE re.visit_id = v.id AND NOT ({where})
+          )
+        """,
+        params + params, fetch=True,
+    )[0]["c"]
+    sample = _execute(
+        f"""
+        SELECT re.id, re.camera, re.objects, re.start_ts, re.end_ts,
+               EXTRACT(EPOCH FROM (re.end_ts - re.start_ts))::float AS duration_seconds,
+               re.ai_status, re.visit_id,
+               (re.crop_image_base64 IS NOT NULL OR re.image_path IS NOT NULL) AS has_image,
+               (re.video_path IS NOT NULL) AS has_video,
+               s.description
+        FROM yard_stats.raw_events re
+        LEFT JOIN yard_stats.sightings s ON s.raw_event_id = re.id
+        WHERE {where}
+        ORDER BY re.start_ts DESC, re.id DESC
+        LIMIT %s OFFSET %s
+        """,
+        params + [limit, offset], fetch=True,
+    )
+    return {
+        "events": counts["events"],
+        "sightings": sightings,
+        "video_files": counts["video_files"],
+        "image_files": counts["image_files"],
+        # Same "would be / were removed" meaning `events` and `sightings` carry, so the preview
+        # and the confirmed result have one identical shape.
+        "visits": emptied_visits,
+        "sample": sample,
+        # True when this page is not the whole match -- i.e. there is more to page through.
+        "sample_truncated": counts["events"] > offset + len(sample),
+        "limit": limit,
+        "offset": offset,
+    }
+
+
+def delete_events(**selection) -> dict:
+    """Permanently delete the selected raw_events, then sweep any visit they emptied.
+
+    Deliberately NOT a variant of purge_older_than: that one is age-based housekeeping, this is
+    "these specific rows are wrong, remove them". The FK-safe order is the same idea though --
+    children before parents, and raw_events.visit_id decoupled before its visit goes.
+
+    The selection is resolved to concrete ids ONCE, up front, and every later statement works from
+    that id list rather than re-running the filter. That is not just tidiness: the `q` filter
+    matches through the sightings table, and sightings are deleted before their events -- so
+    re-evaluating the filter for the raw_events DELETE would find nothing left to match and delete
+    zero rows, while their sightings were already gone (confirmed against a real database: 7
+    sightings deleted, 0 events). Resolving first makes the whole operation independent of what
+    earlier statements in the same transaction have already changed.
+
+    Everything runs in ONE transaction, unlike the age-based purges (which predate the connection
+    pool and issue each statement on its own). A selective delete is small and interactive, so a
+    half-applied one -- sightings gone but their events still present -- would be worse than
+    failing outright. File deletion happens after the commit, since it cannot be rolled back.
+    """
+    where, params = build_event_selection(**selection)
+
+    with _checkout_connection(autocommit=False) as conn:
+        try:
+            with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+                # Snapshot the selection: ids to delete, plus the files they own.
+                cur.execute(
+                    f"SELECT re.id, re.video_path, re.image_path FROM yard_stats.raw_events re WHERE {where}",
+                    params,
+                )
+                target_rows = cur.fetchall()
+                target_ids = [row["id"] for row in target_rows]
+                files = [p for row in target_rows for p in (row["video_path"], row["image_path"]) if p]
+
+                if not target_ids:
+                    conn.commit()
+                    return {"events": 0, "sightings": 0, "visits": 0, "files_deleted": 0}
+
+                # Visits whose every linked event is in this selection -- computed from the id
+                # list for the same reason as above, so it can't shift as rows are deleted.
+                cur.execute(
+                    """
+                    SELECT v.id, v.video_path FROM yard_stats.visits v
+                    WHERE EXISTS (
+                              SELECT 1 FROM yard_stats.raw_events re
+                              WHERE re.visit_id = v.id AND re.id = ANY(%s)
+                          )
+                      AND NOT EXISTS (
+                              SELECT 1 FROM yard_stats.raw_events re
+                              WHERE re.visit_id = v.id AND NOT (re.id = ANY(%s))
+                          )
+                    """,
+                    (target_ids, target_ids),
+                )
+                orphan_rows = cur.fetchall()
+                orphan_visit_ids = [row["id"] for row in orphan_rows]
+                files += [row["video_path"] for row in orphan_rows if row["video_path"]]
+
+                cur.execute(
+                    "DELETE FROM yard_stats.sightings WHERE raw_event_id = ANY(%s)", (target_ids,),
+                )
+                deleted_sightings = cur.rowcount
+
+                cur.execute("DELETE FROM yard_stats.raw_events WHERE id = ANY(%s)", (target_ids,))
+                deleted_events = cur.rowcount
+
+                deleted_visits = 0
+                if orphan_visit_ids:
+                    # Children first -- neither table has ON DELETE CASCADE.
+                    cur.execute(
+                        "DELETE FROM yard_stats.visit_summaries WHERE visit_id = ANY(%s)",
+                        (orphan_visit_ids,),
+                    )
+                    cur.execute(
+                        "DELETE FROM yard_stats.visit_sightings WHERE visit_id = ANY(%s)",
+                        (orphan_visit_ids,),
+                    )
+                    # Any raw_event still pointing at these visits was NOT part of this selection
+                    # by definition (that is what made the visit an orphan), so there should be
+                    # none -- but decouple defensively rather than trust the subquery, since a
+                    # concurrent insert could have linked one in between.
+                    cur.execute(
+                        "UPDATE yard_stats.raw_events SET visit_id = NULL WHERE visit_id = ANY(%s)",
+                        (orphan_visit_ids,),
+                    )
+                    cur.execute("DELETE FROM yard_stats.visits WHERE id = ANY(%s)", (orphan_visit_ids,))
+                    deleted_visits = cur.rowcount
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+
+    deleted_files = _delete_video_files(files)
+    logger.info(
+        "Selective delete executed (events=%s, sightings=%s, emptied_visits=%s, files=%s)",
+        deleted_events, deleted_sightings, deleted_visits, deleted_files,
+    )
+    return {
+        "events": deleted_events,
+        "sightings": deleted_sightings,
+        "visits": deleted_visits,
+        "files_deleted": deleted_files,
+    }
+
+
 def purge_media_older_than(
     cutoff: datetime,
     execute: bool,

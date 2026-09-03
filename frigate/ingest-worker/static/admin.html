@@ -334,6 +334,120 @@
       <p x-show="purgeResult" x-text="purgeResult"></p>
     </section>
 
+    <!-- ============ Delete events (false alarms) ============ -->
+    <section class="admin-card">
+      <h2>Delete events</h2>
+      <p class="status-line">
+        Permanently remove specific events -- for clearing out false alarms, which is different from
+        the age-based purge above. Narrow with the filters, hit Preview, untick anything you want to
+        keep, then delete. Any visit left with no events at all is removed too.
+      </p>
+      <div class="admin-row">
+        <label>
+          Camera
+          <select x-model="delCamera" @change="delPreview = null">
+            <option value="">All cameras</option>
+            <template x-for="c in cameras" :key="c">
+              <option :value="c" x-text="c"></option>
+            </template>
+          </select>
+        </label>
+        <label>
+          Object type
+          <select x-model="delObjectLabel" @change="delPreview = null">
+            <option value="">All types</option>
+            <template x-for="t in objectTypes" :key="t">
+              <option :value="t" x-text="t"></option>
+            </template>
+          </select>
+        </label>
+        <label>
+          Shorter than (seconds)
+          <input type="number" min="0" step="0.5" x-model="delMaxDuration" style="width:110px"
+                 placeholder="e.g. 10" @change="delPreview = null">
+        </label>
+        <button @click="previewDelete()" :disabled="deleting">Preview</button>
+        <button class="link-button" @click="delAdvanced = !delAdvanced"
+                x-text="delAdvanced ? 'Hide advanced filters' : 'Advanced filters'"></button>
+      </div>
+      <div class="admin-row" x-show="delAdvanced" style="display:none">
+        <label>
+          From
+          <input type="datetime-local" x-model="delStart" @change="delPreview = null">
+        </label>
+        <label>
+          To
+          <input type="datetime-local" x-model="delEnd" @change="delPreview = null">
+        </label>
+        <label>
+          AI status
+          <select x-model="delAiStatus" @change="delPreview = null">
+            <option value="">Any</option>
+            <option value="new">new</option>
+            <option value="processing">processing</option>
+            <option value="retry">retry</option>
+            <option value="failed">failed</option>
+            <option value="done">done</option>
+            <option value="skipped">skipped</option>
+          </select>
+        </label>
+        <label>
+          Search AI analysis
+          <input type="text" x-model="delQ" placeholder="e.g. silver Hyundai"
+                 @keydown.enter="previewDelete()" @change="delPreview = null">
+        </label>
+      </div>
+      <p class="status-line">
+        Repeated re-detections of one parked car are typically only a few seconds each, so
+        "shorter than" is usually the filter that isolates them. At least one filter is required --
+        this never matches everything by default.
+      </p>
+
+      <template x-if="delPreview">
+        <div>
+          <div class="admin-row">
+            <span><strong x-text="delSelectedIds.length"></strong> of <span x-text="delPreview.events"></span> selected for deletion</span>
+            <span x-show="delPreview.visits > 0" x-text="'visits that would be emptied and removed: ' + delPreview.visits"></span>
+            <span x-show="delPreview.sample_truncated" x-text="'showing first ' + delPreview.sample.length + ' -- refine the filters to see the rest'"></span>
+            <button @click="delSelectAll(true)">Select all shown</button>
+            <button @click="delSelectAll(false)">Clear selection</button>
+            <button class="btn-danger" @click="confirmDelete()" :disabled="deleting || delSelectedIds.length === 0">
+              Delete <span x-text="delSelectedIds.length"></span> now
+            </button>
+          </div>
+          <p class="status-line" x-show="delPreview.sample_truncated">
+            Only the events shown below can be deleted in one pass -- deleting them and previewing
+            again picks up the next batch.
+          </p>
+          <div class="grid delete-grid">
+            <template x-for="row in delPreview.sample" :key="row.id">
+              <div class="card" :class="{ 'card-selected': delSelectedIds.includes(row.id) }"
+                   @click="delToggle(row.id)">
+                <img x-show="row.has_image || row.has_video" :src="deleteThumbnailUrl(row.id)" loading="lazy" alt="">
+                <div class="no-image" x-show="!row.has_image && !row.has_video">no media</div>
+                <div class="meta">
+                  <div>
+                    <input type="checkbox" :checked="delSelectedIds.includes(row.id)" @click.stop="delToggle(row.id)">
+                    <strong x-text="row.objects || 'event'"></strong> &mdash; <span x-text="row.camera"></span>
+                  </div>
+                  <div class="ts" x-text="formatTs(row.start_ts) + ' (' + Math.round(row.duration_seconds) + 's)'"></div>
+                  <p class="search-result-description" x-show="row.description" x-text="row.description"></p>
+                </div>
+              </div>
+            </template>
+          </div>
+          <div class="admin-row" x-show="delTotalPages() > 1">
+            <button @click="delPrevPage()" :disabled="delPage === 0 || deleting">&larr; Prev</button>
+            <span x-text="'page ' + (delPage + 1) + ' of ' + delTotalPages()"></span>
+            <button @click="delNextPage()" :disabled="delPage + 1 >= delTotalPages() || deleting">Next &rarr;</button>
+            <span class="status-line" x-show="delSelectedIds.length > delPreview.sample.length"
+                  x-text="delSelectedIds.length + ' selected across pages -- Delete removes all of them, not just this page'"></span>
+          </div>
+        </div>
+      </template>
+      <p x-show="deleteResult" x-text="deleteResult"></p>
+    </section>
+
     <!-- ============ Reports ============ -->
     <section class="admin-card">
       <h2>Reports</h2>
