@@ -204,3 +204,24 @@ def test_ui_redirect_resolves_to_the_right_url_in_every_deployment(requested, ex
 def test_ui_and_admin_pages_still_serve(path):
     status, _, _ = _asgi_get(path)
     assert status == 200, f"{path} returned {status}"
+
+
+# ---- static asset caching ----
+
+@pytest.mark.parametrize("path", ["/ui/", "/ui/admin", "/ui/admin.js", "/ui/app.js", "/ui/style.css"])
+def test_ui_assets_must_be_revalidated(path):
+    # Plain StaticFiles sends etag/last-modified but no Cache-Control, so browsers fall back to
+    # HEURISTIC caching and may reuse a stored copy without asking. That shipped a real breakage:
+    # after an upgrade the browser loaded the new admin.html but reused the OLD admin.js, so the
+    # markup called handlers the cached script didn't define and the page died with
+    # "delOpenPreview is not defined". HTML and its scripts must never be able to drift apart.
+    _, headers, _ = _asgi_get(path)
+    assert headers.get("cache-control") == "no-cache", f"{path} may be served stale from cache"
+
+
+def test_revalidation_is_cheap_not_a_redownload():
+    # no-cache means "revalidate", not "never store" -- an unchanged asset comes back as a bodyless
+    # 304, so the cost is a round trip rather than re-downloading every asset on every page load.
+    _, headers, body = _asgi_get("/ui/admin.js")
+    assert headers.get("etag"), "an ETag is what makes revalidation cheap"
+    assert len(body) > 0

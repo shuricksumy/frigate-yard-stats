@@ -713,7 +713,11 @@ def admin_ui():
     makes /ui/admin (no .html) work. Same unauthenticated-page-plus-client-side-key pattern as
     /ui/index.html -- the page itself carries no data, every fetch() it makes still sends
     X-API-Key and is protected server-side same as any other admin endpoint."""
-    return FileResponse(os.path.join(_STATIC_DIR, "admin.html"))
+    # Same no-cache reasoning as _RevalidatingStaticFiles below: this HTML references admin.js by
+    # name, so serving a stale copy of either half is what produces a broken page after an upgrade.
+    return FileResponse(
+        os.path.join(_STATIC_DIR, "admin.html"), headers={"Cache-Control": "no-cache"},
+    )
 
 
 @app.get("/ui", include_in_schema=False)
@@ -739,5 +743,27 @@ def ui_root_redirect():
     return RedirectResponse(url="ui/", status_code=307)
 
 
+class _RevalidatingStaticFiles(StaticFiles):
+    """StaticFiles that always makes the browser revalidate before reusing a cached asset.
+
+    Plain StaticFiles sends `etag` and `last-modified` but NO `Cache-Control`. With no directive,
+    browsers fall back to HEURISTIC caching -- they may reuse a stored copy for a while without
+    asking the server at all. For this app that produces a specific, confusing failure: after an
+    upgrade the browser loads the new admin.html but reuses the OLD admin.js, so the markup
+    references handlers the cached script doesn't define, and the page dies with
+    "X is not defined" (observed in production after shipping the delete-preview popup).
+
+    `no-cache` does not mean "don't store" -- it means "revalidate before use". Since the ETag is
+    already sent, an unchanged file costs one conditional request answered with a bodyless 304, so
+    the practical cost is a round trip rather than a re-download. That's the right trade for a
+    handful of small assets that must never be a version behind the HTML that references them.
+    """
+
+    async def get_response(self, path: str, scope):
+        response = await super().get_response(path, scope)
+        response.headers.setdefault("Cache-Control", "no-cache")
+        return response
+
+
 if os.path.isdir(_STATIC_DIR):
-    app.mount("/ui", StaticFiles(directory=_STATIC_DIR, html=True), name="ui")
+    app.mount("/ui", _RevalidatingStaticFiles(directory=_STATIC_DIR, html=True), name="ui")
