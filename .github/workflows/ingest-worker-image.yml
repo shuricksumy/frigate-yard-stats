@@ -151,6 +151,7 @@ jobs:
           echo "app_version=${APP_VERSION}" >> "$GITHUB_OUTPUT"
           echo "short_sha=${SHORT_SHA}" >> "$GITHUB_OUTPUT"
           echo "build_date=$(date -u +%m.%Y)" >> "$GITHUB_OUTPUT"
+          echo "refresh_week=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
           {
             echo "tags<<TAGS_EOF"
             echo "${IMAGE}:latest"
@@ -185,5 +186,6 @@ jobs:
             APP_VERSION=${{ steps.meta.outputs.app_version }}
             APP_BUILD_SHA=${{ steps.meta.outputs.short_sha }}
             APP_BUILD_DATE=${{ steps.meta.outputs.build_date }}
+            REFRESH_WEEK=${{ steps.meta.outputs.refresh_week }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
