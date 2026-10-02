@@ -187,5 +187,9 @@ jobs:
             APP_BUILD_SHA=${{ steps.meta.outputs.short_sha }}
             APP_BUILD_DATE=${{ steps.meta.outputs.build_date }}
             REFRESH_WEEK=${{ steps.meta.outputs.refresh_week }}
+          # A release tag or a manual run starts from scratch, so a stale layer
+          # can never reach a versioned image; branch pushes keep the cache for
+          # speed. cache-to still refreshes it either way.
+          no-cache: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/') }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
