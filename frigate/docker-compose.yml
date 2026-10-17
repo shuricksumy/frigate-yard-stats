@@ -202,7 +202,7 @@ services:
     profiles: ["nvr"]
     container_name: frigate
     restart: unless-stopped
-    image: ghcr.io/blakeblackshear/frigate:0.17.2
+    image: ghcr.io/blakeblackshear/frigate:0.18.2
     #pull_policy: always
     shm_size: "600mb" # update for your cameras based on calculation above
     devices:
