@@ -21,6 +21,8 @@ env:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The suite takes ~2 min; a hung test should fail the job, not hold a runner for hours.
+    timeout-minutes: 15
     services:
       postgres:
         # pgvector-enabled, matching docker-compose.yml's postgres-projects image -- schema.sql's
