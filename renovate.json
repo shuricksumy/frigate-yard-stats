@@ -1,12 +1,17 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
   "extends": [
-    "config:recommended"
+    "github>shuricksumy/renovate-config",
+    "github>shuricksumy/renovate-config:no-automerge"
   ],
   "packageRules": [
     {
       "description": "Python is pinned to 3.14 (Dockerfile and CI). 3.15 hung the test suite at ~66%. Change it by hand, never by bot.",
-      "matchPackageNames": ["python", "python-version", "actions/python-versions"],
+      "matchPackageNames": [
+        "python",
+        "python-version",
+        "actions/python-versions"
+      ],
       "enabled": false
     }
   ]
