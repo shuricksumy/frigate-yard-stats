@@ -160,9 +160,18 @@ def _asgi_get(path: str) -> tuple[int, dict, bytes]:
         "client": ("127.0.0.1", 12345), "server": ("testserver", 80),
     }
     messages: list[dict] = []
+    request_sent = False
 
+    # Like a real server: the request body once, then block until the client disconnects (which
+    # never happens here). Answering http.request on every call never yields to the event loop, so
+    # Starlette >= 1.8's FileResponse, which polls receive() for a disconnect while it streams,
+    # spins forever and the test hangs instead of failing.
     async def receive():
-        return {"type": "http.request", "body": b"", "more_body": False}
+        nonlocal request_sent
+        if not request_sent:
+            request_sent = True
+            return {"type": "http.request", "body": b"", "more_body": False}
+        await asyncio.Event().wait()
 
     async def send(message):
         messages.append(message)
