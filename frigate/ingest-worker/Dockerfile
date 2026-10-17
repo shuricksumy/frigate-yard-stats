@@ -1,4 +1,4 @@
-FROM python:3.15-slim
+FROM python:3.14-slim
 # requirements.txt is mostly unpinned, so the apt and pip layers would otherwise
 # be restored from the CI cache until that file changes. CI sets this to the ISO
 # week, so a build picks up new ffmpeg/Debian fixes and package releases weekly.
