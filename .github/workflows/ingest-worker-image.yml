@@ -12,6 +12,11 @@ on:
     paths:
       - "frigate/ingest-worker/**"
       - ".github/workflows/ingest-worker-image.yml"
+  # Renovate and Dependabot merge their own PRs once test and build pass
+  # (required by the main-branch ruleset), so PRs run them too. No paths filter
+  # here: a required check that never starts would leave a PR waiting forever.
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 env:
@@ -121,6 +126,8 @@ jobs:
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
 
       - name: Log in to GHCR
+        # Skipped on pull requests: a PR only needs to prove the image still builds.
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4
         with:
           registry: ${{ env.REGISTRY }}
@@ -176,7 +183,7 @@ jobs:
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
           context: ./frigate/ingest-worker
-          push: true
+          push: ${{ github.event_name != 'pull_request' }}
           # amd64 (the existing NVR/pipeline hosts) plus arm64 (e.g. a Raspberry Pi or other
           # arm64 host) -- Buildx assembles both into one multi-arch manifest under the same
           # tags, so `docker pull`/`docker compose` on either architecture transparently gets
