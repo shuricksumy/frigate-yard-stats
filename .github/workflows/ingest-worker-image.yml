@@ -34,7 +34,7 @@ jobs:
         # CREATE EXTENSION IF NOT EXISTS vector needs the extension actually present in the image,
         # not just SQL to enable it (same class of gap the ffmpeg CI fix addressed: a runtime
         # capability the code now depends on, silently missing from the CI service container).
-        image: pgvector/pgvector:pg16@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a
+        image: pgvector/pgvector:pg16@sha256:0dd3149a06e4579a0d70d8fef9945636cd514005e7237deb27f9b67886f8dc4f
         env:
           POSTGRES_USER: n8n_projects
           POSTGRES_PASSWORD: test
